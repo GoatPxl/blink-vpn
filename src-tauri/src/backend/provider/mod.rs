@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use crate::backend::bootstrap::BootstrapOutputContract;
 use crate::backend::db::{Database, DbError, ProviderRecord};
 use crate::backend::secure_storage::{SecretStoreError, SecureStorage};
 
@@ -24,7 +25,15 @@ pub trait ProviderAdapter: Send + Sync {
     &self,
     token: &str,
     droplet_name: &str,
+    cloud_init_user_data: &str,
   ) -> Result<ProvisionedDroplet, ProviderAdapterError>;
+  fn wait_for_bootstrap_ready(
+    &self,
+    token: &str,
+    droplet_id: u64,
+    endpoint_ip: &str,
+    readiness_marker_path: &str,
+  ) -> Result<BootstrapOutputContract, ProviderAdapterError>;
   fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError>;
 }
 
@@ -75,6 +84,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     &self,
     token: &str,
     droplet_name: &str,
+    cloud_init_user_data: &str,
   ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
     let request = CreateDropletRequest {
       name: droplet_name.to_string(),
@@ -82,6 +92,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
       size: self.config.size.to_string(),
       image: self.config.image.to_string(),
       tags: vec!["goatstare-phase1".to_string()],
+      user_data: Some(cloud_init_user_data.to_string()),
     };
 
     let created = self
@@ -119,6 +130,21 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     })
   }
 
+  fn wait_for_bootstrap_ready(
+    &self,
+    _token: &str,
+    _droplet_id: u64,
+    _endpoint_ip: &str,
+    readiness_marker_path: &str,
+  ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
+    Err(ProviderAdapterError::Unsupported {
+      detail: format!(
+        "Cloud-init readiness marker retrieval from '{}' requires a remote retrieval channel and is not yet available in this phase.",
+        readiness_marker_path
+      ),
+    })
+  }
+
   fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError> {
     self
       .client
@@ -149,6 +175,8 @@ pub enum ProviderAdapterError {
     #[source]
     source: DigitalOceanError,
   },
+  #[error("Provider capability not available yet: {detail}")]
+  Unsupported { detail: String },
 }
 
 #[derive(Debug, Error)]
@@ -188,6 +216,10 @@ impl ProviderRegistry {
     Self {
       digitalocean: Arc::new(adapter),
     }
+  }
+
+  pub fn from_adapter(adapter: Arc<dyn ProviderAdapter>) -> Self {
+    Self { digitalocean: adapter }
   }
 
   pub fn active(&self) -> &dyn ProviderAdapter {
@@ -258,13 +290,33 @@ impl ProviderRegistry {
     secure_storage: &SecureStorage,
     provider_id: &str,
     droplet_name: &str,
+    cloud_init_user_data: &str,
   ) -> Result<ProvisionedDroplet, ProviderFlowError> {
     let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
     self
       .active()
-      .create_droplet(&token, droplet_name)
+      .create_droplet(&token, droplet_name, cloud_init_user_data)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Droplet provisioning through provider adapter failed.".to_string(),
+        source,
+      })
+  }
+
+  pub fn wait_for_provider_bootstrap_ready(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    droplet_id: u64,
+    endpoint_ip: &str,
+    readiness_marker_path: &str,
+  ) -> Result<BootstrapOutputContract, ProviderFlowError> {
+    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
+    self
+      .active()
+      .wait_for_bootstrap_ready(&token, droplet_id, endpoint_ip, readiness_marker_path)
+      .map_err(|source| ProviderFlowError::Adapter {
+        detail: "Bootstrap readiness wait failed in provider adapter.".to_string(),
         source,
       })
   }
@@ -322,6 +374,15 @@ impl ProviderRegistry {
         detail: "token_ref exists in DB but secure storage has no corresponding token entry."
           .to_string(),
       })
+  }
+
+  pub fn resolve_provider_token_for_orchestrator(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+  ) -> Result<String, ProviderFlowError> {
+    self.resolve_provider_token(db, secure_storage, provider_id)
   }
 }
 

@@ -302,6 +302,8 @@ pub struct CreateDropletRequest {
   pub size: String,
   pub image: String,
   pub tags: Vec<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub user_data: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,6 +473,7 @@ mod tests {
       size: DEFAULT_SIZE.to_string(),
       image: DEFAULT_IMAGE.to_string(),
       tags: vec!["phase1".to_string()],
+      user_data: Some("#cloud-config\n".to_string()),
     };
 
     let created = api

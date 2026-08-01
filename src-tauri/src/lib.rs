@@ -37,6 +37,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       commands::system::hello,
       commands::system::register_digitalocean_provider_token,
+      commands::system::create_vpn_node_to_ready,
       commands::system::validate_provider_token,
       commands::system::provision_provider_droplet,
       commands::system::delete_provider_droplet

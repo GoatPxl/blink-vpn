@@ -1,6 +1,7 @@
 use tauri::State;
 
 use crate::backend::Backend;
+use crate::backend::orchestrator::CreateVpnNodeRequest;
 
 #[tauri::command]
 pub fn hello(name: Option<String>, backend: State<'_, Backend>) -> String {
@@ -34,6 +35,7 @@ pub fn provision_provider_droplet(
     .orchestrator
     .provision_droplet_for_provider(
       &backend.provider,
+      &backend.bootstrap,
       &backend.db,
       &backend.secure_storage,
       &provider_id,
@@ -90,5 +92,40 @@ pub fn register_digitalocean_provider_token(
   Ok(format!(
     "Provider registered with token_ref: {}",
     token_ref
+  ))
+}
+
+#[tauri::command]
+pub fn create_vpn_node_to_ready(
+  node_id: String,
+  provider_id: String,
+  node_name: String,
+  region: String,
+  backend: State<'_, Backend>,
+) -> Result<String, String> {
+  let result = backend
+    .orchestrator
+    .create_vpn_node_to_ready(
+      &backend.provider,
+      &backend.bootstrap,
+      &backend.db,
+      &backend.secure_storage,
+      &CreateVpnNodeRequest {
+        node_id,
+        provider_id,
+        node_name,
+        region,
+      },
+    )
+    .map_err(|err| err.to_string())?;
+
+  Ok(format!(
+    "Create node complete: node_id={}, droplet_id={}, endpoint_ip={}, listen_port={}, correlation_id={}, idempotent_reuse={}",
+    result.node_id,
+    result.droplet_id,
+    result.server_endpoint_ip,
+    result.listen_port,
+    result.correlation_id,
+    result.idempotent_reuse
   ))
 }

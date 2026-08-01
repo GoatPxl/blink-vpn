@@ -8,6 +8,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (1, include_str!("../../../migrations/0001_init.sql")),
   (2, include_str!("../../../migrations/0002_indexes.sql")),
   (3, include_str!("../../../migrations/0003_provider_token_ref.sql")),
+  (4, include_str!("../../../migrations/0004_vpn_node_server_key.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +157,7 @@ pub struct VpnNodeRecord {
   pub lifecycle_status: NodeLifecycleStatus,
   pub external_ref: Option<String>,
   pub public_ipv4: Option<String>,
+  pub server_public_key: Option<String>,
   pub error_reason: Option<String>,
   pub created_at: String,
   pub updated_at: String,
@@ -479,7 +481,7 @@ impl Database {
     let mut statement = connection
       .prepare(
         "SELECT id, provider_id, name, region, lifecycle_status, external_ref,
-                public_ipv4, error_reason, created_at, updated_at
+                public_ipv4, server_public_key, error_reason, created_at, updated_at
          FROM vpn_nodes
          ORDER BY created_at ASC",
       )
@@ -516,7 +518,7 @@ impl Database {
     connection
       .query_row(
         "SELECT id, provider_id, name, region, lifecycle_status, external_ref,
-                public_ipv4, error_reason, created_at, updated_at
+                public_ipv4, server_public_key, error_reason, created_at, updated_at
          FROM vpn_nodes
          WHERE id = ?1",
         params![id],
@@ -578,6 +580,43 @@ impl Database {
           .to_string(),
         source,
       })?;
+
+    Ok(())
+  }
+
+  pub fn update_vpn_node_runtime_details(
+    &self,
+    id: &str,
+    external_ref: Option<&str>,
+    public_ipv4: Option<&str>,
+    server_public_key: Option<&str>,
+  ) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let changed = connection
+      .execute(
+        "UPDATE vpn_nodes
+         SET external_ref = ?2,
+             public_ipv4 = ?3,
+             server_public_key = ?4,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1",
+        params![id, external_ref, public_ipv4, server_public_key],
+      )
+      .map_err(|source| DbError::Query {
+        action: "update_vpn_node_runtime_details",
+        detail: "Failed updating node runtime details (external ref / endpoint / server key)."
+          .to_string(),
+        source,
+      })?;
+
+    if changed == 0 {
+      return Err(DbError::NotFound {
+        entity: "vpn_node",
+        id: id.to_string(),
+        detail: "Runtime detail update skipped because no row matched the id."
+          .to_string(),
+      });
+    }
 
     Ok(())
   }
@@ -786,9 +825,10 @@ fn map_vpn_node_row(row: &Row<'_>) -> rusqlite::Result<VpnNodeRecord> {
     lifecycle_status,
     external_ref: row.get(5)?,
     public_ipv4: row.get(6)?,
-    error_reason: row.get(7)?,
-    created_at: row.get(8)?,
-    updated_at: row.get(9)?,
+    server_public_key: row.get(7)?,
+    error_reason: row.get(8)?,
+    created_at: row.get(9)?,
+    updated_at: row.get(10)?,
   })
 }
 
