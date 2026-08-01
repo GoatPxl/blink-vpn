@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import {
   connectTunnel,
   createAndActivateClientTunnel,
@@ -20,7 +19,6 @@ import {
   type VpnNodeRecord,
 } from "@/lib/tauri";
 import { DashboardEmptyState } from "@/components/dashboard-empty-state";
-import { loadOnboardingState } from "@/lib/onboarding-state";
 
 type ToastKind = "info" | "success" | "warning" | "error";
 type AppView = "dashboard" | "nodes" | "health" | "diagnostics" | "settings";
@@ -209,11 +207,9 @@ function PageChrome({ children }: { children: React.ReactNode }) {
 }
 
 export function VpnDashboard() {
-  const router = useRouter();
   const [busyAction, setBusyAction] = useState<DashboardBusyAction>(null);
   const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [onboardingComplete] = useState(() => loadOnboardingState().status === "completed");
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [nodes, setNodes] = useState<VpnNodeRecord[]>([]);
@@ -722,23 +718,7 @@ export function VpnDashboard() {
               <div className="text-xs uppercase tracking-[0.28em]">{recovery ? recovery.title : busyAction ? `Working: ${busyAction}` : "Idle"}</div>
             </div>
 
-            {noServerConfigured ? (
-              <>
-                <DashboardEmptyState />
-                {!onboardingComplete ? null : (
-                  <div className="rounded-[18px] border border-[color:rgba(255,185,95,0.2)] bg-[color:rgba(255,185,95,0.08)] px-5 py-4 text-sm text-[var(--tertiary)]">
-                    Onboarding was completed, but no active server is available. Re-run setup.
-                    <button
-                      type="button"
-                      onClick={() => router.push("/onboarding")}
-                      className="ml-3 rounded-lg border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-1.5 text-xs text-[var(--on-surface)]"
-                    >
-                      Resume Setup
-                    </button>
-                  </div>
-                )}
-              </>
-            ) : null}
+            {noServerConfigured && activeView === "dashboard" ? <DashboardEmptyState /> : null}
 
             {!noServerConfigured && activeView === "dashboard" ? (
               <PageChrome>
@@ -1016,35 +996,6 @@ export function VpnDashboard() {
                   </Card>
                 </div>
               </PageChrome>
-            ) : null}
-
-            {activeView !== "diagnostics" ? (
-              <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-                <Card title="Recovery" description="Suggested next steps after a failed operation.">
-                  {recovery ? (
-                    <div className="rounded-[18px] border border-[color:rgba(255,185,95,0.18)] bg-[color:rgba(255,185,95,0.08)] p-4">
-                      <div className="font-semibold text-[var(--on-surface)]">{recovery.title}</div>
-                      <div className="mt-1 text-sm text-[var(--on-surface-variant)]">{recovery.message}</div>
-                      <div className="mt-2 text-sm text-[var(--tertiary)]">Next: {recovery.nextAction}</div>
-                      <div className="mt-4 flex flex-wrap gap-3">
-                        <Button onClick={() => void loadDashboard()} disabled={busyAction !== null} tone="secondary">Refresh Dashboard</Button>
-                        {(recovery.kind === "provider" || recovery.kind === "database") ? <Button onClick={() => void onValidateToken()} disabled={busyAction !== null} tone="secondary">Validate Token</Button> : null}
-                        {selectedNode ? <Button onClick={() => void onForceCleanupSelectedNode()} disabled={busyAction !== null} tone="danger">{busyAction === "force-cleanup" ? "Cleaning" : "Force Cleanup Node"}</Button> : null}
-                        {(recovery.kind === "wireguard" || recovery.kind === "state") && selectedNode ? <Button onClick={() => void refreshHealth()} disabled={busyAction !== null} tone="secondary">Refresh Health</Button> : null}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">No active recovery issue.</div>
-                  )}
-                </Card>
-
-                <Card title="Diagnostics Snapshot" description="A compact summary is always visible on the support surface.">
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <MetricCard title="Diagnostics" value={diagnostics ? "Ready" : "Pending"} detail={`Export path: ${diagnosticsExportPath}`} tone="primary" />
-                    <MetricCard title="Nodes" value={`${nodes.length}`} detail={`${tunnels.length} tunnel(s) loaded`} tone="secondary" />
-                  </div>
-                </Card>
-              </div>
             ) : null}
 
             <div className={`fixed right-4 top-4 z-50 flex w-[min(92vw,24rem)] flex-col gap-3 ${toasts.length === 0 ? "pointer-events-none" : ""}`}>
