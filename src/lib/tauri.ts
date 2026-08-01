@@ -127,14 +127,14 @@ export async function installWireGuardWithPrerequisites(): Promise<WireGuardInst
 
 export async function registerProviderToken(providerId: string, providerName: string, apiToken: string): Promise<string> {
   return invokeCommand<string>("register_digitalocean_provider_token", {
-    provider_id: providerId,
-    provider_name: providerName,
-    api_token: apiToken,
+    providerId,
+    providerName,
+    apiToken,
   });
 }
 
 export async function validateProviderToken(providerId: string): Promise<string> {
-  return invokeCommand<string>("validate_provider_token", { provider_id: providerId });
+  return invokeCommand<string>("validate_provider_token", { providerId });
 }
 
 export async function createVpnNode(params: {
@@ -144,9 +144,9 @@ export async function createVpnNode(params: {
   region: string;
 }): Promise<string> {
   return invokeCommand<string>("create_vpn_node_to_ready", {
-    node_id: params.nodeId,
-    provider_id: params.providerId,
-    node_name: params.nodeName,
+    nodeId: params.nodeId,
+    providerId: params.providerId,
+    nodeName: params.nodeName,
     region: params.region,
   });
 }
@@ -160,17 +160,17 @@ export async function createAndActivateClientTunnel(params: {
   allowedIps: string[];
 }): Promise<string> {
   return invokeCommand<string>("create_and_activate_client_tunnel", {
-    tunnel_id: params.tunnelId,
-    node_id: params.nodeId,
-    tunnel_name: params.tunnelName,
-    client_address_cidr: params.clientAddressCidr,
-    dns_server: params.dnsServer,
-    allowed_ips: params.allowedIps,
+    tunnelId: params.tunnelId,
+    nodeId: params.nodeId,
+    tunnelName: params.tunnelName,
+    clientAddressCidr: params.clientAddressCidr,
+    dnsServer: params.dnsServer,
+    allowedIps: params.allowedIps,
   });
 }
 
 export async function destroyVpnNode(nodeId: string): Promise<void> {
-  await invokeCommand<void>("destroy_vpn_node", { node_id: nodeId });
+  await invokeCommand<void>("destroy_vpn_node", { nodeId });
 }
 
 export interface ForceCleanupResult {
@@ -183,7 +183,7 @@ export interface ForceCleanupResult {
 }
 
 export async function forceCleanupVpnNode(nodeId: string): Promise<ForceCleanupResult> {
-  return invokeCommand<ForceCleanupResult>("force_cleanup_vpn_node", { node_id: nodeId });
+  return invokeCommand<ForceCleanupResult>("force_cleanup_vpn_node", { nodeId });
 }
 
 export async function listVpnNodes(): Promise<VpnNodeRecord[]> {
@@ -191,21 +191,21 @@ export async function listVpnNodes(): Promise<VpnNodeRecord[]> {
 }
 
 export async function listTunnelsForNode(nodeId: string): Promise<TunnelRecord[]> {
-  return invokeCommand<TunnelRecord[]>("list_tunnels_for_node", { node_id: nodeId });
+  return invokeCommand<TunnelRecord[]>("list_tunnels_for_node", { nodeId });
 }
 
 export async function connectTunnel(nodeId: string, tunnelId: string): Promise<void> {
-  await invokeCommand<void>("connect_tunnel", { node_id: nodeId, tunnel_id: tunnelId });
+  await invokeCommand<void>("connect_tunnel", { nodeId, tunnelId });
 }
 
 export async function disconnectTunnel(nodeId: string, tunnelId: string): Promise<void> {
-  await invokeCommand<void>("disconnect_tunnel", { node_id: nodeId, tunnel_id: tunnelId });
+  await invokeCommand<void>("disconnect_tunnel", { nodeId, tunnelId });
 }
 
 export async function getHealthPanelData(nodeId: string, tunnelId?: string | null): Promise<HealthPanelData> {
   return invokeCommand<HealthPanelData>("get_health_panel_data", {
-    node_id: nodeId,
-    tunnel_id: tunnelId ?? null,
+    nodeId,
+    tunnelId: tunnelId ?? null,
   });
 }
 
