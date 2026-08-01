@@ -6,6 +6,7 @@ import {
   createAndActivateClientTunnel,
   createVpnNode,
   destroyVpnNode,
+  forceCleanupVpnNode,
   exportDiagnosticsBundle,
   getDiagnosticsBundle,
   getHealthPanelData,
@@ -36,11 +37,20 @@ type DashboardBusyAction =
   | "connect-tunnel"
   | "disconnect-tunnel"
   | "destroy-node"
+  | "force-cleanup"
   | "copy-diagnostics"
+  | "export-diagnostics"
   | "refresh-health"
   | null;
 
 type ErrorCategory = "provider" | "database" | "wireguard" | "state" | "unknown";
+
+type RecoveryState = {
+  kind: ErrorCategory;
+  title: string;
+  nextAction: string;
+  message: string;
+};
 
 const REGION_OPTIONS = ["nyc1", "sfo3", "fra1"];
 const DEFAULT_PROVIDER_ID = "provider-1";
@@ -66,28 +76,28 @@ function categorizeError(errorMessage: string): { kind: ErrorCategory; title: st
     return {
       kind: "provider",
       title: "Provider issue",
-      nextAction: "Verify the DigitalOcean token and try again.",
+      nextAction: "Verify the DigitalOcean token, then validate or re-save it before retrying.",
     };
   }
   if (errorMessage.includes("Database operation failed") || errorMessage.includes("was not found")) {
     return {
       kind: "database",
       title: "Local state issue",
-      nextAction: "Refresh the dashboard and confirm the local SQLite state.",
+      nextAction: "Refresh the dashboard. If state is still stale, use Force Cleanup on the affected node.",
     };
   }
   if (errorMessage.includes("WireGuard operation failed") || errorMessage.includes("WireGuard is not installed")) {
     return {
       kind: "wireguard",
       title: "WireGuard issue",
-      nextAction: "Install or repair WireGuard for Windows and retry.",
+      nextAction: "Repair WireGuard for Windows, then use Force Cleanup to remove stale tunnel artifacts.",
     };
   }
   if (errorMessage.includes("Node create flow cannot proceed") || errorMessage.includes("InvalidState")) {
     return {
       kind: "state",
       title: "Lifecycle issue",
-      nextAction: "Resolve the node or tunnel state mismatch and retry.",
+      nextAction: "Use Force Cleanup on the node, then refresh and retry the workflow.",
     };
   }
 
@@ -201,6 +211,7 @@ function Button({
 export function VpnDashboard() {
   const [busyAction, setBusyAction] = useState<DashboardBusyAction>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [nodes, setNodes] = useState<VpnNodeRecord[]>([]);
   const [tunnels, setTunnels] = useState<TunnelRecord[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string>("");
@@ -234,6 +245,7 @@ export function VpnDashboard() {
   function handleError(error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     const classification = categorizeError(message);
+    setRecovery({ ...classification, message });
     pushToast(classification.kind === "unknown" ? "error" : classification.kind === "state" ? "warning" : "error", classification.title, `${message} ${classification.nextAction}`);
     return message;
   }
@@ -244,6 +256,7 @@ export function VpnDashboard() {
       const [loadedNodes, loadedDiagnostics] = await Promise.all([listVpnNodes(), getDiagnosticsBundle()]);
       setNodes(loadedNodes);
       setDiagnostics(loadedDiagnostics);
+      setRecovery(null);
 
       if (!selectedNodeId && loadedNodes.length > 0) {
         setSelectedNodeId(loadedNodes[0].id);
@@ -335,6 +348,7 @@ export function VpnDashboard() {
       setProviderFeedback("Saving token reference locally...");
       const result = await registerProviderToken(providerId, providerName, apiToken);
       setProviderFeedback(result);
+      setRecovery(null);
       pushToast("success", "Token saved", result);
       setApiToken("");
       await loadDashboard();
@@ -351,6 +365,7 @@ export function VpnDashboard() {
     try {
       const result = await validateProviderToken(providerId);
       setProviderFeedback(result);
+      setRecovery(null);
       pushToast("success", "Token validated", result);
     } catch (error) {
       const message = handleError(error);
@@ -370,6 +385,7 @@ export function VpnDashboard() {
         region,
       });
       setNodeFeedback(result);
+      setRecovery(null);
       pushToast("success", "Node created", result);
       setSelectedNodeId(nodeId);
       await loadDashboard();
@@ -401,6 +417,7 @@ export function VpnDashboard() {
           .filter(Boolean),
       });
       setTunnelFeedback(result);
+      setRecovery(null);
       pushToast("success", "Tunnel created", result);
       await loadDashboard();
     } catch (error) {
@@ -415,6 +432,7 @@ export function VpnDashboard() {
     setBusyAction("connect-tunnel");
     try {
       await connectTunnel(tunnel.node_id, tunnel.id);
+      setRecovery(null);
       pushToast("success", "Tunnel connected", `${tunnel.name} is now connected.`);
       await loadDashboard();
       await refreshHealth();
@@ -429,6 +447,7 @@ export function VpnDashboard() {
     setBusyAction("disconnect-tunnel");
     try {
       await disconnectTunnel(tunnel.node_id, tunnel.id);
+      setRecovery(null);
       pushToast("success", "Tunnel disconnected", `${tunnel.name} is now ready.`);
       await loadDashboard();
       await refreshHealth();
@@ -448,10 +467,33 @@ export function VpnDashboard() {
     setBusyAction("destroy-node");
     try {
       await destroyVpnNode(node.id);
+      setRecovery(null);
       pushToast("warning", "Node destroyed", `${node.name} has been removed.`);
       if (selectedNodeId === node.id) {
         setSelectedNodeId("");
       }
+      await loadDashboard();
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function onForceCleanupSelectedNode() {
+    if (!selectedNode) {
+      setNodeFeedback("Select a node before forcing cleanup.");
+      return;
+    }
+
+    setBusyAction("force-cleanup");
+    try {
+      const result = await forceCleanupVpnNode(selectedNode.id);
+      setNodeFeedback(
+        `Cleanup complete: local_tunnels_removed=${result.local_tunnels_removed}, remote_delete=${result.remote_droplet_delete_succeeded}`,
+      );
+      setRecovery(null);
+      pushToast("success", "Force cleanup complete", `Removed ${result.local_tunnels_removed} tunnel(s) for ${selectedNode.name}.`);
       await loadDashboard();
     } catch (error) {
       handleError(error);
@@ -469,6 +511,7 @@ export function VpnDashboard() {
     try {
       const bundleText = JSON.stringify(diagnostics, null, 2);
       await navigator.clipboard.writeText(bundleText);
+      setRecovery(null);
       pushToast("success", "Diagnostics copied", "Redacted diagnostics bundle copied to clipboard.");
     } catch (error) {
       handleError(error);
@@ -482,6 +525,7 @@ export function VpnDashboard() {
     try {
       const path = await exportDiagnosticsBundle();
       setDiagnosticsExportPath(path);
+      setRecovery(null);
       pushToast("success", "Diagnostics exported", path);
     } catch (error) {
       handleError(error);
@@ -822,6 +866,36 @@ export function VpnDashboard() {
             )}
           </Section>
         </div>
+
+        {recovery ? (
+          <Section title="Recovery" description="Suggested next steps after a failed operation.">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-sm font-semibold text-slate-900">{recovery.title}</p>
+              <p className="mt-1 text-sm text-slate-700">{recovery.message}</p>
+              <p className="mt-2 text-sm text-slate-600">Next: {recovery.nextAction}</p>
+              <div className="mt-4 flex flex-wrap gap-3">
+                <Button onClick={() => void loadDashboard()} disabled={busyAction !== null} tone="secondary">
+                  Refresh Dashboard
+                </Button>
+                {(recovery.kind === "provider" || recovery.kind === "database") ? (
+                  <Button onClick={() => void onValidateToken()} disabled={busyAction !== null} tone="secondary">
+                    Validate Token
+                  </Button>
+                ) : null}
+                {selectedNode ? (
+                  <Button onClick={() => void onForceCleanupSelectedNode()} disabled={busyAction !== null} tone="danger">
+                    {busyAction === "force-cleanup" ? "Cleaning..." : "Force Cleanup Node"}
+                  </Button>
+                ) : null}
+                {(recovery.kind === "wireguard" || recovery.kind === "state") && selectedNode ? (
+                  <Button onClick={() => void refreshHealth()} disabled={busyAction !== null} tone="secondary">
+                    Refresh Health
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          </Section>
+        ) : null}
 
         <Section title="Diagnostics" description="Redacted local bundle for support and troubleshooting. Secrets are excluded by design.">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

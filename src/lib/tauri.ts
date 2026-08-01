@@ -144,6 +144,19 @@ export async function destroyVpnNode(nodeId: string): Promise<void> {
   await invokeCommand<void>("destroy_vpn_node", { node_id: nodeId });
 }
 
+export interface ForceCleanupResult {
+  node_id: string;
+  correlation_id: string;
+  local_tunnels_removed: number;
+  remote_droplet_delete_attempted: boolean;
+  remote_droplet_delete_succeeded: boolean;
+  node_record_removed: boolean;
+}
+
+export async function forceCleanupVpnNode(nodeId: string): Promise<ForceCleanupResult> {
+  return invokeCommand<ForceCleanupResult>("force_cleanup_vpn_node", { node_id: nodeId });
+}
+
 export async function listVpnNodes(): Promise<VpnNodeRecord[]> {
   return invokeCommand<VpnNodeRecord[]>("list_vpn_nodes");
 }

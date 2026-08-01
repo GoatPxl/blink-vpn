@@ -46,9 +46,11 @@ pub struct DigitalOceanProviderAdapter {
 
 impl DigitalOceanProviderAdapter {
   pub fn new() -> Result<Self, ProviderAdapterError> {
-    let client = DigitalOceanApiClient::new(
+    let config = DigitalOceanConfig::phase1_defaults();
+    let client = DigitalOceanApiClient::new_with_timeout(
       "https://api.digitalocean.com",
       RetryPolicy::digitalocean_default(),
+      config.request_timeout,
     )
     .map_err(|source| ProviderAdapterError::Api {
       detail: "Unable to initialize DigitalOcean API client.".to_string(),
@@ -57,7 +59,7 @@ impl DigitalOceanProviderAdapter {
 
     Ok(Self {
       client,
-      config: DigitalOceanConfig::phase1_defaults(),
+      config,
     })
   }
 }
@@ -111,6 +113,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
         created.id,
         self.config.poll_interval,
         self.config.poll_max_attempts,
+        self.config.droplet_ready_timeout,
       )
       .map_err(|source| ProviderAdapterError::Api {
         detail: "DigitalOcean droplet did not become active before timeout.".to_string(),

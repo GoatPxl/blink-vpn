@@ -6,6 +6,7 @@ use crate::backend::Backend;
 use crate::backend::logging;
 use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
+  ForceCleanupResult,
 };
 use crate::backend::db::{TunnelRecord, VpnNodeRecord};
 
@@ -149,6 +150,23 @@ pub fn destroy_vpn_node(node_id: String, backend: State<'_, Backend>) -> Result<
   backend
     .orchestrator
     .destroy_vpn_node(
+      &backend.provider,
+      &backend.wireguard,
+      &backend.db,
+      &backend.secure_storage,
+      &node_id,
+    )
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn force_cleanup_vpn_node(
+  node_id: String,
+  backend: State<'_, Backend>,
+) -> Result<ForceCleanupResult, String> {
+  backend
+    .orchestrator
+    .force_cleanup_vpn_node(
       &backend.provider,
       &backend.wireguard,
       &backend.db,

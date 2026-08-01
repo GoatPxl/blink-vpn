@@ -2,6 +2,7 @@ pub mod bootstrap;
 pub mod db;
 pub mod logging;
 pub mod orchestrator;
+pub mod policy;
 pub mod provider;
 pub mod secure_storage;
 pub mod wireguard;
@@ -15,6 +16,7 @@ pub struct Backend {
   pub bootstrap: bootstrap::Bootstrap,
   pub secure_storage: secure_storage::SecureStorage,
   pub wireguard: wireguard::WireGuardManager,
+  pub policy: policy::ReliabilityPolicy,
   pub logger: logging::Logger,
   pub db: db::Database,
 }
@@ -27,6 +29,7 @@ impl Backend {
       bootstrap: bootstrap::Bootstrap::new(),
       secure_storage: secure_storage::SecureStorage::new(),
       wireguard: wireguard::WireGuardManager::new(),
+      policy: policy::ReliabilityPolicy::phase1_defaults(),
       logger: logging::Logger::new(),
       db: db::Database::new(database_path),
     }

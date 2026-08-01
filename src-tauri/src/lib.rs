@@ -76,6 +76,7 @@ pub fn run() {
       commands::system::list_vpn_nodes,
       commands::system::list_tunnels_for_node,
       commands::system::destroy_vpn_node,
+      commands::system::force_cleanup_vpn_node,
       commands::system::create_vpn_node_to_ready,
       commands::system::create_and_activate_client_tunnel,
       commands::system::activate_client_tunnel,

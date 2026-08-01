@@ -59,6 +59,16 @@ pub struct CreateClientTunnelResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ForceCleanupResult {
+  pub node_id: String,
+  pub correlation_id: String,
+  pub local_tunnels_removed: usize,
+  pub remote_droplet_delete_attempted: bool,
+  pub remote_droplet_delete_succeeded: bool,
+  pub node_record_removed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ConnectTunnelRequest {
   pub node_id: String,
   pub tunnel_id: String,
@@ -245,16 +255,32 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     node_id: &str,
   ) -> Result<(), OrchestratorError> {
-    let node = match db.get_vpn_node(node_id).map_err(|source| OrchestratorError::Database {
-      detail: "Failed loading vpn node before destroy flow.".to_string(),
+    let _ = self.force_cleanup_vpn_node(providers, wireguard, db, secure_storage, node_id);
+    Ok(())
+  }
+
+  pub fn force_cleanup_vpn_node(
+    &self,
+    providers: &ProviderRegistry,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    node_id: &str,
+  ) -> Result<ForceCleanupResult, OrchestratorError> {
+    let correlation_id = Uuid::new_v4().to_string();
+    log::warn!(
+      "event=vpn_node.force_cleanup.start correlation_id={} node_id={}",
+      correlation_id,
+      node_id
+    );
+
+    let node = db.get_vpn_node(node_id).map_err(|source| OrchestratorError::Database {
+      detail: "Failed loading vpn node before force cleanup flow.".to_string(),
       source,
-    })? {
-      Some(node) => node,
-      None => return Ok(()),
-    };
+    })?;
 
     let tunnels = db.list_tunnels_for_node(node_id).map_err(|source| OrchestratorError::Database {
-      detail: "Failed listing tunnels before destroy flow.".to_string(),
+      detail: "Failed listing tunnels before force cleanup flow.".to_string(),
       source,
     })?;
 
@@ -263,23 +289,47 @@ impl Orchestrator {
       let _ = wireguard.unregister_tunnel(&tunnel.name);
     }
 
-    if let Some(external_ref) = node.external_ref.as_deref() {
-      if let Ok(droplet_id) = external_ref.parse::<u64>() {
-        if providers
-          .provider_droplet_exists(db, secure_storage, &node.provider_id, droplet_id)
-          .unwrap_or(false)
-        {
-          let _ = providers.delete_provider_droplet(db, secure_storage, &node.provider_id, droplet_id);
-        }
-      }
-    }
-
+    let local_tunnels_removed = tunnels.len();
     for tunnel in tunnels {
       let _ = db.delete_tunnel(&tunnel.id);
     }
 
-    let _ = db.delete_vpn_node(&node.id);
-    Ok(())
+    let mut remote_droplet_delete_attempted = false;
+    let mut remote_droplet_delete_succeeded = false;
+    if let Some(node) = node.as_ref() {
+      if let Some(external_ref) = node.external_ref.as_deref() {
+        if let Ok(droplet_id) = external_ref.parse::<u64>() {
+          remote_droplet_delete_attempted = true;
+          remote_droplet_delete_succeeded = providers
+            .delete_provider_droplet(db, secure_storage, &node.provider_id, droplet_id)
+            .is_ok();
+        }
+      }
+    }
+
+    let node_record_removed = node
+      .as_ref()
+      .map(|record| db.delete_vpn_node(&record.id).is_ok())
+      .unwrap_or(true);
+
+    log::warn!(
+      "event=vpn_node.force_cleanup.completed correlation_id={} node_id={} local_tunnels_removed={} remote_droplet_delete_attempted={} remote_droplet_delete_succeeded={} node_record_removed={}",
+      correlation_id,
+      node_id,
+      local_tunnels_removed,
+      remote_droplet_delete_attempted,
+      remote_droplet_delete_succeeded,
+      node_record_removed
+    );
+
+    Ok(ForceCleanupResult {
+      node_id: node_id.to_string(),
+      correlation_id,
+      local_tunnels_removed,
+      remote_droplet_delete_attempted,
+      remote_droplet_delete_succeeded,
+      node_record_removed,
+    })
   }
 
   pub fn create_vpn_node_to_ready(
@@ -1385,6 +1435,8 @@ mod tests {
   struct MockWireGuardState {
     service_exists: bool,
     service_running: bool,
+    deactivate_calls: usize,
+    unregister_calls: usize,
   }
 
   impl MockWireGuardRunner {
@@ -1393,6 +1445,8 @@ mod tests {
         state: Arc::new(Mutex::new(MockWireGuardState {
           service_exists: true,
           service_running: true,
+          deactivate_calls: 0,
+          unregister_calls: 0,
         })),
       }
     }
@@ -1402,6 +1456,8 @@ mod tests {
         state: Arc::new(Mutex::new(MockWireGuardState {
           service_exists: true,
           service_running: false,
+          deactivate_calls: 0,
+          unregister_calls: 0,
         })),
       }
     }
@@ -1411,6 +1467,8 @@ mod tests {
         state: Arc::new(Mutex::new(MockWireGuardState {
           service_exists: false,
           service_running: false,
+          deactivate_calls: 0,
+          unregister_calls: 0,
         })),
       }
     }
@@ -1483,6 +1541,7 @@ mod tests {
               });
             }
             state.service_running = false;
+            state.deactivate_calls += 1;
             return Ok(CommandOutput {
               stdout: "stopped".to_string(),
               stderr: String::new(),
@@ -1490,6 +1549,17 @@ mod tests {
           }
           _ => {}
         }
+      }
+
+      if program == "wireguard" && args.len() == 2 && args[0] == "/uninstalltunnelservice" {
+        let mut state = self.state.lock().expect("lock must succeed");
+        state.unregister_calls += 1;
+        state.service_exists = false;
+        state.service_running = false;
+        return Ok(CommandOutput {
+          stdout: format!("uninstalled {}", args[1]),
+          stderr: String::new(),
+        });
       }
 
       if program == "wg" && args.len() == 3 && args[0] == "show" && args[2] == "dump" {
@@ -1509,6 +1579,17 @@ mod tests {
         );
         return Ok(CommandOutput {
           stdout: dump,
+          stderr: String::new(),
+        });
+      }
+
+      if program == "wireguard" && args == ["/uninstalltunnelservice", "wg-node-partial"] {
+        let mut state = self.state.lock().expect("lock must succeed");
+        state.unregister_calls += 1;
+        state.service_exists = false;
+        state.service_running = false;
+        return Ok(CommandOutput {
+          stdout: "uninstalled".to_string(),
           stderr: String::new(),
         });
       }
@@ -1807,6 +1888,57 @@ mod tests {
   }
 
   #[test]
+  fn force_cleanup_removes_partial_provisioning_state() {
+    let db = Database::new(test_db_path("force_cleanup_partial"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    db
+      .create_vpn_node("node-partial", "provider-1", "Node Partial", "nyc1")
+      .expect("node should insert");
+    db
+      .transition_vpn_node_status("node-partial", NodeLifecycleStatus::Provisioning, None)
+      .expect("transition should succeed");
+    db
+      .update_vpn_node_runtime_details(
+        "node-partial",
+        Some("42"),
+        Some("203.0.113.5"),
+        None,
+      )
+      .expect("runtime details should persist");
+    db
+      .create_tunnel("tunnel-partial", "node-partial", "wg-node-partial", Some("wg-node-partial"))
+      .expect("tunnel should insert");
+
+    let adapter = Arc::new(MockProviderAdapter::new(false));
+    let provider_state = adapter.state.clone();
+    let providers = ProviderRegistry::from_adapter(adapter);
+    let wireguard_runner = Arc::new(MockWireGuardRunner::stopped());
+    let wireguard = WireGuardManager::with_runner(wireguard_runner.clone());
+
+    let result = Orchestrator::new()
+      .force_cleanup_vpn_node(&providers, &wireguard, &db, &secure_storage, "node-partial")
+      .expect("force cleanup should complete");
+
+    assert_eq!(result.local_tunnels_removed, 1);
+    assert!(result.remote_droplet_delete_attempted);
+    assert!(result.remote_droplet_delete_succeeded);
+    assert!(result.node_record_removed);
+
+    assert!(db.get_vpn_node("node-partial").expect("query should succeed").is_none());
+    assert!(db.get_tunnel("tunnel-partial").expect("query should succeed").is_none());
+
+    let delete_calls = provider_state.lock().expect("lock should work").delete_calls;
+    assert_eq!(delete_calls, 1);
+
+    let wireguard_state = wireguard_runner.state.lock().expect("lock should work");
+    assert_eq!(wireguard_state.deactivate_calls, 1);
+    assert_eq!(wireguard_state.unregister_calls, 1);
+  }
+
+  #[test]
   fn diagnostics_bundle_redacts_provider_token_refs() {
     let db = Database::new(test_db_path("diagnostics_redaction"));
     db.run_migrations().expect("migrations should succeed");
@@ -1830,7 +1962,8 @@ impl OrchestratorError {
       Self::InvalidState { detail, .. } => UserFacingError {
         kind: UserFacingErrorKind::InvalidState,
         message: detail.clone(),
-        next_action: "Resolve lifecycle mismatch and retry the requested action.".to_string(),
+        next_action:
+          "Use Force Cleanup on the affected node, refresh the dashboard, then retry.".to_string(),
       },
       Self::Database { detail, source } => {
         let kind = if matches!(source, DbError::NotFound { .. }) {
@@ -1842,23 +1975,30 @@ impl OrchestratorError {
         UserFacingError {
           kind,
           message: detail.clone(),
-          next_action: "Verify local app data integrity and retry.".to_string(),
+          next_action:
+            "Refresh the dashboard; if the local state still looks stale, use Force Cleanup.".to_string(),
         }
       }
       Self::Provider { detail, .. } => UserFacingError {
         kind: UserFacingErrorKind::Provider,
         message: detail.clone(),
-        next_action: "Verify provider token and droplet state, then retry.".to_string(),
+        next_action:
+          "Validate the provider token, then retry or use Force Cleanup if provisioning was interrupted."
+            .to_string(),
       },
       Self::WireGuard { detail, source } => UserFacingError {
         kind: UserFacingErrorKind::WireGuard,
         message: format!("{detail}: {source}"),
-        next_action: "Ensure WireGuard for Windows is installed and tunnel service exists.".to_string(),
+        next_action:
+          "Repair WireGuard for Windows, then use Force Cleanup to remove stale tunnel artifacts."
+            .to_string(),
       },
       Self::Bootstrap { detail, .. } => UserFacingError {
         kind: UserFacingErrorKind::Unknown,
         message: detail.clone(),
-        next_action: "Retry node creation and inspect bootstrap settings.".to_string(),
+        next_action:
+          "Retry node creation after checking bootstrap settings, or Force Cleanup first if the node already exists."
+            .to_string(),
       },
     }
   }

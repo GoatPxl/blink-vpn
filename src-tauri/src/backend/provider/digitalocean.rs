@@ -1,5 +1,5 @@
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use reqwest::StatusCode;
@@ -19,6 +19,8 @@ pub struct DigitalOceanConfig {
   pub image: &'static str,
   pub poll_interval: Duration,
   pub poll_max_attempts: usize,
+  pub request_timeout: Duration,
+  pub droplet_ready_timeout: Duration,
 }
 
 impl DigitalOceanConfig {
@@ -29,6 +31,8 @@ impl DigitalOceanConfig {
       image: DEFAULT_IMAGE,
       poll_interval: Duration::from_secs(4),
       poll_max_attempts: 60,
+      request_timeout: Duration::from_secs(20),
+      droplet_ready_timeout: Duration::from_secs(240),
     }
   }
 }
@@ -42,8 +46,16 @@ pub struct DigitalOceanApiClient {
 
 impl DigitalOceanApiClient {
   pub fn new(base_url: &str, retry_policy: RetryPolicy) -> Result<Self, DigitalOceanError> {
+    Self::new_with_timeout(base_url, retry_policy, Duration::from_secs(20))
+  }
+
+  pub fn new_with_timeout(
+    base_url: &str,
+    retry_policy: RetryPolicy,
+    request_timeout: Duration,
+  ) -> Result<Self, DigitalOceanError> {
     let http = Client::builder()
-      .timeout(Duration::from_secs(20))
+      .timeout(request_timeout)
       .build()
       .map_err(|source| DigitalOceanError::Transport {
         detail: "Unable to initialize HTTP client for DigitalOcean requests.".to_string(),
@@ -133,8 +145,18 @@ impl DigitalOceanApiClient {
     droplet_id: u64,
     poll_interval: Duration,
     max_attempts: usize,
+    timeout: Duration,
   ) -> Result<Droplet, DigitalOceanError> {
+    let started = Instant::now();
+
     for attempt in 0..max_attempts {
+      if started.elapsed() > timeout {
+        return Err(DigitalOceanError::Timeout {
+          action: "wait_for_droplet_active",
+          detail: "Droplet did not become active before the configured timeout. Reconcile or retry the provisioning flow.".to_string(),
+        });
+      }
+
       let droplet = self.get_droplet(token, droplet_id)?;
       if droplet.status == "active" {
         return Ok(droplet);
@@ -147,9 +169,7 @@ impl DigitalOceanApiClient {
 
     Err(DigitalOceanError::Timeout {
       action: "wait_for_droplet_active",
-      detail:
-        "Droplet did not become active in time. Check DigitalOcean control plane status or retry."
-          .to_string(),
+      detail: "Droplet did not become active before the configured poll limit. Reconcile or retry the provisioning flow.".to_string(),
     })
   }
 
@@ -199,7 +219,7 @@ impl DigitalOceanApiClient {
           return Ok(response);
         }
         Err(error) => {
-          if attempt < self.retry_policy.max_retries && error.is_timeout() {
+          if attempt < self.retry_policy.max_retries && is_retryable_transport_error(&error) {
             last_transport_error = Some(error);
             thread::sleep(self.retry_policy.backoff_for_attempt(attempt));
             continue;
@@ -271,6 +291,10 @@ impl DigitalOceanApiClient {
       ),
     })
   }
+}
+
+fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
+  error.is_timeout() || error.is_connect() || error.is_request()
 }
 
 #[derive(Debug, Error)]
@@ -487,7 +511,13 @@ mod tests {
       .create_droplet("test-token", &request)
       .expect("droplet create should succeed");
     let active = api
-      .wait_for_droplet_active("test-token", created.id, Duration::from_millis(1), 4)
+      .wait_for_droplet_active(
+        "test-token",
+        created.id,
+        Duration::from_millis(1),
+        4,
+        Duration::from_secs(1),
+      )
       .expect("droplet should become active");
     let ip = api
       .extract_public_ipv4(&active)
@@ -497,5 +527,49 @@ mod tests {
     api
       .delete_droplet("test-token", created.id)
       .expect("droplet delete should succeed");
+  }
+
+  #[test]
+  fn retries_transient_connect_failure_then_succeeds() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{
+      atomic::{AtomicUsize, Ordering},
+      Arc,
+    };
+    use std::thread;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let address = listener.local_addr().expect("local addr should exist");
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let request_count_thread = request_count.clone();
+
+    let server = thread::spawn(move || {
+      for stream in listener.incoming().take(2) {
+        let mut stream = stream.expect("incoming connection should exist");
+        let current = request_count_thread.fetch_add(1, Ordering::SeqCst);
+        if current == 0 {
+          continue;
+        }
+
+        let mut buffer = [0_u8; 512];
+        let _ = stream.read(&mut buffer);
+        let body = r#"{"account":{"uuid":"u2","email":"vpn@example.com","status":"active"}}"#;
+        let response = format!(
+          "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+          body.len(),
+          body
+        );
+        stream.write_all(response.as_bytes()).expect("response should write");
+        break;
+      }
+    });
+
+    let api = client(&format!("http://{}", address));
+    let account = api.validate_token("test-token").expect("token should validate after retry");
+    assert_eq!(account.uuid, "u2");
+    assert!(request_count.load(Ordering::SeqCst) >= 2);
+
+    let _ = server.join();
   }
 }
