@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   connectTunnel,
   createAndActivateClientTunnel,
@@ -21,7 +22,7 @@ import {
 import { DashboardEmptyState } from "@/components/dashboard-empty-state";
 
 type ToastKind = "info" | "success" | "warning" | "error";
-type AppView = "dashboard" | "nodes" | "health" | "diagnostics" | "settings";
+export type AppView = "dashboard" | "nodes" | "health" | "diagnostics" | "settings";
 type DashboardBusyAction =
   | "refresh"
   | "save-token"
@@ -64,6 +65,13 @@ const REGION_OPTIONS = ["nyc1", "sfo3", "fra1"];
 const DEFAULT_PROVIDER_ID = "provider-1";
 const DEFAULT_PROVIDER_NAME = "DigitalOcean";
 const DEFAULT_NODE_REGION = "nyc1";
+const VIEW_ROUTE: Record<AppView, string> = {
+  dashboard: "/dashboard",
+  nodes: "/dashboard/nodes",
+  health: "/dashboard/health",
+  diagnostics: "/dashboard/diagnostics",
+  settings: "/dashboard/settings",
+};
 
 function statusBadge(status: string) {
   const normalized = status.toLowerCase();
@@ -110,6 +118,12 @@ function formatHandshakeAge(seconds: number | null | undefined): string {
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
   return `${Math.floor(minutes / 60)}h ago`;
+}
+
+function maskTokenReference(value: string | null | undefined): string {
+  if (!value) return "Not configured";
+  if (value.length <= 12) return value;
+  return `${value.slice(0, 8)}...${value.slice(-4)}`;
 }
 
 function AppIcon({ name, className = "h-4 w-4" }: { name: string; className?: string }) {
@@ -206,9 +220,9 @@ function PageChrome({ children }: { children: React.ReactNode }) {
   return <div className="space-y-6">{children}</div>;
 }
 
-export function VpnDashboard() {
+export function VpnDashboard({ view }: { view: AppView }) {
+  const router = useRouter();
   const [busyAction, setBusyAction] = useState<DashboardBusyAction>(null);
-  const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
@@ -254,6 +268,11 @@ export function VpnDashboard() {
       const [loadedNodes, loadedDiagnostics] = await Promise.all([listVpnNodes(), getDiagnosticsBundle()]);
       setNodes(loadedNodes);
       setDiagnostics(loadedDiagnostics);
+      const configuredProvider = loadedDiagnostics.providers[0] ?? null;
+      if (configuredProvider) {
+        setProviderId(configuredProvider.id);
+        setProviderName(configuredProvider.name);
+      }
       setRecovery(null);
 
       if (!selectedNodeId && loadedNodes.length > 0) setSelectedNodeId(loadedNodes[0].id);
@@ -382,7 +401,7 @@ export function VpnDashboard() {
       setRecovery(null);
       pushToast("success", "Node created", result);
       setSelectedNodeId(nodeId);
-      setActiveView("nodes");
+      navigateToView("nodes");
       await loadDashboard();
     } catch (error) {
       setNodeFeedback(handleError(error));
@@ -516,10 +535,12 @@ export function VpnDashboard() {
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const selectedNodeTunnels = tunnels;
+  const activeView = view;
   const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
   const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
   const canConnect = !!connectedTunnel && connectedTunnel.status.toLowerCase() !== "connected";
   const noServerConfigured = nodes.length === 0;
+  const configuredProvider = diagnostics?.providers.find((provider) => provider.id === providerId) ?? diagnostics?.providers[0] ?? null;
 
   const diagnosticsLogs: LogEntry[] = diagnostics
     ? [
@@ -559,6 +580,11 @@ export function VpnDashboard() {
 
   const heroTone = recovery ? (recovery.kind === "provider" || recovery.kind === "database" ? "tertiary" : "secondary") : busyAction ? "primary" : "secondary";
 
+  function navigateToView(nextView: AppView) {
+    router.push(VIEW_ROUTE[nextView]);
+    setMobileNavOpen(false);
+  }
+
   return (
     <div className="min-h-screen bg-[var(--surface-container-lowest)] text-[var(--on-surface)]">
       <div className="flex min-h-screen">
@@ -588,8 +614,7 @@ export function VpnDashboard() {
                   key={`mobile-${item.id}`}
                   type="button"
                   onClick={() => {
-                    setActiveView(item.id);
-                    setMobileNavOpen(false);
+                    navigateToView(item.id);
                   }}
                   className={`flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-left transition-colors ${active ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)] text-[var(--primary)]" : "border-transparent text-[var(--on-surface-variant)] hover:bg-[color:rgba(255,255,255,0.04)] hover:text-[var(--on-surface)]"}`}
                 >
@@ -625,8 +650,7 @@ export function VpnDashboard() {
                   key={item.id}
                   type="button"
                   onClick={() => {
-                    setActiveView(item.id);
-                    setMobileNavOpen(false);
+                    navigateToView(item.id);
                   }}
                   className={`flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-left transition-colors ${active ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)] text-[var(--primary)]" : "border-transparent text-[var(--on-surface-variant)] hover:bg-[color:rgba(255,255,255,0.04)] hover:text-[var(--on-surface)]"}`}
                 >
@@ -648,7 +672,7 @@ export function VpnDashboard() {
               <span className="text-[11px] uppercase tracking-[0.28em]">Quick Connect</span>
             </div>
             <p className="mt-3 text-sm text-[var(--on-surface)]/90">Connect the active tunnel and refresh the live health state.</p>
-            <button type="button" onClick={() => { setActiveView("dashboard"); setMobileNavOpen(false); }} className="mt-4 inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2.5 text-sm font-medium text-[var(--on-surface)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)]">Open dashboard</button>
+            <button type="button" onClick={() => navigateToView("dashboard")} className="mt-4 inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2.5 text-sm font-medium text-[var(--on-surface)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)]">Open dashboard</button>
           </div>
 
           <div className="mt-auto space-y-2 pt-6 text-[var(--on-surface-variant)]">
@@ -712,8 +736,8 @@ export function VpnDashboard() {
 
             <div className="flex items-center justify-between rounded-[24px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-5 py-3 text-sm text-[var(--on-surface-variant)] shadow-[var(--shadow-elevated)]">
               <div className="flex items-center gap-3">
-                <button type="button" onClick={() => setActiveView("dashboard")} className={`rounded-full px-3 py-1.5 transition-colors ${activeView === "dashboard" ? "bg-[color:rgba(171,199,255,0.12)] text-[var(--primary)]" : "hover:text-[var(--on-surface)]"}`}>Network Stats</button>
-                <button type="button" onClick={() => setActiveView("diagnostics")} className={`rounded-full px-3 py-1.5 transition-colors ${activeView === "diagnostics" ? "bg-[color:rgba(171,199,255,0.12)] text-[var(--primary)]" : "hover:text-[var(--on-surface)]"}`}>Activity Log</button>
+                <button type="button" onClick={() => navigateToView("dashboard")} className={`rounded-full px-3 py-1.5 transition-colors ${activeView === "dashboard" ? "bg-[color:rgba(171,199,255,0.12)] text-[var(--primary)]" : "hover:text-[var(--on-surface)]"}`}>Network Stats</button>
+                <button type="button" onClick={() => navigateToView("diagnostics")} className={`rounded-full px-3 py-1.5 transition-colors ${activeView === "diagnostics" ? "bg-[color:rgba(171,199,255,0.12)] text-[var(--primary)]" : "hover:text-[var(--on-surface)]"}`}>Activity Log</button>
               </div>
               <div className="text-xs uppercase tracking-[0.28em]">{recovery ? recovery.title : busyAction ? `Working: ${busyAction}` : "Idle"}</div>
             </div>
@@ -804,30 +828,69 @@ export function VpnDashboard() {
 
             {activeView === "settings" ? (
               <PageChrome>
-                <div className="mx-auto max-w-[410px] space-y-4">
+                <div className="mx-auto w-full max-w-4xl space-y-4">
                   <div className="text-xs text-[var(--on-surface-variant)]">
                     <span className="inline-flex items-center gap-2"><AppIcon name="settings" className="h-4 w-4" />Settings</span>
                     <span className="mx-2">›</span>
                     <span>Provider Integration</span>
                   </div>
-                  <Card title="DigitalOcean API Token" description="Authenticate to automatically provision and manage VPN nodes across global regions." action={<div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[color:rgba(255,255,255,0.05)]"><AppIcon name="database" className="h-5 w-5 text-[var(--primary)]" /></div>}>
-                    <div className="space-y-5">
-                      <Field label="Personal Access Token">
-                        <div className="relative">
-                          <input value={apiToken} onChange={(event) => setApiToken(event.target.value)} placeholder="dop_v1_..." className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 pr-10 text-[var(--on-surface)] outline-none ring-0 placeholder:text-[var(--on-surface-variant)]/50 focus:border-[color:rgba(171,199,255,0.45)]" />
-                          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[var(--on-surface-variant)]"><AppIcon name="search" className="h-4 w-4" /></span>
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <Card title="Current Provider" description="Saved provider configuration for this device.">
+                      <div className="overflow-hidden rounded-xl border border-[color:var(--outline-variant)]">
+                        <table className="w-full text-sm">
+                          <tbody>
+                            <tr className="border-b border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]">
+                              <th className="w-[42%] px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Provider</th>
+                              <td className="px-4 py-3 text-[var(--on-surface)]">{configuredProvider?.name ?? providerName}</td>
+                            </tr>
+                            <tr className="border-b border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.01)]">
+                              <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Provider ID</th>
+                              <td className="px-4 py-3 font-mono text-[13px] text-[var(--on-surface)]">{configuredProvider?.id ?? providerId}</td>
+                            </tr>
+                            <tr className="border-b border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]">
+                              <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Token Status</th>
+                              <td className="px-4 py-3">
+                                <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${configuredProvider?.token_ref ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>
+                                  {configuredProvider?.token_ref ? "Configured" : "Missing"}
+                                </span>
+                              </td>
+                            </tr>
+                            <tr className="bg-[color:rgba(255,255,255,0.01)]">
+                              <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Stored Token Ref</th>
+                              <td className="px-4 py-3 font-mono text-[13px] text-[var(--on-surface)]">{maskTokenReference(configuredProvider?.token_ref ?? null)}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <p className="mt-3 text-xs text-[var(--on-surface-variant)]">For security, raw API tokens are never retrievable after save.</p>
+                    </Card>
+
+                    <Card title="Update API Token" description="Paste a new DigitalOcean Personal Access Token.">
+                      <div className="space-y-5">
+                        <Field label="Personal Access Token">
+                          <div className="relative">
+                            <input value={apiToken} onChange={(event) => setApiToken(event.target.value)} placeholder="dop_v1_..." className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 pr-10 text-[var(--on-surface)] outline-none ring-0 placeholder:text-[var(--on-surface-variant)]/50 focus:border-[color:rgba(171,199,255,0.45)]" />
+                            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[var(--on-surface-variant)]"><AppIcon name="search" className="h-4 w-4" /></span>
+                          </div>
+                        </Field>
+                        <div className="flex items-center justify-between text-xs text-[var(--on-surface-variant)]">
+                          <a href="#" className="text-[var(--primary)]">How to create a DO token</a>
+                          <span>{providerFeedback}</span>
                         </div>
-                      </Field>
-                      <div className="flex items-center justify-between text-xs text-[var(--on-surface-variant)]">
-                        <a href="#" className="text-[var(--primary)]">How to create a DO token</a>
-                        <span>{providerFeedback}</span>
+                        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                          <button type="button" onClick={() => navigateToView("dashboard")} className="text-sm text-[var(--on-surface)]">Cancel</button>
+                          <div className="flex items-center gap-2">
+                            <Button tone="secondary" onClick={onSaveToken} disabled={busyAction !== null || !apiToken.trim()}>
+                              {busyAction === "save-token" ? "Saving" : "Save Token"}
+                            </Button>
+                            <Button onClick={onValidateToken} disabled={busyAction !== null || !(configuredProvider?.token_ref || apiToken.trim())}>
+                              {busyAction === "validate-token" ? "Validating" : "Validate Token"} <span aria-hidden="true">→</span>
+                            </Button>
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex items-center justify-between pt-4">
-                        <button type="button" onClick={() => setActiveView("dashboard")} className="text-sm text-[var(--on-surface)]">Cancel</button>
-                        <Button onClick={onValidateToken} disabled={busyAction !== null}>Validate Token <span aria-hidden="true">→</span></Button>
-                      </div>
-                    </div>
-                  </Card>
+                    </Card>
+                  </div>
                   <div className="text-center text-xs text-[var(--on-surface-variant)]">Tokens are encrypted at rest and never transmitted to our servers.</div>
                 </div>
               </PageChrome>
@@ -910,7 +973,7 @@ export function VpnDashboard() {
                       <div className="text-sm font-semibold text-[var(--on-surface)]">Create Node</div>
                       <div className="text-xs text-[var(--on-surface-variant)]">Use the selected provider and region values to provision a node.</div>
                     </div>
-                    <Button tone="secondary" onClick={() => setActiveView("settings")}>Use Token Settings</Button>
+                    <Button tone="secondary" onClick={() => navigateToView("settings")}>Use Token Settings</Button>
                   </div>
                   <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                     <Field label="Node ID"><input value={nodeId} onChange={(event) => setNodeId(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0" /></Field>

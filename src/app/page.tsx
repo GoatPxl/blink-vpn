@@ -1,5 +1,5 @@
-import { VpnDashboard } from "@/components/vpn-dashboard";
+import { redirect } from "next/navigation";
 
 export default function Home() {
-  return <VpnDashboard />;
+  redirect("/dashboard");
 }
