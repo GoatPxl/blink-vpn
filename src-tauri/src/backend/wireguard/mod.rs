@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,15 +35,37 @@ impl WireGuardManager {
       });
     }
 
-    self
-      .runner
-      .run("wg", &["--version"], None)
-      .map_err(|source| map_install_error(source, "wg"))?;
+    let wireguard_program = self.resolve_wireguard_program()?;
 
-    self
+    let wg_program = self.resolve_wg_program()?;
+    let wg_probe = self
       .runner
-      .run("wireguard", &["/help"], None)
-      .map_err(|source| map_install_error(source, "wireguard"))?;
+      .run(&wg_program, &["-v"], None)
+      .or_else(|_| self.runner.run(&wg_program, &["--version"], None));
+
+    if !command_probe_indicates_presence(&wg_probe) {
+      let source = wg_probe
+        .err()
+        .unwrap_or(CommandExecError::NotFound {
+          program: wg_program.clone(),
+          detail: "WireGuard command probe failed.".to_string(),
+        });
+      return Err(map_install_error(source, &wg_program));
+    }
+
+    let wireguard_probe = self
+      .runner
+      .run(&wireguard_program, &["/help"], None);
+
+    if !command_probe_indicates_presence(&wireguard_probe) {
+      let source = wireguard_probe
+        .err()
+        .unwrap_or(CommandExecError::NotFound {
+          program: wireguard_program.clone(),
+          detail: "WireGuard command probe failed.".to_string(),
+        });
+      return Err(map_install_error(source, &wireguard_program));
+    }
 
     Ok(())
   }
@@ -60,20 +83,33 @@ impl WireGuardManager {
       };
     }
 
-    let wg_check = self.runner.run("wg", &["--version"], None);
-    let wireguard_cli_check = self.runner.run("wireguard", &["/help"], None);
+    let wg_program = self.resolve_wg_program().ok();
+    let wireguard_program = self.resolve_wireguard_program().ok();
+
+    let wg_check = wg_program.as_ref().and_then(|program| {
+      self
+        .runner
+        .run(program, &["-v"], None)
+        .or_else(|_| self.runner.run(program, &["--version"], None))
+        .ok()
+    });
+    let wireguard_probe = wireguard_program
+      .as_ref()
+      .map(|program| self.runner.run(program, &["/help"], None));
     let service_check = self
       .runner
       .run("sc", &["query", "WireGuardManager"], None);
 
-    let executable_found = wg_check.is_ok() && wireguard_cli_check.is_ok();
+    let executable_found = wg_check.is_some()
+      && wireguard_probe
+        .as_ref()
+        .is_some_and(command_probe_indicates_presence);
     let service_available = service_check.is_ok();
     let installed = executable_found;
 
-    let version = match &wg_check {
-      Ok(output) => parse_wg_version_output(&output.stdout),
-      Err(_) => None,
-    };
+    let version = wg_check.and_then(|output| {
+      parse_wg_version_output(&output.stdout).or_else(|| parse_wg_version_output(&output.stderr))
+    });
 
     let (message, action_guidance) = if installed && service_available {
       (
@@ -104,12 +140,29 @@ impl WireGuardManager {
     }
   }
 
+  fn resolve_wg_program(&self) -> Result<String, WireGuardError> {
+    self.resolve_program("wg")
+  }
+
+  fn resolve_wireguard_program(&self) -> Result<String, WireGuardError> {
+    self.resolve_program("wireguard")
+  }
+
+  fn resolve_program(&self, command_name: &str) -> Result<String, WireGuardError> {
+    if let Some(path) = resolve_wireguard_command_path(command_name) {
+      return Ok(path.to_string_lossy().to_string());
+    }
+
+    Ok(command_name.to_string())
+  }
+
   pub fn generate_client_keypair(&self) -> Result<ClientKeyPair, WireGuardError> {
     self.ensure_installed()?;
+    let wg_program = self.resolve_wg_program()?;
 
     let private_out = self
       .runner
-      .run("wg", &["genkey"], None)
+      .run(&wg_program, &["genkey"], None)
       .map_err(|source| WireGuardError::Command {
         command: "wg genkey".to_string(),
         detail: "WireGuard key generation failed locally.".to_string(),
@@ -125,7 +178,7 @@ impl WireGuardManager {
 
     let public_out = self
       .runner
-      .run("wg", &["pubkey"], Some(&private_key))
+      .run(&wg_program, &["pubkey"], Some(&private_key))
       .map_err(|source| WireGuardError::Command {
         command: "wg pubkey".to_string(),
         detail: "WireGuard public key derivation failed locally.".to_string(),
@@ -147,6 +200,7 @@ impl WireGuardManager {
 
   pub fn import_tunnel(&self, tunnel_name: &str, config_text: &str) -> Result<(), WireGuardError> {
     self.ensure_installed()?;
+    let wireguard_program = self.resolve_wireguard_program()?;
     validate_tunnel_name(tunnel_name)?;
 
     let mut file_path = std::env::temp_dir();
@@ -169,7 +223,7 @@ impl WireGuardManager {
     let path_arg = file_path.as_os_str().to_string_lossy().to_string();
     let import_result = self
       .runner
-      .run("wireguard", &["/installtunnelservice", &path_arg], None)
+      .run(&wireguard_program, &["/installtunnelservice", &path_arg], None)
       .map_err(|source| WireGuardError::Command {
         command: "wireguard /installtunnelservice <config>".to_string(),
         detail: "Could not register tunnel service in WireGuard for Windows.".to_string(),
@@ -235,11 +289,12 @@ impl WireGuardManager {
 
   pub fn unregister_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
     self.ensure_installed()?;
+    let wireguard_program = self.resolve_wireguard_program()?;
     validate_tunnel_name(tunnel_name)?;
 
     self
       .runner
-      .run("wireguard", &["/uninstalltunnelservice", tunnel_name], None)
+      .run(&wireguard_program, &["/uninstalltunnelservice", tunnel_name], None)
       .map_err(|source| WireGuardError::Command {
         command: format!("wireguard /uninstalltunnelservice {tunnel_name}"),
         detail: "Could not unregister WireGuard tunnel service.".to_string(),
@@ -251,6 +306,7 @@ impl WireGuardManager {
 
   pub fn read_tunnel_status(&self, tunnel_name: &str) -> Result<TunnelRuntimeStatus, WireGuardError> {
     self.ensure_installed()?;
+    let wg_program = self.resolve_wg_program()?;
     validate_tunnel_name(tunnel_name)?;
 
     let service_name = wireguard_service_name(tunnel_name);
@@ -263,7 +319,7 @@ impl WireGuardManager {
 
     let dump_out = self
       .runner
-      .run("wg", &["show", tunnel_name, "dump"], None)
+      .run(&wg_program, &["show", tunnel_name, "dump"], None)
       .map_err(|source| WireGuardError::Command {
         command: format!("wg show {tunnel_name} dump"),
         detail: "Could not read WireGuard tunnel peer stats.".to_string(),
@@ -372,7 +428,11 @@ impl CommandRunner for ProcessCommandRunner {
     args: &[&str],
     stdin: Option<&str>,
   ) -> Result<CommandOutput, CommandExecError> {
-    let mut command = Command::new(program);
+    let resolved_program = resolve_wireguard_command_path(program)
+      .map(|path| path.to_string_lossy().to_string())
+      .unwrap_or_else(|| program.to_string());
+
+    let mut command = Command::new(&resolved_program);
     command.args(args);
 
     if stdin.is_some() {
@@ -386,12 +446,12 @@ impl CommandRunner for ProcessCommandRunner {
       .spawn()
       .map_err(|source| match source.kind() {
         std::io::ErrorKind::NotFound => CommandExecError::NotFound {
-          program: program.to_string(),
-          detail: format!("Command '{program}' was not found in PATH."),
+          program: resolved_program.to_string(),
+          detail: format!("Command '{}' was not found in PATH.", resolved_program),
         },
         _ => CommandExecError::Spawn {
-          program: program.to_string(),
-          detail: format!("Could not start command '{program}'."),
+          program: resolved_program.to_string(),
+          detail: format!("Could not start command '{}'.", resolved_program),
           source,
         },
       })?;
@@ -401,7 +461,7 @@ impl CommandRunner for ProcessCommandRunner {
         pipe
           .write_all(input.as_bytes())
           .map_err(|source| CommandExecError::Io {
-            program: program.to_string(),
+            program: resolved_program.to_string(),
             detail: "Could not write stdin to command process.".to_string(),
             source,
           })?;
@@ -409,25 +469,25 @@ impl CommandRunner for ProcessCommandRunner {
     }
 
     let output = child.wait_with_output().map_err(|source| CommandExecError::Io {
-      program: program.to_string(),
+      program: resolved_program.to_string(),
       detail: "Could not collect command output.".to_string(),
       source,
     })?;
 
     let stdout = String::from_utf8(output.stdout).map_err(|source| CommandExecError::Decode {
-      program: program.to_string(),
+      program: resolved_program.to_string(),
       detail: "Command stdout was not valid UTF-8.".to_string(),
       source,
     })?;
     let stderr = String::from_utf8(output.stderr).map_err(|source| CommandExecError::Decode {
-      program: program.to_string(),
+      program: resolved_program.to_string(),
       detail: "Command stderr was not valid UTF-8.".to_string(),
       source,
     })?;
 
     if !output.status.success() {
       return Err(CommandExecError::NonZeroExit {
-        program: program.to_string(),
+        program: resolved_program.to_string(),
         code: output.status.code(),
         detail: format_nonzero_detail(&stderr),
       });
@@ -666,6 +726,44 @@ fn validate_tunnel_name(tunnel_name: &str) -> Result<(), WireGuardError> {
   })
 }
 
+fn resolve_wireguard_command_path(program: &str) -> Option<PathBuf> {
+  if !cfg!(target_os = "windows") {
+    return None;
+  }
+
+  if program != "wg" && program != "wireguard" {
+    return None;
+  }
+
+  if let Some(in_path) = find_executable_in_path(program) {
+    return Some(in_path);
+  }
+
+  let mut default_path = PathBuf::from(r"C:\Program Files\WireGuard");
+  default_path.push(format!("{program}.exe"));
+  if default_path.is_file() {
+    return Some(default_path);
+  }
+
+  None
+}
+
+fn find_executable_in_path(program: &str) -> Option<PathBuf> {
+  let path_os = std::env::var_os("PATH")?;
+  for segment in std::env::split_paths(&path_os) {
+    let candidate_exe = segment.join(format!("{program}.exe"));
+    if candidate_exe.is_file() {
+      return Some(candidate_exe);
+    }
+
+    let candidate_plain = segment.join(program);
+    if candidate_plain.is_file() {
+      return Some(candidate_plain);
+    }
+  }
+
+  None
+}
 fn parse_wg_version_output(raw: &str) -> Option<String> {
   let trimmed = raw.trim();
   if trimmed.is_empty() {
@@ -678,6 +776,17 @@ fn parse_wg_version_output(raw: &str) -> Option<String> {
   }
 
   Some(first_line.to_string())
+}
+
+fn command_probe_indicates_presence(result: &Result<CommandOutput, CommandExecError>) -> bool {
+  match result {
+    Ok(_) => true,
+    Err(CommandExecError::NonZeroExit { .. }) => true,
+    Err(CommandExecError::Decode { .. }) => true,
+    Err(CommandExecError::NotFound { .. }) => false,
+    Err(CommandExecError::Spawn { .. }) => false,
+    Err(CommandExecError::Io { .. }) => false,
+  }
 }
 
 fn map_install_error(source: CommandExecError, command: &str) -> WireGuardError {
