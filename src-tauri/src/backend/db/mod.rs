@@ -67,7 +67,7 @@ impl Display for NodeLifecycleStatus {
 impl TryFrom<&str> for NodeLifecycleStatus {
   type Error = DbError;
 
-  fn try_from(value: &str) -> Result<Self, Self::Error> {
+  fn try_from(value: &str) -> Result<Self, DbError> {
     match value {
       "new" => Ok(Self::New),
       "provisioning" => Ok(Self::Provisioning),
@@ -118,7 +118,7 @@ impl Display for TunnelStatus {
 impl TryFrom<&str> for TunnelStatus {
   type Error = DbError;
 
-  fn try_from(value: &str) -> Result<Self, Self::Error> {
+  fn try_from(value: &str) -> Result<Self, DbError> {
     match value {
       "new" => Ok(Self::New),
       "ready" => Ok(Self::Ready),
@@ -240,7 +240,7 @@ impl Database {
   }
 
   pub fn run_migrations(&self) -> Result<(), DbError> {
-    let mut connection = self.open_connection()?;
+    let connection = self.open_connection()?;
     connection
       .execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -275,23 +275,9 @@ impl Database {
         continue;
       }
 
-      let tx = connection.transaction().map_err(|source| DbError::Migration {
-        version: *version,
-        detail: "Could not start migration transaction. Check for DB locks by other processes."
-          .to_string(),
-        source,
-      })?;
-
-      tx.execute_batch(sql).map_err(|source| DbError::Migration {
+      connection.execute_batch(sql).map_err(|source| DbError::Migration {
         version: *version,
         detail: "Migration SQL failed. Review migration syntax and existing schema state."
-          .to_string(),
-        source,
-      })?;
-
-      tx.commit().map_err(|source| DbError::Migration {
-        version: *version,
-        detail: "Could not commit migration transaction. Retry after ensuring DB is not locked."
           .to_string(),
         source,
       })?;

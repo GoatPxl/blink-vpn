@@ -1,11 +1,11 @@
 mod backend;
 mod commands;
 
+use std::path::PathBuf;
+
 use tauri::Manager;
 
 pub fn run() {
-  let backend = backend::Backend::new();
-
   tauri::Builder::default()
     .setup(move |app| {
       if cfg!(debug_assertions) {
@@ -16,9 +16,20 @@ pub fn run() {
         )?;
       }
 
+      let app_data_dir = app.path().app_data_dir().unwrap_or_else(|err| {
+        log::warn!("Unable to resolve app data directory: {err}");
+        PathBuf::from(".")
+      });
+
+      std::fs::create_dir_all(&app_data_dir)?;
+      let database_path = app_data_dir.join("goatstare_phase1.sqlite3");
+      let backend = backend::Backend::new(database_path);
+
       if let Err(err) = backend.bootstrap.validate_environment() {
         log::warn!("bootstrap validation warning: {err}");
       }
+
+      backend.db.run_migrations()?;
 
       app.manage(backend.clone());
       Ok(())
