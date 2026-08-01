@@ -246,6 +246,25 @@ impl ProviderRegistry {
     provider_name: &str,
     api_token: &str,
   ) -> Result<ProviderRecord, ProviderFlowError> {
+    self.upsert_digitalocean_provider_with_token(db, secure_storage, provider_id, provider_name, api_token)
+  }
+
+  pub fn upsert_digitalocean_provider_with_token(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    provider_name: &str,
+    api_token: &str,
+  ) -> Result<ProviderRecord, ProviderFlowError> {
+    let existing = db
+      .get_provider(provider_id)
+      .map_err(|source| ProviderFlowError::Database {
+        detail: "Failed to inspect provider before token upsert.".to_string(),
+        source,
+      })?;
+    let previous_token_ref = existing.as_ref().and_then(|record| record.token_ref.clone());
+
     let token_ref = secure_storage
       .store_digitalocean_api_token(provider_id, api_token)
       .map_err(|source| ProviderFlowError::SecretStore {
@@ -254,18 +273,32 @@ impl ProviderRegistry {
         source,
       })?;
 
-    db
-      .create_provider(
+    let update_result = match existing {
+      Some(_) => db.update_provider(
         provider_id,
         provider_name,
         self.active().provider_name(),
         Some(&token_ref),
-      )
-      .map_err(|source| ProviderFlowError::Database {
-        detail: "Failed to create provider row with token reference only."
-          .to_string(),
+      ),
+      None => db.create_provider(
+        provider_id,
+        provider_name,
+        self.active().provider_name(),
+        Some(&token_ref),
+      ),
+    };
+
+    if let Err(source) = update_result {
+      let _ = secure_storage.delete_digitalocean_api_token(&token_ref);
+      return Err(ProviderFlowError::Database {
+        detail: "Failed to persist provider row with updated token reference.".to_string(),
         source,
-      })?;
+      });
+    }
+
+    if let Some(previous_token_ref) = previous_token_ref {
+      let _ = secure_storage.delete_digitalocean_api_token(&previous_token_ref);
+    }
 
     db
       .get_provider(provider_id)
@@ -276,7 +309,7 @@ impl ProviderRegistry {
       })?
       .ok_or_else(|| ProviderFlowError::MissingPersistedProvider {
         provider_id: provider_id.to_string(),
-        detail: "Expected provider row to exist after create call.".to_string(),
+        detail: "Expected provider row to exist after upsert call.".to_string(),
       })
   }
 

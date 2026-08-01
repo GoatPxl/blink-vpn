@@ -1,9 +1,32 @@
+use serde::Serialize;
 use tauri::State;
 
 use crate::backend::Backend;
 use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
 };
+use crate::backend::db::{TunnelRecord, VpnNodeRecord};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthPanelData {
+  pub node_id: String,
+  pub tunnel_id: Option<String>,
+  pub endpoint_ip: Option<String>,
+  pub handshake_age_seconds: Option<u64>,
+  pub rx_bytes: Option<u64>,
+  pub tx_bytes: Option<u64>,
+  pub external_ipv4: Option<String>,
+  pub tunnel_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticsBundleResponse {
+  pub generated_at: String,
+  pub providers: Vec<crate::backend::db::ProviderRecord>,
+  pub nodes: Vec<VpnNodeRecord>,
+  pub tunnels: Vec<TunnelRecord>,
+  pub redacted_notes: Vec<String>,
+}
 
 #[tauri::command]
 pub fn hello(name: Option<String>, backend: State<'_, Backend>) -> String {
@@ -81,7 +104,7 @@ pub fn register_digitalocean_provider_token(
 ) -> Result<String, String> {
   let provider = backend
     .provider
-    .create_digitalocean_provider_with_token(
+    .upsert_digitalocean_provider_with_token(
       &backend.db,
       &backend.secure_storage,
       &provider_id,
@@ -98,6 +121,39 @@ pub fn register_digitalocean_provider_token(
     "Provider registered with token_ref: {}",
     token_ref
   ))
+}
+
+#[tauri::command]
+pub fn list_vpn_nodes(backend: State<'_, Backend>) -> Result<Vec<VpnNodeRecord>, String> {
+  backend
+    .orchestrator
+    .list_nodes(&backend.db)
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn list_tunnels_for_node(
+  node_id: String,
+  backend: State<'_, Backend>,
+) -> Result<Vec<TunnelRecord>, String> {
+  backend
+    .orchestrator
+    .list_tunnels_for_node(&backend.db, &node_id)
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn destroy_vpn_node(node_id: String, backend: State<'_, Backend>) -> Result<(), String> {
+  backend
+    .orchestrator
+    .destroy_vpn_node(
+      &backend.provider,
+      &backend.wireguard,
+      &backend.db,
+      &backend.secure_storage,
+      &node_id,
+    )
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -224,6 +280,45 @@ pub fn connect_tunnel(
       format!("{} Next: {}", user_error.message, user_error.next_action)
     })
 }
+
+  #[tauri::command]
+  pub fn get_health_panel_data(
+    node_id: String,
+    tunnel_id: Option<String>,
+    backend: State<'_, Backend>,
+  ) -> Result<HealthPanelData, String> {
+    let summary = backend
+      .orchestrator
+      .get_health_summary(&backend.wireguard, &backend.db, &node_id, tunnel_id.as_deref())
+      .map_err(|err| err.to_string())?;
+
+    Ok(HealthPanelData {
+      node_id: summary.node_id,
+      tunnel_id: summary.tunnel_id,
+      endpoint_ip: summary.endpoint_ip,
+      handshake_age_seconds: summary.handshake_age_seconds,
+      rx_bytes: summary.rx_bytes,
+      tx_bytes: summary.tx_bytes,
+      external_ipv4: summary.external_ipv4,
+      tunnel_status: summary.tunnel_status.map(|status| status.to_string()),
+    })
+  }
+
+  #[tauri::command]
+  pub fn get_diagnostics_bundle(backend: State<'_, Backend>) -> Result<DiagnosticsBundleResponse, String> {
+    let bundle = backend
+      .orchestrator
+      .build_diagnostics_bundle(&backend.db)
+      .map_err(|err| err.to_string())?;
+
+    Ok(DiagnosticsBundleResponse {
+      generated_at: bundle.generated_at,
+      providers: bundle.providers,
+      nodes: bundle.nodes,
+      tunnels: bundle.tunnels,
+      redacted_notes: bundle.redacted_notes,
+    })
+  }
 
 #[tauri::command]
 pub fn disconnect_tunnel(

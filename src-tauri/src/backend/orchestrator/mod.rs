@@ -1,5 +1,6 @@
 use thiserror::Error;
 use uuid::Uuid;
+use serde::Serialize;
 
 use crate::backend::bootstrap::{
   Bootstrap, BootstrapError, BootstrapParams, DEFAULT_CLIENT_CIDR, DEFAULT_INTERFACE_NAME,
@@ -19,7 +20,7 @@ use crate::backend::wireguard::{
 #[derive(Clone)]
 pub struct Orchestrator;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CreateVpnNodeRequest {
   pub node_id: String,
   pub provider_id: String,
@@ -27,7 +28,7 @@ pub struct CreateVpnNodeRequest {
   pub region: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CreateVpnNodeResult {
   pub node_id: String,
   pub status: NodeLifecycleStatus,
@@ -39,7 +40,7 @@ pub struct CreateVpnNodeResult {
   pub idempotent_reuse: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CreateClientTunnelRequest {
   pub tunnel_id: String,
   pub node_id: String,
@@ -49,26 +50,26 @@ pub struct CreateClientTunnelRequest {
   pub allowed_ips: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CreateClientTunnelResult {
   pub tunnel_id: String,
   pub tunnel_name: String,
   pub client_public_key: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ConnectTunnelRequest {
   pub node_id: String,
   pub tunnel_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DisconnectTunnelRequest {
   pub node_id: String,
   pub tunnel_id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ReconcileIssueKind {
   StaleTunnelStatusRepaired,
   MissingDroplet,
@@ -78,7 +79,7 @@ pub enum ReconcileIssueKind {
   ProviderCheckFailed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReconcileIssue {
   pub kind: ReconcileIssueKind,
   pub node_id: Option<String>,
@@ -87,12 +88,12 @@ pub struct ReconcileIssue {
   pub detail: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ReconcileReport {
   pub issues: Vec<ReconcileIssue>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum UserFacingErrorKind {
   InvalidState,
   MissingResource,
@@ -102,11 +103,32 @@ pub enum UserFacingErrorKind {
   Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UserFacingError {
   pub kind: UserFacingErrorKind,
   pub message: String,
   pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthSummary {
+  pub node_id: String,
+  pub tunnel_id: Option<String>,
+  pub endpoint_ip: Option<String>,
+  pub handshake_age_seconds: Option<u64>,
+  pub rx_bytes: Option<u64>,
+  pub tx_bytes: Option<u64>,
+  pub external_ipv4: Option<String>,
+  pub tunnel_status: Option<TunnelStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticsBundle {
+  pub generated_at: String,
+  pub providers: Vec<crate::backend::db::ProviderRecord>,
+  pub nodes: Vec<crate::backend::db::VpnNodeRecord>,
+  pub tunnels: Vec<crate::backend::db::TunnelRecord>,
+  pub redacted_notes: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -146,6 +168,20 @@ impl Orchestrator {
 
   pub fn status(&self) -> &'static str {
     "idle"
+  }
+
+  pub fn list_nodes(&self, db: &Database) -> Result<Vec<crate::backend::db::VpnNodeRecord>, OrchestratorError> {
+    db.list_vpn_nodes().map_err(|source| OrchestratorError::Database {
+      detail: "Failed listing vpn nodes.".to_string(),
+      source,
+    })
+  }
+
+  pub fn list_tunnels_for_node(&self, db: &Database, node_id: &str) -> Result<Vec<crate::backend::db::TunnelRecord>, OrchestratorError> {
+    db.list_tunnels_for_node(node_id).map_err(|source| OrchestratorError::Database {
+      detail: "Failed listing tunnels for node.".to_string(),
+      source,
+    })
   }
 
   pub fn provision_droplet_for_provider(
@@ -198,6 +234,51 @@ impl Orchestrator {
         detail: "Destroy flow failed while deleting droplet.".to_string(),
         source,
       })
+  }
+
+  pub fn destroy_vpn_node(
+    &self,
+    providers: &ProviderRegistry,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    node_id: &str,
+  ) -> Result<(), OrchestratorError> {
+    let node = match db.get_vpn_node(node_id).map_err(|source| OrchestratorError::Database {
+      detail: "Failed loading vpn node before destroy flow.".to_string(),
+      source,
+    })? {
+      Some(node) => node,
+      None => return Ok(()),
+    };
+
+    let tunnels = db.list_tunnels_for_node(node_id).map_err(|source| OrchestratorError::Database {
+      detail: "Failed listing tunnels before destroy flow.".to_string(),
+      source,
+    })?;
+
+    for tunnel in &tunnels {
+      let _ = wireguard.deactivate_tunnel(&tunnel.name);
+      let _ = wireguard.unregister_tunnel(&tunnel.name);
+    }
+
+    if let Some(external_ref) = node.external_ref.as_deref() {
+      if let Ok(droplet_id) = external_ref.parse::<u64>() {
+        if providers
+          .provider_droplet_exists(db, secure_storage, &node.provider_id, droplet_id)
+          .unwrap_or(false)
+        {
+          let _ = providers.delete_provider_droplet(db, secure_storage, &node.provider_id, droplet_id);
+        }
+      }
+    }
+
+    for tunnel in tunnels {
+      let _ = db.delete_tunnel(&tunnel.id);
+    }
+
+    let _ = db.delete_vpn_node(&node.id);
+    Ok(())
   }
 
   pub fn create_vpn_node_to_ready(
@@ -844,6 +925,105 @@ impl Orchestrator {
     Ok(status)
   }
 
+  pub fn get_health_summary(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    node_id: &str,
+    tunnel_id: Option<&str>,
+  ) -> Result<HealthSummary, OrchestratorError> {
+    let node = db
+      .get_vpn_node(node_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading vpn node for health summary.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: node_id.to_string(),
+        detail: "Health summary requested for unknown node.".to_string(),
+      })?;
+
+    let selected_tunnel = match tunnel_id {
+      Some(tunnel_id) => db.get_tunnel(tunnel_id).map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading selected tunnel for health summary.".to_string(),
+        source,
+      })?,
+      None => db
+        .list_tunnels_for_node(node_id)
+        .map_err(|source| OrchestratorError::Database {
+          detail: "Failed listing tunnels for health summary.".to_string(),
+          source,
+        })?
+        .into_iter()
+        .next(),
+    };
+
+    let runtime = if let Some(tunnel) = selected_tunnel.as_ref() {
+      Some(
+        wireguard
+          .read_tunnel_status(&tunnel.name)
+          .map_err(|source| OrchestratorError::WireGuard {
+            detail: "Failed reading tunnel runtime for health summary.".to_string(),
+            source,
+          })?,
+      )
+    } else {
+      None
+    };
+
+    Ok(HealthSummary {
+      node_id: node.id,
+      tunnel_id: selected_tunnel.as_ref().map(|tunnel| tunnel.id.clone()),
+      endpoint_ip: node.public_ipv4.clone(),
+      handshake_age_seconds: runtime.as_ref().and_then(|value| value.last_handshake_age_seconds),
+      rx_bytes: runtime.as_ref().and_then(|value| value.rx_bytes),
+      tx_bytes: runtime.as_ref().and_then(|value| value.tx_bytes),
+      external_ipv4: node.public_ipv4,
+      tunnel_status: selected_tunnel.map(|tunnel| tunnel.status),
+    })
+  }
+
+  pub fn build_diagnostics_bundle(
+    &self,
+    db: &Database,
+  ) -> Result<DiagnosticsBundle, OrchestratorError> {
+    let providers = db.list_providers().map_err(|source| OrchestratorError::Database {
+      detail: "Failed loading providers for diagnostics bundle.".to_string(),
+      source,
+    })?;
+    let nodes = db.list_vpn_nodes().map_err(|source| OrchestratorError::Database {
+      detail: "Failed loading nodes for diagnostics bundle.".to_string(),
+      source,
+    })?;
+
+    let mut tunnels = Vec::new();
+    for node in &nodes {
+      tunnels.extend(db.list_tunnels_for_node(&node.id).map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading tunnels for diagnostics bundle.".to_string(),
+        source,
+      })?);
+    }
+
+    let mut redacted_notes = Vec::new();
+    for node in &nodes {
+      if let Some(reason) = &node.error_reason {
+        redacted_notes.push(format!("node:{} error_reason:{}", node.id, redact_text(reason)));
+      }
+    }
+    for tunnel in &tunnels {
+      if let Some(reason) = &tunnel.last_error {
+        redacted_notes.push(format!("tunnel:{} last_error:{}", tunnel.id, redact_text(reason)));
+      }
+    }
+
+    Ok(DiagnosticsBundle {
+      generated_at: chrono_like_timestamp(),
+      providers,
+      nodes,
+      tunnels,
+      redacted_notes,
+    })
+  }
   pub fn reconcile_startup(
     &self,
     providers: &ProviderRegistry,
@@ -1024,6 +1204,24 @@ impl Orchestrator {
 
     Ok(report)
   }
+}
+
+fn redact_text(value: &str) -> String {
+  let mut output = value.to_string();
+  if output.len() > 96 {
+    output.truncate(96);
+    output.push_str("...");
+  }
+  output
+}
+
+fn chrono_like_timestamp() -> String {
+  use std::time::{SystemTime, UNIX_EPOCH};
+  let millis = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|duration| duration.as_millis())
+    .unwrap_or_default();
+  format!("{millis}")
 }
 
 fn persist_tunnel_stats_snapshot(

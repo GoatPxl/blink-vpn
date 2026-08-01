@@ -2,6 +2,7 @@ use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
+use serde::Serialize;
 use thiserror::Error;
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -12,7 +13,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (5, include_str!("../../../migrations/0005_tunnel_stats_snapshot.sql")),
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum NodeLifecycleStatus {
   New,
   Provisioning,
@@ -89,7 +90,7 @@ impl TryFrom<&str> for NodeLifecycleStatus {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TunnelStatus {
   New,
   Ready,
@@ -139,7 +140,7 @@ impl TryFrom<&str> for TunnelStatus {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProviderRecord {
   pub id: String,
   pub name: String,
@@ -149,7 +150,7 @@ pub struct ProviderRecord {
   pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VpnNodeRecord {
   pub id: String,
   pub provider_id: String,
@@ -164,7 +165,7 @@ pub struct VpnNodeRecord {
   pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TunnelRecord {
   pub id: String,
   pub node_id: String,

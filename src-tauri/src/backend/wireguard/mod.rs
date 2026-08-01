@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -256,14 +257,14 @@ pub struct ClientConfigParams {
   pub persistent_keepalive_seconds: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TunnelServiceState {
   Running,
   Stopped,
   Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TunnelRuntimeStatus {
   pub tunnel_name: String,
   pub state: TunnelServiceState,
