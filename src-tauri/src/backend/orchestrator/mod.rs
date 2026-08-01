@@ -6,11 +6,15 @@ use crate::backend::bootstrap::{
   DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_WIREGUARD_PORT,
 };
 use crate::backend::db::Database;
-use crate::backend::db::{DbError, NodeLifecycleStatus};
+use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus};
 use crate::backend::provider::{
   ProvisionedDroplet, ProviderFlowError, ProviderRegistry,
 };
 use crate::backend::secure_storage::SecureStorage;
+use crate::backend::wireguard::{
+  ClientConfigParams, DEFAULT_CLIENT_KEEPALIVE_SECONDS, TunnelRuntimeStatus, WireGuardError,
+  WireGuardManager,
+};
 
 #[derive(Clone)]
 pub struct Orchestrator;
@@ -35,6 +39,23 @@ pub struct CreateVpnNodeResult {
   pub idempotent_reuse: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateClientTunnelRequest {
+  pub tunnel_id: String,
+  pub node_id: String,
+  pub tunnel_name: String,
+  pub client_address_cidr: String,
+  pub dns_server: Option<String>,
+  pub allowed_ips: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateClientTunnelResult {
+  pub tunnel_id: String,
+  pub tunnel_name: String,
+  pub client_public_key: String,
+}
+
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
   #[error("Provider orchestration failed: {detail}")]
@@ -57,6 +78,12 @@ pub enum OrchestratorError {
   },
   #[error("Node create flow cannot proceed for node '{node_id}': {detail}")]
   InvalidState { node_id: String, detail: String },
+  #[error("WireGuard operation failed: {detail}")]
+  WireGuard {
+    detail: String,
+    #[source]
+    source: WireGuardError,
+  },
 }
 
 impl Orchestrator {
@@ -370,6 +397,244 @@ impl Orchestrator {
     }
 
     flow_result
+  }
+
+  pub fn create_and_activate_client_tunnel(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    request: &CreateClientTunnelRequest,
+  ) -> Result<CreateClientTunnelResult, OrchestratorError> {
+    let node = db
+      .get_vpn_node(&request.node_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed reading vpn node before client tunnel creation.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "VPN node does not exist for tunnel creation.".to_string(),
+      })?;
+
+    if !matches!(
+      node.lifecycle_status,
+      NodeLifecycleStatus::Ready | NodeLifecycleStatus::Connected
+    ) {
+      return Err(OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "VPN node must be Ready before client tunnel activation.".to_string(),
+      });
+    }
+
+    let server_public_key = node
+      .server_public_key
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "VPN node is missing server public key; cannot build client config.".to_string(),
+      })?;
+    let endpoint_ip = node.public_ipv4.ok_or_else(|| OrchestratorError::InvalidState {
+      node_id: request.node_id.clone(),
+      detail: "VPN node is missing public endpoint IP; cannot build client config.".to_string(),
+    })?;
+
+    let existing = db
+      .get_tunnel(&request.tunnel_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed reading tunnel before create.".to_string(),
+        source,
+      })?;
+
+    if existing.is_none() {
+      db
+        .create_tunnel(
+          &request.tunnel_id,
+          &request.node_id,
+          &request.tunnel_name,
+          Some(&request.tunnel_name),
+        )
+        .map_err(|source| OrchestratorError::Database {
+          detail: "Failed creating tunnel row before activation.".to_string(),
+          source,
+        })?;
+    }
+
+    let keypair = wireguard
+      .generate_client_keypair()
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not generate client WireGuard keypair locally.".to_string(),
+        source,
+      })?;
+
+    let config = wireguard
+      .build_client_config(&ClientConfigParams {
+        private_key: keypair.private_key,
+        client_address_cidr: request.client_address_cidr.clone(),
+        dns_server: request.dns_server.clone(),
+        server_public_key,
+        server_endpoint_ip: endpoint_ip,
+        server_listen_port: DEFAULT_WIREGUARD_PORT,
+        allowed_ips: request.allowed_ips.clone(),
+        persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+      })
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not render client WireGuard config.".to_string(),
+        source,
+      })?;
+
+    if let Err(error) = wireguard.import_tunnel(&request.tunnel_name, &config) {
+      let _ = db.update_tunnel_status(
+        &request.tunnel_id,
+        TunnelStatus::Error,
+        Some("WireGuard tunnel import failed"),
+      );
+      return Err(OrchestratorError::WireGuard {
+        detail: "Could not import client tunnel into WireGuard for Windows.".to_string(),
+        source: error,
+      });
+    }
+
+    if let Err(error) = wireguard.activate_tunnel(&request.tunnel_name) {
+      let _ = db.update_tunnel_status(
+        &request.tunnel_id,
+        TunnelStatus::Error,
+        Some("WireGuard tunnel activation failed"),
+      );
+      return Err(OrchestratorError::WireGuard {
+        detail: "Could not activate client tunnel service.".to_string(),
+        source: error,
+      });
+    }
+
+    db
+      .update_tunnel_status(&request.tunnel_id, TunnelStatus::Connected, None)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed marking tunnel as Connected after activation.".to_string(),
+        source,
+      })?;
+
+    let _ = db.transition_vpn_node_status(&request.node_id, NodeLifecycleStatus::Connected, None);
+
+    Ok(CreateClientTunnelResult {
+      tunnel_id: request.tunnel_id.clone(),
+      tunnel_name: request.tunnel_name.clone(),
+      client_public_key: keypair.public_key,
+    })
+  }
+
+  pub fn deactivate_client_tunnel(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    tunnel_id: &str,
+  ) -> Result<(), OrchestratorError> {
+    let tunnel = db
+      .get_tunnel(tunnel_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading tunnel before deactivation.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::Database {
+        detail: "Tunnel deactivation requested for unknown id.".to_string(),
+        source: DbError::NotFound {
+          entity: "tunnel",
+          id: tunnel_id.to_string(),
+          detail: "No tunnel row matched the id for deactivation.".to_string(),
+        },
+      })?;
+
+    wireguard
+      .deactivate_tunnel(&tunnel.name)
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not deactivate WireGuard tunnel service.".to_string(),
+        source,
+      })?;
+
+    db
+      .update_tunnel_status(tunnel_id, TunnelStatus::Disconnected, None)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed marking tunnel as Disconnected after stop.".to_string(),
+        source,
+      })?;
+
+    let _ = db.transition_vpn_node_status(&tunnel.node_id, NodeLifecycleStatus::Ready, None);
+    Ok(())
+  }
+
+  pub fn activate_client_tunnel(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    tunnel_id: &str,
+  ) -> Result<(), OrchestratorError> {
+    let tunnel = db
+      .get_tunnel(tunnel_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading tunnel before activation.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::Database {
+        detail: "Tunnel activation requested for unknown id.".to_string(),
+        source: DbError::NotFound {
+          entity: "tunnel",
+          id: tunnel_id.to_string(),
+          detail: "No tunnel row matched the id for activation.".to_string(),
+        },
+      })?;
+
+    wireguard
+      .activate_tunnel(&tunnel.name)
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not activate WireGuard tunnel service.".to_string(),
+        source,
+      })?;
+
+    db
+      .update_tunnel_status(tunnel_id, TunnelStatus::Connected, None)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed marking tunnel as Connected after activation.".to_string(),
+        source,
+      })?;
+
+    let _ = db.transition_vpn_node_status(&tunnel.node_id, NodeLifecycleStatus::Connected, None);
+    Ok(())
+  }
+
+  pub fn read_client_tunnel_status(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    tunnel_id: &str,
+  ) -> Result<TunnelRuntimeStatus, OrchestratorError> {
+    let tunnel = db
+      .get_tunnel(tunnel_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading tunnel before status read.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::Database {
+        detail: "Tunnel status requested for unknown id.".to_string(),
+        source: DbError::NotFound {
+          entity: "tunnel",
+          id: tunnel_id.to_string(),
+          detail: "No tunnel row matched the id for status query.".to_string(),
+        },
+      })?;
+
+    let status = wireguard
+      .read_tunnel_status(&tunnel.name)
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not read WireGuard runtime status.".to_string(),
+        source,
+      })?;
+
+    let db_status = match status.state {
+      crate::backend::wireguard::TunnelServiceState::Running => TunnelStatus::Connected,
+      crate::backend::wireguard::TunnelServiceState::Stopped => TunnelStatus::Disconnected,
+      crate::backend::wireguard::TunnelServiceState::Unknown => tunnel.status,
+    };
+    let _ = db.update_tunnel_status(tunnel_id, db_status, None);
+
+    Ok(status)
   }
 }
 

@@ -38,6 +38,10 @@ pub fn run() {
       commands::system::hello,
       commands::system::register_digitalocean_provider_token,
       commands::system::create_vpn_node_to_ready,
+      commands::system::create_and_activate_client_tunnel,
+      commands::system::activate_client_tunnel,
+      commands::system::deactivate_client_tunnel,
+      commands::system::read_client_tunnel_status,
       commands::system::validate_provider_token,
       commands::system::provision_provider_droplet,
       commands::system::delete_provider_droplet
