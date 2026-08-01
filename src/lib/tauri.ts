@@ -79,6 +79,23 @@ export interface DiagnosticsBundle {
   redacted_notes: string[];
 }
 
+export interface WireGuardReadiness {
+  installed: boolean;
+  executable_found: boolean;
+  service_available: boolean;
+  version: string | null;
+  message: string;
+  action_guidance: string;
+}
+
+export interface WireGuardInstallResult {
+  installed: boolean;
+  prerequisites_configured: boolean;
+  installer_path: string;
+  message: string;
+  next_action: string;
+}
+
 async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (typeof window === "undefined") {
     throw new Error("UI is rendering on the server.");
@@ -94,6 +111,18 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
 
 export async function invokeHello(name: string): Promise<string> {
   return invokeCommand<string>("hello", { name });
+}
+
+export async function checkWireGuardReadiness(): Promise<WireGuardReadiness> {
+  return invokeCommand<WireGuardReadiness>("check_wireguard_readiness");
+}
+
+export async function openWireGuardInstallPage(): Promise<void> {
+  await invokeCommand<void>("open_wireguard_install_page");
+}
+
+export async function installWireGuardWithPrerequisites(): Promise<WireGuardInstallResult> {
+  return invokeCommand<WireGuardInstallResult>("install_wireguard_with_prerequisites");
 }
 
 export async function registerProviderToken(providerId: string, providerName: string, apiToken: string): Promise<string> {

@@ -1,4 +1,7 @@
 use serde::Serialize;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 use tauri::State;
 use tauri::{AppHandle, Manager};
 
@@ -9,6 +12,7 @@ use crate::backend::orchestrator::{
   ForceCleanupResult,
 };
 use crate::backend::db::{TunnelRecord, VpnNodeRecord};
+use crate::backend::wireguard::WireGuardReadiness;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthPanelData {
@@ -29,6 +33,25 @@ pub struct DiagnosticsBundleResponse {
   pub nodes: Vec<VpnNodeRecord>,
   pub tunnels: Vec<TunnelRecord>,
   pub redacted_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WireGuardReadinessResponse {
+  pub installed: bool,
+  pub executable_found: bool,
+  pub service_available: bool,
+  pub version: Option<String>,
+  pub message: String,
+  pub action_guidance: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WireGuardInstallResult {
+  pub installed: bool,
+  pub prerequisites_configured: bool,
+  pub installer_path: String,
+  pub message: String,
+  pub next_action: String,
 }
 
 #[tauri::command]
@@ -384,4 +407,132 @@ pub fn disconnect_tunnel(
       let user_error = err.to_user_facing();
       format!("{} Next: {}", user_error.message, user_error.next_action)
     })
+}
+
+#[tauri::command]
+pub fn check_wireguard_readiness(backend: State<'_, Backend>) -> WireGuardReadinessResponse {
+  let readiness: WireGuardReadiness = backend.wireguard.check_readiness();
+  WireGuardReadinessResponse {
+    installed: readiness.installed,
+    executable_found: readiness.executable_found,
+    service_available: readiness.service_available,
+    version: readiness.version,
+    message: readiness.message,
+    action_guidance: readiness.action_guidance,
+  }
+}
+
+#[tauri::command]
+pub fn open_wireguard_install_page() -> Result<(), String> {
+  if !cfg!(target_os = "windows") {
+    return Err("WireGuard install shortcut is supported on Windows only in Phase 1.".to_string());
+  }
+
+  Command::new("cmd")
+    .args(["/C", "start", "", "https://www.wireguard.com/install/"])
+    .spawn()
+    .map_err(|error| format!("Could not open WireGuard install page: {error}"))?;
+
+  Ok(())
+}
+
+#[tauri::command]
+pub fn install_wireguard_with_prerequisites() -> Result<WireGuardInstallResult, String> {
+  if !cfg!(target_os = "windows") {
+    return Err("WireGuard installation is supported on Windows only for Phase 1.".to_string());
+  }
+
+  let script_path = build_wireguard_install_script().map_err(|error| {
+    format!(
+      "Failed to prepare WireGuard installer workflow: {}",
+      crate::backend::logging::redact_sensitive_text(&error.to_string())
+    )
+  })?;
+
+  let script_path_str = script_path.to_string_lossy().replace('"', "`\"");
+
+  let launch_result = Command::new("powershell")
+    .args([
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      &format!(
+        "Start-Process -FilePath 'powershell' -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','{}'",
+        script_path_str
+      ),
+    ])
+    .status();
+
+  let _ = fs::remove_file(&script_path);
+
+  let status = launch_result.map_err(|error| {
+    format!(
+      "Failed to launch elevated WireGuard installer flow: {}",
+      crate::backend::logging::redact_sensitive_text(&error.to_string())
+    )
+  })?;
+
+  if !status.success() {
+    return Err(
+      "WireGuard installation was cancelled or failed. Accept the UAC prompt and complete the installer, then retry."
+        .to_string(),
+    );
+  }
+
+  Ok(WireGuardInstallResult {
+    installed: true,
+    prerequisites_configured: true,
+    installer_path: "C:\\Program Files\\WireGuard\\wireguard.exe".to_string(),
+    message: "WireGuard installer completed and prerequisites were configured.".to_string(),
+    next_action: "Click Re-check to verify readiness and continue onboarding.".to_string(),
+  })
+}
+
+fn build_wireguard_install_script() -> Result<PathBuf, std::io::Error> {
+  let script_content = r#"
+$ErrorActionPreference = 'Stop'
+
+$downloadUrl = 'https://download.wireguard.com/windows-client/wireguard-installer.exe'
+$tempDir = Join-Path $env:TEMP 'goatstare-wireguard-installer'
+New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+
+$installerPath = Join-Path $tempDir 'wireguard-installer.exe'
+Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $installerPath
+
+if (-not (Test-Path $installerPath)) {
+  throw 'WireGuard installer download failed.'
+}
+
+Start-Process -FilePath $installerPath -Wait
+
+$wireGuardDir = 'C:\Program Files\WireGuard'
+if (-not (Test-Path $wireGuardDir)) {
+  throw 'WireGuard installation directory not found after installer run.'
+}
+
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+if (-not $machinePath) { $machinePath = '' }
+if ($machinePath -notlike "*$wireGuardDir*") {
+  $newPath = if ($machinePath.Trim().Length -gt 0) { "$machinePath;$wireGuardDir" } else { $wireGuardDir }
+  [Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
+}
+
+$wgCommand = Get-Command wg -ErrorAction SilentlyContinue
+$wireguardCommand = Get-Command wireguard -ErrorAction SilentlyContinue
+$service = Get-Service -Name 'WireGuardManager' -ErrorAction SilentlyContinue
+
+if (-not $wgCommand -or -not $wireguardCommand) {
+  throw 'WireGuard commands are not available after installation.'
+}
+
+if (-not $service) {
+  throw 'WireGuardManager service is not available after installation.'
+}
+"#;
+
+  let mut path = std::env::temp_dir();
+  path.push(format!("goatstare-wireguard-install-{}.ps1", uuid::Uuid::new_v4()));
+  fs::write(&path, script_content)?;
+  Ok(path)
 }

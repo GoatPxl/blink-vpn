@@ -72,6 +72,9 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       commands::system::hello,
+      commands::system::open_wireguard_install_page,
+      commands::system::install_wireguard_with_prerequisites,
+      commands::system::check_wireguard_readiness,
       commands::system::register_digitalocean_provider_token,
       commands::system::list_vpn_nodes,
       commands::system::list_tunnels_for_node,

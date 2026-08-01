@@ -47,6 +47,63 @@ impl WireGuardManager {
     Ok(())
   }
 
+  pub fn check_readiness(&self) -> WireGuardReadiness {
+    if !cfg!(target_os = "windows") {
+      return WireGuardReadiness {
+        installed: false,
+        executable_found: false,
+        service_available: false,
+        version: None,
+        message: "WireGuard for Windows is required on this platform.".to_string(),
+        action_guidance: "Use a Windows host and install WireGuard for Windows before onboarding."
+          .to_string(),
+      };
+    }
+
+    let wg_check = self.runner.run("wg", &["--version"], None);
+    let wireguard_cli_check = self.runner.run("wireguard", &["/help"], None);
+    let service_check = self
+      .runner
+      .run("sc", &["query", "WireGuardManager"], None);
+
+    let executable_found = wg_check.is_ok() && wireguard_cli_check.is_ok();
+    let service_available = service_check.is_ok();
+    let installed = executable_found;
+
+    let version = match &wg_check {
+      Ok(output) => parse_wg_version_output(&output.stdout),
+      Err(_) => None,
+    };
+
+    let (message, action_guidance) = if installed && service_available {
+      (
+        "WireGuard runtime is installed and ready.".to_string(),
+        "Continue onboarding.".to_string(),
+      )
+    } else if !installed {
+      (
+        "WireGuard executable tools are missing.".to_string(),
+        "Install WireGuard for Windows, ensure both 'wg.exe' and 'wireguard.exe' are on PATH, then click Re-check."
+          .to_string(),
+      )
+    } else {
+      (
+        "WireGuard tools are available, but the manager service check failed.".to_string(),
+        "Repair/reinstall WireGuard for Windows and verify the 'WireGuardManager' service exists, then click Re-check."
+          .to_string(),
+      )
+    };
+
+    WireGuardReadiness {
+      installed,
+      executable_found,
+      service_available,
+      version,
+      message,
+      action_guidance,
+    }
+  }
+
   pub fn generate_client_keypair(&self) -> Result<ClientKeyPair, WireGuardError> {
     self.ensure_installed()?;
 
@@ -271,6 +328,16 @@ pub struct TunnelRuntimeStatus {
   pub last_handshake_age_seconds: Option<u64>,
   pub rx_bytes: Option<u64>,
   pub tx_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireGuardReadiness {
+  pub installed: bool,
+  pub executable_found: bool,
+  pub service_available: bool,
+  pub version: Option<String>,
+  pub message: String,
+  pub action_guidance: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -599,6 +666,20 @@ fn validate_tunnel_name(tunnel_name: &str) -> Result<(), WireGuardError> {
   })
 }
 
+fn parse_wg_version_output(raw: &str) -> Option<String> {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return None;
+  }
+
+  let first_line = trimmed.lines().next()?.trim();
+  if first_line.is_empty() {
+    return None;
+  }
+
+  Some(first_line.to_string())
+}
+
 fn map_install_error(source: CommandExecError, command: &str) -> WireGuardError {
   match source {
     CommandExecError::NotFound { .. } => WireGuardError::NotInstalled {
@@ -652,7 +733,8 @@ fn format_nonzero_detail(stderr: &str) -> String {
 mod tests {
   use super::{
     ClientConfigParams, DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS,
-    TunnelServiceState, WireGuardError, build_client_config, parse_sc_state, parse_wg_dump_metrics,
+    TunnelServiceState, WireGuardError, build_client_config, parse_sc_state,
+    parse_wg_dump_metrics, parse_wg_version_output,
   };
 
   #[test]
@@ -724,5 +806,11 @@ mod tests {
       WireGuardError::InvalidOutput { .. } => {}
       other => panic!("expected invalid output error, got {other}"),
     }
+  }
+
+  #[test]
+  fn parse_wg_version_output_extracts_first_line() {
+    let version = parse_wg_version_output("wireguard-tools v1.0.20210914\nextra");
+    assert_eq!(version, Some("wireguard-tools v1.0.20210914".to_string()));
   }
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   connectTunnel,
   createAndActivateClientTunnel,
@@ -18,6 +19,8 @@ import {
   type TunnelRecord,
   type VpnNodeRecord,
 } from "@/lib/tauri";
+import { DashboardEmptyState } from "@/components/dashboard-empty-state";
+import { loadOnboardingState } from "@/lib/onboarding-state";
 
 type ToastKind = "info" | "success" | "warning" | "error";
 type AppView = "dashboard" | "nodes" | "health" | "diagnostics" | "settings";
@@ -206,9 +209,11 @@ function PageChrome({ children }: { children: React.ReactNode }) {
 }
 
 export function VpnDashboard() {
+  const router = useRouter();
   const [busyAction, setBusyAction] = useState<DashboardBusyAction>(null);
   const [activeView, setActiveView] = useState<AppView>("dashboard");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [onboardingComplete] = useState(() => loadOnboardingState().status === "completed");
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [nodes, setNodes] = useState<VpnNodeRecord[]>([]);
@@ -517,6 +522,8 @@ export function VpnDashboard() {
   const selectedNodeTunnels = tunnels;
   const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
   const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
+  const canConnect = !!connectedTunnel && connectedTunnel.status.toLowerCase() !== "connected";
+  const noServerConfigured = nodes.length === 0;
 
   const diagnosticsLogs: LogEntry[] = diagnostics
     ? [
@@ -715,7 +722,25 @@ export function VpnDashboard() {
               <div className="text-xs uppercase tracking-[0.28em]">{recovery ? recovery.title : busyAction ? `Working: ${busyAction}` : "Idle"}</div>
             </div>
 
-            {activeView === "dashboard" ? (
+            {noServerConfigured ? (
+              <>
+                <DashboardEmptyState />
+                {!onboardingComplete ? null : (
+                  <div className="rounded-[18px] border border-[color:rgba(255,185,95,0.2)] bg-[color:rgba(255,185,95,0.08)] px-5 py-4 text-sm text-[var(--tertiary)]">
+                    Onboarding was completed, but no active server is available. Re-run setup.
+                    <button
+                      type="button"
+                      onClick={() => router.push("/onboarding")}
+                      className="ml-3 rounded-lg border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-1.5 text-xs text-[var(--on-surface)]"
+                    >
+                      Resume Setup
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : null}
+
+            {!noServerConfigured && activeView === "dashboard" ? (
               <PageChrome>
                 <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_340px]">
                   <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] px-6 py-8">
@@ -728,9 +753,9 @@ export function VpnDashboard() {
                         <h2 className="mt-3 text-[56px] font-semibold leading-none tracking-tight text-[var(--on-surface)]">{activeNode?.name ?? "No active node"}</h2>
                         <p className="mt-2 text-sm text-[var(--on-surface-variant)]">Server: {activeNode ? `${activeNode.external_ref ?? activeNode.id}` : "n/a"}</p>
                       </div>
-                      <Button tone="danger" onClick={() => (connectedTunnel ? void onDisconnectTunnel(connectedTunnel) : void loadDashboard())} disabled={busyAction !== null}>
+                      <Button tone={canConnect ? "primary" : "danger"} onClick={() => (canConnect && connectedTunnel ? void onConnectTunnel(connectedTunnel) : connectedTunnel ? void onDisconnectTunnel(connectedTunnel) : void loadDashboard())} disabled={busyAction !== null || !connectedTunnel}>
                         <AppIcon name="power" className="h-4 w-4" />
-                        {connectedTunnel ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect") : "Disconnect"}
+                        {canConnect ? (busyAction === "connect-tunnel" ? "Connecting" : "Connect") : connectedTunnel ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect") : "Refresh"}
                       </Button>
                     </div>
 
