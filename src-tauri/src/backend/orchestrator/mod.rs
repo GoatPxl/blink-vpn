@@ -8,6 +8,7 @@ use crate::backend::bootstrap::{
 };
 use crate::backend::db::Database;
 use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus};
+use crate::backend::logging;
 use crate::backend::provider::{
   ProvisionedDroplet, ProviderFlowError, ProviderRegistry,
 };
@@ -291,7 +292,7 @@ impl Orchestrator {
   ) -> Result<CreateVpnNodeResult, OrchestratorError> {
     let correlation_id = Uuid::new_v4().to_string();
     log::info!(
-      "correlation_id={} node_id={} stage=start_create_vpn_node provider_id={}",
+      "event=vpn_node.create.start correlation_id={} node_id={} provider_id={}",
       correlation_id,
       request.node_id,
       request.provider_id
@@ -474,7 +475,7 @@ impl Orchestrator {
         })?;
 
       log::info!(
-        "correlation_id={} node_id={} stage=create_vpn_node_ready_success droplet_id={} endpoint_ip={}",
+        "event=vpn_node.create.ready correlation_id={} node_id={} droplet_id={} endpoint_ip={}",
         correlation_id,
         request.node_id,
         droplet.droplet_id,
@@ -521,10 +522,10 @@ impl Orchestrator {
       );
 
       log::error!(
-        "correlation_id={} node_id={} stage=create_vpn_node_ready_error reason={}",
+        "event=vpn_node.create.error correlation_id={} node_id={} reason={}",
         correlation_id,
         request.node_id,
-        final_reason
+        logging::redact_sensitive_text(&final_reason)
       );
 
       return Err(error);
@@ -1004,15 +1005,51 @@ impl Orchestrator {
       })?);
     }
 
+    let providers = providers
+      .into_iter()
+      .map(|mut provider| {
+        provider.token_ref = None;
+        provider
+      })
+      .collect::<Vec<_>>();
+
+    let nodes = nodes
+      .into_iter()
+      .map(|mut node| {
+        node.error_reason = node
+          .error_reason
+          .map(|value| logging::redact_sensitive_text(&value));
+        node
+      })
+      .collect::<Vec<_>>();
+
+    let tunnels = tunnels
+      .into_iter()
+      .map(|mut tunnel| {
+        tunnel.last_error = tunnel
+          .last_error
+          .map(|value| logging::redact_sensitive_text(&value));
+        tunnel
+      })
+      .collect::<Vec<_>>();
+
     let mut redacted_notes = Vec::new();
     for node in &nodes {
       if let Some(reason) = &node.error_reason {
-        redacted_notes.push(format!("node:{} error_reason:{}", node.id, redact_text(reason)));
+        redacted_notes.push(format!(
+          "node:{} error_reason:{}",
+          node.id,
+          logging::redact_sensitive_text(reason)
+        ));
       }
     }
     for tunnel in &tunnels {
       if let Some(reason) = &tunnel.last_error {
-        redacted_notes.push(format!("tunnel:{} last_error:{}", tunnel.id, redact_text(reason)));
+        redacted_notes.push(format!(
+          "tunnel:{} last_error:{}",
+          tunnel.id,
+          logging::redact_sensitive_text(reason)
+        ));
       }
     }
 
@@ -1767,6 +1804,23 @@ mod tests {
       .expect("query should succeed")
       .expect("tunnel should exist");
     assert_eq!(tunnel.status, TunnelStatus::Error);
+  }
+
+  #[test]
+  fn diagnostics_bundle_redacts_provider_token_refs() {
+    let db = Database::new(test_db_path("diagnostics_redaction"));
+    db.run_migrations().expect("migrations should succeed");
+
+    setup_provider_and_token(&db, &SecureStorage::dev_mock());
+
+    let bundle = Orchestrator::new()
+      .build_diagnostics_bundle(&db)
+      .expect("bundle should build");
+
+    assert!(bundle.providers.iter().all(|provider| provider.token_ref.is_none()));
+
+    let bundle_json = serde_json::to_string(&bundle).expect("bundle should serialize");
+    assert!(!bundle_json.contains("token_ref"));
   }
 }
 

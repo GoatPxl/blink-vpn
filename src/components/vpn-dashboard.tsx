@@ -6,6 +6,7 @@ import {
   createAndActivateClientTunnel,
   createVpnNode,
   destroyVpnNode,
+  exportDiagnosticsBundle,
   getDiagnosticsBundle,
   getHealthPanelData,
   listTunnelsForNode,
@@ -206,6 +207,7 @@ export function VpnDashboard() {
   const [selectedTunnelId, setSelectedTunnelId] = useState<string>("");
   const [health, setHealth] = useState<Awaited<ReturnType<typeof getHealthPanelData>> | null>(null);
   const [diagnostics, setDiagnostics] = useState<Awaited<ReturnType<typeof getDiagnosticsBundle>> | null>(null);
+  const [diagnosticsExportPath, setDiagnosticsExportPath] = useState("No export yet.");
   const [providerId, setProviderId] = useState(DEFAULT_PROVIDER_ID);
   const [providerName, setProviderName] = useState(DEFAULT_PROVIDER_NAME);
   const [apiToken, setApiToken] = useState("");
@@ -468,6 +470,19 @@ export function VpnDashboard() {
       const bundleText = JSON.stringify(diagnostics, null, 2);
       await navigator.clipboard.writeText(bundleText);
       pushToast("success", "Diagnostics copied", "Redacted diagnostics bundle copied to clipboard.");
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function onExportDiagnostics() {
+    setBusyAction("export-diagnostics");
+    try {
+      const path = await exportDiagnosticsBundle();
+      setDiagnosticsExportPath(path);
+      pushToast("success", "Diagnostics exported", path);
     } catch (error) {
       handleError(error);
     } finally {
@@ -822,7 +837,13 @@ export function VpnDashboard() {
             <Button onClick={() => void onCopyDiagnostics()} disabled={busyAction !== null} tone="secondary">
               {busyAction === "copy-diagnostics" ? "Copying..." : "Copy Diagnostics Bundle"}
             </Button>
+            <Button onClick={() => void onExportDiagnostics()} disabled={busyAction !== null}>
+              {busyAction === "export-diagnostics" ? "Exporting..." : "Export Diagnostics File"}
+            </Button>
           </div>
+          <p className="mb-4 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+            {diagnosticsExportPath}
+          </p>
           {diagnostics ? (
             <div className="grid gap-4 lg:grid-cols-2">
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">

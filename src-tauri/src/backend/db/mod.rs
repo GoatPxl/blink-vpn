@@ -145,6 +145,7 @@ pub struct ProviderRecord {
   pub id: String,
   pub name: String,
   pub slug: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub token_ref: Option<String>,
   pub created_at: String,
   pub updated_at: String,

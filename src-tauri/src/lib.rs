@@ -8,16 +8,23 @@ use tauri::Manager;
 pub fn run() {
   tauri::Builder::default()
     .setup(move |app| {
-      if cfg!(debug_assertions) {
-        app.handle().plugin(
-          tauri_plugin_log::Builder::default()
-            .level(log::LevelFilter::Info)
-            .build(),
-        )?;
-      }
+      let log_level = if cfg!(debug_assertions) {
+        log::LevelFilter::Info
+      } else {
+        log::LevelFilter::Warn
+      };
+
+      app.handle().plugin(
+        tauri_plugin_log::Builder::default()
+          .level(log_level)
+          .build(),
+      )?;
 
       let app_data_dir = app.path().app_data_dir().unwrap_or_else(|err| {
-        log::warn!("Unable to resolve app data directory: {err}");
+        log::warn!(
+          "Unable to resolve app data directory: {}",
+          crate::backend::logging::redact_sensitive_text(&err.to_string())
+        );
         PathBuf::from(".")
       });
 
@@ -39,24 +46,24 @@ pub fn run() {
       ) {
         Ok(report) => {
           if !report.issues.is_empty() {
-            log::warn!(
-              "Startup reconciliation completed with {} issue(s).",
-              report.issues.len()
-            );
+            log::warn!("event=startup.reconcile.completed issue_count={}", report.issues.len());
             for issue in report.issues {
               log::warn!(
-                "reconcile_issue kind={:?} node_id={:?} tunnel_id={:?} repaired={} detail={}",
+                "event=startup.reconcile.issue kind={:?} node_id={:?} tunnel_id={:?} repaired={} detail={}",
                 issue.kind,
                 issue.node_id,
                 issue.tunnel_id,
                 issue.repaired,
-                issue.detail
+                crate::backend::logging::redact_sensitive_text(&issue.detail)
               );
             }
           }
         }
         Err(err) => {
-          log::error!("Startup reconciliation failed: {}", err);
+          log::error!(
+            "event=startup.reconcile.failed error={}",
+            crate::backend::logging::redact_sensitive_text(&err.to_string())
+          );
         }
       }
 
@@ -77,6 +84,7 @@ pub fn run() {
       commands::system::disconnect_tunnel,
       commands::system::get_health_panel_data,
       commands::system::get_diagnostics_bundle,
+      commands::system::export_diagnostics_bundle,
       commands::system::read_client_tunnel_status,
       commands::system::validate_provider_token,
       commands::system::provision_provider_droplet,

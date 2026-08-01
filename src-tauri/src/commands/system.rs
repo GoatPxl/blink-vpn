@@ -1,7 +1,9 @@
 use serde::Serialize;
 use tauri::State;
+use tauri::{AppHandle, Manager};
 
 use crate::backend::Backend;
+use crate::backend::logging;
 use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
 };
@@ -319,6 +321,33 @@ pub fn connect_tunnel(
       redacted_notes: bundle.redacted_notes,
     })
   }
+
+#[tauri::command]
+pub fn export_diagnostics_bundle(
+  app: AppHandle,
+  backend: State<'_, Backend>,
+) -> Result<String, String> {
+  let bundle = backend
+    .orchestrator
+    .build_diagnostics_bundle(&backend.db)
+    .map_err(|err| err.to_string())?;
+
+  let bundle_json = serde_json::to_string_pretty(&bundle).map_err(|err| err.to_string())?;
+  let sanitized_json = logging::redact_sensitive_text(&bundle_json);
+
+  let diagnostics_dir = app
+    .path()
+    .app_data_dir()
+    .map_err(|err| err.to_string())?
+    .join("diagnostics");
+
+  std::fs::create_dir_all(&diagnostics_dir).map_err(|err| err.to_string())?;
+
+  let file_path = diagnostics_dir.join(format!("diagnostics-{}.json", bundle.generated_at));
+  std::fs::write(&file_path, sanitized_json).map_err(|err| err.to_string())?;
+
+  Ok(file_path.display().to_string())
+}
 
 #[tauri::command]
 pub fn disconnect_tunnel(

@@ -170,3 +170,7 @@ export async function getHealthPanelData(nodeId: string, tunnelId?: string | nul
 export async function getDiagnosticsBundle(): Promise<DiagnosticsBundle> {
   return invokeCommand<DiagnosticsBundle>("get_diagnostics_bundle");
 }
+
+export async function exportDiagnosticsBundle(): Promise<string> {
+  return invokeCommand<string>("export_diagnostics_bundle");
+}
