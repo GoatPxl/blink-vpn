@@ -34,7 +34,13 @@ pub fn run() {
       app.manage(backend.clone());
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![commands::system::hello])
+    .invoke_handler(tauri::generate_handler![
+      commands::system::hello,
+      commands::system::register_digitalocean_provider_token,
+      commands::system::validate_provider_token,
+      commands::system::provision_provider_droplet,
+      commands::system::delete_provider_droplet
+    ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 }

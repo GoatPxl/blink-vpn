@@ -1,14 +1,55 @@
+pub mod digitalocean;
+pub mod retry;
+
+use std::sync::Arc;
+
 use thiserror::Error;
 
 use crate::backend::db::{Database, DbError, ProviderRecord};
 use crate::backend::secure_storage::{SecretStoreError, SecureStorage};
 
-#[derive(Clone)]
-pub struct DigitalOceanProviderAdapter;
+#[allow(unused_imports)]
+pub use digitalocean::{
+  Account, CreateDropletRequest, DEFAULT_IMAGE, DEFAULT_REGION, DEFAULT_SIZE, DigitalOceanConfig,
+};
 
-pub trait ProviderAdapter {
+use digitalocean::{DigitalOceanApiClient, DigitalOceanError};
+use retry::RetryPolicy;
+
+pub trait ProviderAdapter: Send + Sync {
   fn provider_name(&self) -> &'static str;
   fn default_regions(&self) -> &'static [&'static str];
+  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError>;
+  fn create_droplet(
+    &self,
+    token: &str,
+    droplet_name: &str,
+  ) -> Result<ProvisionedDroplet, ProviderAdapterError>;
+  fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError>;
+}
+
+#[derive(Clone)]
+pub struct DigitalOceanProviderAdapter {
+  client: DigitalOceanApiClient,
+  config: DigitalOceanConfig,
+}
+
+impl DigitalOceanProviderAdapter {
+  pub fn new() -> Result<Self, ProviderAdapterError> {
+    let client = DigitalOceanApiClient::new(
+      "https://api.digitalocean.com",
+      RetryPolicy::digitalocean_default(),
+    )
+    .map_err(|source| ProviderAdapterError::Api {
+      detail: "Unable to initialize DigitalOcean API client.".to_string(),
+      source,
+    })?;
+
+    Ok(Self {
+      client,
+      config: DigitalOceanConfig::phase1_defaults(),
+    })
+  }
 }
 
 impl ProviderAdapter for DigitalOceanProviderAdapter {
@@ -19,11 +60,95 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
   fn default_regions(&self) -> &'static [&'static str] {
     &["nyc1", "sfo3", "fra1"]
   }
+
+  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
+    self
+      .client
+      .validate_token(token)
+      .map_err(|source| ProviderAdapterError::Api {
+        detail: "DigitalOcean token validation request failed.".to_string(),
+        source,
+      })
+  }
+
+  fn create_droplet(
+    &self,
+    token: &str,
+    droplet_name: &str,
+  ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
+    let request = CreateDropletRequest {
+      name: droplet_name.to_string(),
+      region: self.config.region.to_string(),
+      size: self.config.size.to_string(),
+      image: self.config.image.to_string(),
+      tags: vec!["goatstare-phase1".to_string()],
+    };
+
+    let created = self
+      .client
+      .create_droplet(token, &request)
+      .map_err(|source| ProviderAdapterError::Api {
+        detail: "DigitalOcean droplet create call failed.".to_string(),
+        source,
+      })?;
+
+    let active = self
+      .client
+      .wait_for_droplet_active(
+        token,
+        created.id,
+        self.config.poll_interval,
+        self.config.poll_max_attempts,
+      )
+      .map_err(|source| ProviderAdapterError::Api {
+        detail: "DigitalOcean droplet did not become active before timeout.".to_string(),
+        source,
+      })?;
+
+    let public_ipv4 = self
+      .client
+      .extract_public_ipv4(&active)
+      .map_err(|source| ProviderAdapterError::Api {
+        detail: "Active droplet did not expose public IPv4.".to_string(),
+        source,
+      })?;
+
+    Ok(ProvisionedDroplet {
+      droplet_id: active.id,
+      public_ipv4,
+    })
+  }
+
+  fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError> {
+    self
+      .client
+      .delete_droplet(token, droplet_id)
+      .map_err(|source| ProviderAdapterError::Api {
+        detail: "DigitalOcean droplet delete call failed.".to_string(),
+        source,
+      })
+  }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProvisionedDroplet {
+  pub droplet_id: u64,
+  pub public_ipv4: String,
 }
 
 #[derive(Clone)]
 pub struct ProviderRegistry {
-  digitalocean: DigitalOceanProviderAdapter,
+  digitalocean: Arc<dyn ProviderAdapter>,
+}
+
+#[derive(Debug, Error)]
+pub enum ProviderAdapterError {
+  #[error("DigitalOcean provider API call failed: {detail}")]
+  Api {
+    detail: String,
+    #[source]
+    source: DigitalOceanError,
+  },
 }
 
 #[derive(Debug, Error)]
@@ -40,19 +165,33 @@ pub enum ProviderFlowError {
     #[source]
     source: SecretStoreError,
   },
+  #[error("Provider adapter operation failed: {detail}")]
+  Adapter {
+    detail: String,
+    #[source]
+    source: ProviderAdapterError,
+  },
   #[error("Provider '{provider_id}' was not found after persistence. {detail}")]
   MissingPersistedProvider { provider_id: String, detail: String },
+  #[error("Provider '{provider_id}' has no token_ref. {detail}")]
+  MissingTokenReference { provider_id: String, detail: String },
+  #[error("Provider token_ref '{token_ref}' has no stored secret. {detail}")]
+  MissingSecret { token_ref: String, detail: String },
 }
 
 impl ProviderRegistry {
   pub fn new() -> Self {
+    let adapter = DigitalOceanProviderAdapter::new().unwrap_or_else(|err| {
+      panic!("failed to initialize DigitalOcean adapter: {err}")
+    });
+
     Self {
-      digitalocean: DigitalOceanProviderAdapter,
+      digitalocean: Arc::new(adapter),
     }
   }
 
   pub fn active(&self) -> &dyn ProviderAdapter {
-    &self.digitalocean
+    self.digitalocean.as_ref()
   }
 
   pub fn create_digitalocean_provider_with_token(
@@ -75,7 +214,7 @@ impl ProviderRegistry {
       .create_provider(
         provider_id,
         provider_name,
-        self.digitalocean.provider_name(),
+        self.active().provider_name(),
         Some(&token_ref),
       )
       .map_err(|source| ProviderFlowError::Database {
@@ -96,7 +235,96 @@ impl ProviderRegistry {
         detail: "Expected provider row to exist after create call.".to_string(),
       })
   }
+
+  pub fn validate_provider_token(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+  ) -> Result<Account, ProviderFlowError> {
+    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
+    self
+      .active()
+      .validate_token(&token)
+      .map_err(|source| ProviderFlowError::Adapter {
+        detail: "Token validation through provider adapter failed.".to_string(),
+        source,
+      })
+  }
+
+  pub fn create_provider_droplet(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    droplet_name: &str,
+  ) -> Result<ProvisionedDroplet, ProviderFlowError> {
+    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
+    self
+      .active()
+      .create_droplet(&token, droplet_name)
+      .map_err(|source| ProviderFlowError::Adapter {
+        detail: "Droplet provisioning through provider adapter failed.".to_string(),
+        source,
+      })
+  }
+
+  pub fn delete_provider_droplet(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    droplet_id: u64,
+  ) -> Result<(), ProviderFlowError> {
+    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
+    self
+      .active()
+      .delete_droplet(&token, droplet_id)
+      .map_err(|source| ProviderFlowError::Adapter {
+        detail: "Droplet deletion through provider adapter failed.".to_string(),
+        source,
+      })
+  }
+
+  fn resolve_provider_token(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+  ) -> Result<String, ProviderFlowError> {
+    let provider = db
+      .get_provider(provider_id)
+      .map_err(|source| ProviderFlowError::Database {
+        detail: "Failed loading provider row for token resolution.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| ProviderFlowError::MissingPersistedProvider {
+        provider_id: provider_id.to_string(),
+        detail: "Cannot use provider because no DB row exists for this id.".to_string(),
+      })?;
+
+    let token_ref = provider
+      .token_ref
+      .ok_or_else(|| ProviderFlowError::MissingTokenReference {
+        provider_id: provider_id.to_string(),
+        detail: "Provider must be initialized with a token before adapter operations."
+          .to_string(),
+      })?;
+
+    secure_storage
+      .get_digitalocean_api_token(&token_ref)
+      .map_err(|source| ProviderFlowError::SecretStore {
+        detail: "Failed retrieving provider token from secure storage.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| ProviderFlowError::MissingSecret {
+        token_ref,
+        detail: "token_ref exists in DB but secure storage has no corresponding token entry."
+          .to_string(),
+      })
+  }
 }
+
 
 #[cfg(test)]
 mod tests {
