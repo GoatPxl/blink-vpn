@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::backend::Backend;
 use crate::backend::logging;
+use crate::backend::provider::ProviderPlanPricing;
 use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
   ForceCleanupResult,
@@ -52,6 +53,13 @@ pub struct WireGuardInstallResult {
   pub installer_path: String,
   pub message: String,
   pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderPricingResponse {
+  pub provider_id: String,
+  pub region: String,
+  pub plans: Vec<ProviderPlanPricing>,
 }
 
 #[tauri::command]
@@ -150,6 +158,24 @@ pub fn register_digitalocean_provider_token(
 }
 
 #[tauri::command]
+pub fn list_provider_pricing(
+  provider_id: String,
+  region: String,
+  backend: State<'_, Backend>,
+) -> Result<ProviderPricingResponse, String> {
+  let plans = backend
+    .provider
+    .list_provider_plan_pricing(&backend.db, &backend.secure_storage, &provider_id, &region)
+    .map_err(|err| err.to_string())?;
+
+  Ok(ProviderPricingResponse {
+    provider_id,
+    region,
+    plans,
+  })
+}
+
+#[tauri::command]
 pub fn list_vpn_nodes(backend: State<'_, Backend>) -> Result<Vec<VpnNodeRecord>, String> {
   backend
     .orchestrator
@@ -205,6 +231,7 @@ pub fn create_vpn_node_to_ready(
   provider_id: String,
   node_name: String,
   region: String,
+  plan_key: String,
   backend: State<'_, Backend>,
 ) -> Result<String, String> {
   let result = backend
@@ -219,6 +246,7 @@ pub fn create_vpn_node_to_ready(
         provider_id,
         node_name,
         region,
+        plan_key,
       },
     )
     .map_err(|err| err.to_string())?;

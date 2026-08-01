@@ -10,7 +10,8 @@ use crate::backend::db::Database;
 use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus};
 use crate::backend::logging;
 use crate::backend::provider::{
-  ProvisionedDroplet, ProviderFlowError, ProviderRegistry,
+  ProvisionedDroplet, ProviderFlowError, ProviderPlanPricing, ProviderRegistry, DEFAULT_REGION,
+  DEFAULT_SIZE,
 };
 use crate::backend::secure_storage::SecureStorage;
 use crate::backend::wireguard::{
@@ -27,6 +28,7 @@ pub struct CreateVpnNodeRequest {
   pub provider_id: String,
   pub node_name: String,
   pub region: String,
+  pub plan_key: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -223,6 +225,8 @@ impl Orchestrator {
         secure_storage,
         provider_id,
         droplet_name,
+        DEFAULT_REGION,
+        DEFAULT_SIZE,
         &artifact.cloud_init_user_data,
       )
       .map_err(|source| OrchestratorError::Provider {
@@ -456,6 +460,37 @@ impl Orchestrator {
 
     let mut created_droplet: Option<ProvisionedDroplet> = None;
 
+    let pricing = providers
+      .list_provider_plan_pricing(db, secure_storage, &request.provider_id, &request.region)
+      .map_err(|source| OrchestratorError::Provider {
+        detail: "Could not retrieve live provider pricing before provisioning.".to_string(),
+        source,
+      })?;
+
+    let selected_pricing = select_plan_pricing(&pricing, &request.plan_key).ok_or_else(|| {
+      OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: format!(
+          "Selected plan '{}' is unavailable for region '{}' in current provider pricing.",
+          request.plan_key, request.region
+        ),
+      }
+    })?;
+
+    db
+      .update_vpn_node_pricing_snapshot(
+        &request.node_id,
+        Some(&selected_pricing.plan_key),
+        Some(&selected_pricing.size_slug),
+        Some(selected_pricing.monthly_usd),
+        Some(selected_pricing.hourly_usd),
+        Some(&selected_pricing.source_timestamp),
+      )
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed persisting selected pricing snapshot for node.".to_string(),
+        source,
+      })?;
+
     let flow_result: Result<CreateVpnNodeResult, OrchestratorError> = (|| {
       let droplet = providers
         .create_provider_droplet(
@@ -463,6 +498,8 @@ impl Orchestrator {
           secure_storage,
           &request.provider_id,
           &request.node_name,
+          &request.region,
+          &selected_pricing.size_slug,
           &bootstrap_artifact.cloud_init_user_data,
         )
         .map_err(|source| OrchestratorError::Provider {
@@ -1382,10 +1419,39 @@ mod tests {
       })
     }
 
+    fn list_plan_pricing(
+      &self,
+      _token: &str,
+      region: &str,
+    ) -> Result<Vec<crate::backend::provider::ProviderPlanPricing>, ProviderAdapterError> {
+      Ok(vec![
+        crate::backend::provider::ProviderPlanPricing {
+          plan_key: "starter".to_string(),
+          plan_label: "Starter".to_string(),
+          size_slug: "s-1vcpu-1gb".to_string(),
+          region: region.to_string(),
+          monthly_usd: 6.0,
+          hourly_usd: 0.00893,
+          source_timestamp: "0".to_string(),
+        },
+        crate::backend::provider::ProviderPlanPricing {
+          plan_key: "balanced".to_string(),
+          plan_label: "Balanced".to_string(),
+          size_slug: "s-2vcpu-2gb".to_string(),
+          region: region.to_string(),
+          monthly_usd: 12.0,
+          hourly_usd: 0.01786,
+          source_timestamp: "0".to_string(),
+        },
+      ])
+    }
+
     fn create_droplet(
       &self,
       _token: &str,
       _droplet_name: &str,
+      _region: &str,
+      _size_slug: &str,
       _cloud_init_user_data: &str,
     ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
       Ok(ProvisionedDroplet {
@@ -1678,6 +1744,7 @@ mod tests {
           provider_id: "provider-1".to_string(),
           node_name: "node-main".to_string(),
           region: "nyc1".to_string(),
+          plan_key: "starter".to_string(),
         },
       )
       .expect("create flow should succeed");
@@ -1719,6 +1786,7 @@ mod tests {
         provider_id: "provider-1".to_string(),
         node_name: "node-main".to_string(),
         region: "nyc1".to_string(),
+        plan_key: "starter".to_string(),
       },
     );
 
@@ -1954,6 +2022,17 @@ mod tests {
     let bundle_json = serde_json::to_string(&bundle).expect("bundle should serialize");
     assert!(!bundle_json.contains("token_ref"));
   }
+}
+
+fn select_plan_pricing<'a>(
+  pricing: &'a [ProviderPlanPricing],
+  plan_key: &str,
+) -> Option<&'a ProviderPlanPricing> {
+  if let Some(found) = pricing.iter().find(|entry| entry.plan_key == plan_key) {
+    return Some(found);
+  }
+
+  pricing.iter().find(|entry| entry.plan_key == "starter")
 }
 
 impl OrchestratorError {

@@ -3,6 +3,7 @@ pub mod retry;
 
 use std::sync::Arc;
 
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::backend::bootstrap::BootstrapOutputContract;
@@ -21,10 +22,17 @@ pub trait ProviderAdapter: Send + Sync {
   fn provider_name(&self) -> &'static str;
   fn default_regions(&self) -> &'static [&'static str];
   fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError>;
+  fn list_plan_pricing(
+    &self,
+    token: &str,
+    region: &str,
+  ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError>;
   fn create_droplet(
     &self,
     token: &str,
     droplet_name: &str,
+    region: &str,
+    size_slug: &str,
     cloud_init_user_data: &str,
   ) -> Result<ProvisionedDroplet, ProviderAdapterError>;
   fn wait_for_bootstrap_ready(
@@ -83,16 +91,68 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
       })
   }
 
+  fn list_plan_pricing(
+    &self,
+    token: &str,
+    region: &str,
+  ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError> {
+    let sizes = self
+      .client
+      .list_sizes(token)
+      .map_err(|source| ProviderAdapterError::Api {
+        detail: "DigitalOcean size catalog request failed.".to_string(),
+        source,
+      })?;
+
+    let fetched_at_epoch_seconds = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+      Ok(value) => value.as_secs().to_string(),
+      Err(_) => "0".to_string(),
+    };
+
+    let mut pricing = Vec::new();
+    for plan in phase1_plan_catalog() {
+      let maybe_size = sizes.iter().find(|size| {
+        size.slug == plan.size_slug
+          && size.available
+          && size.regions.iter().any(|candidate| candidate == region)
+      });
+
+      if let Some(size) = maybe_size {
+        pricing.push(ProviderPlanPricing {
+          plan_key: plan.plan_key.to_string(),
+          plan_label: plan.plan_label.to_string(),
+          size_slug: size.slug.clone(),
+          region: region.to_string(),
+          monthly_usd: size.price_monthly,
+          hourly_usd: size.price_hourly,
+          source_timestamp: fetched_at_epoch_seconds.clone(),
+        });
+      }
+    }
+
+    Ok(pricing)
+  }
+
   fn create_droplet(
     &self,
     token: &str,
     droplet_name: &str,
+    region: &str,
+    size_slug: &str,
     cloud_init_user_data: &str,
   ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
     let request = CreateDropletRequest {
       name: droplet_name.to_string(),
-      region: self.config.region.to_string(),
-      size: self.config.size.to_string(),
+      region: if region.trim().is_empty() {
+        self.config.region.to_string()
+      } else {
+        region.trim().to_string()
+      },
+      size: if size_slug.trim().is_empty() {
+        self.config.size.to_string()
+      } else {
+        size_slug.trim().to_string()
+      },
       image: self.config.image.to_string(),
       tags: vec!["goatstare-phase1".to_string()],
       user_data: Some(cloud_init_user_data.to_string()),
@@ -175,6 +235,43 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
 pub struct ProvisionedDroplet {
   pub droplet_id: u64,
   pub public_ipv4: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderPlanPricing {
+  pub plan_key: String,
+  pub plan_label: String,
+  pub size_slug: String,
+  pub region: String,
+  pub monthly_usd: f64,
+  pub hourly_usd: f64,
+  pub source_timestamp: String,
+}
+
+struct Phase1PlanSpec {
+  plan_key: &'static str,
+  plan_label: &'static str,
+  size_slug: &'static str,
+}
+
+fn phase1_plan_catalog() -> &'static [Phase1PlanSpec] {
+  &[
+    Phase1PlanSpec {
+      plan_key: "starter",
+      plan_label: "Starter",
+      size_slug: "s-1vcpu-1gb",
+    },
+    Phase1PlanSpec {
+      plan_key: "balanced",
+      plan_label: "Balanced",
+      size_slug: "s-2vcpu-2gb",
+    },
+    Phase1PlanSpec {
+      plan_key: "performance",
+      plan_label: "Performance",
+      size_slug: "s-4vcpu-8gb",
+    },
+  ]
 }
 
 #[derive(Clone)]
@@ -338,14 +435,33 @@ impl ProviderRegistry {
     secure_storage: &SecureStorage,
     provider_id: &str,
     droplet_name: &str,
+    region: &str,
+    size_slug: &str,
     cloud_init_user_data: &str,
   ) -> Result<ProvisionedDroplet, ProviderFlowError> {
     let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
     self
       .active()
-      .create_droplet(&token, droplet_name, cloud_init_user_data)
+      .create_droplet(&token, droplet_name, region, size_slug, cloud_init_user_data)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Droplet provisioning through provider adapter failed.".to_string(),
+        source,
+      })
+  }
+
+  pub fn list_provider_plan_pricing(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    region: &str,
+  ) -> Result<Vec<ProviderPlanPricing>, ProviderFlowError> {
+    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
+    self
+      .active()
+      .list_plan_pricing(&token, region)
+      .map_err(|source| ProviderFlowError::Adapter {
+        detail: "Provider pricing lookup failed through adapter.".to_string(),
         source,
       })
   }
@@ -428,15 +544,23 @@ impl ProviderRegistry {
           .to_string(),
       })?;
 
-    secure_storage
+    let resolved = secure_storage
       .get_digitalocean_api_token(&token_ref)
       .map_err(|source| ProviderFlowError::SecretStore {
         detail: "Failed retrieving provider token from secure storage.".to_string(),
         source,
-      })?
-      .ok_or_else(|| ProviderFlowError::MissingSecret {
+      })?;
+
+    if let Some(token) = resolved {
+      return Ok(token);
+    }
+
+    // Self-heal stale DB pointer so UI can re-register token cleanly.
+    let _ = db.update_provider_token_ref(provider_id, None);
+
+    Err(ProviderFlowError::MissingSecret {
         token_ref,
-        detail: "token_ref exists in DB but secure storage has no corresponding token entry."
+        detail: "Stored token reference is stale: secure storage entry is missing. Re-save your DigitalOcean token in onboarding Step 2."
           .to_string(),
       })
   }
@@ -522,5 +646,42 @@ mod tests {
     assert_ne!(row.1, plaintext_token);
     assert_ne!(row.2, plaintext_token);
     assert_ne!(row.3, plaintext_token);
+  }
+
+  #[test]
+  fn validate_token_clears_stale_token_reference_when_secret_missing() {
+    let db = Database::new(test_db_path("stale_token_ref_cleared"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let registry = ProviderRegistry::new();
+    let secure_storage = SecureStorage::dev_mock();
+
+    let provider = registry
+      .create_digitalocean_provider_with_token(
+        &db,
+        &secure_storage,
+        "provider-1",
+        "DigitalOcean",
+        "dop_v1_stale_test_token",
+      )
+      .expect("provider create should succeed");
+
+    let token_ref = provider
+      .token_ref
+      .clone()
+      .expect("token ref should be present");
+
+    secure_storage
+      .delete_digitalocean_api_token(&token_ref)
+      .expect("mock token delete should succeed");
+
+    let result = registry.validate_provider_token(&db, &secure_storage, "provider-1");
+    assert!(result.is_err());
+
+    let updated = db
+      .get_provider("provider-1")
+      .expect("provider lookup should succeed")
+      .expect("provider should still exist");
+    assert!(updated.token_ref.is_none());
   }
 }

@@ -120,6 +120,25 @@ impl DigitalOceanApiClient {
       })
   }
 
+  pub fn list_sizes(&self, token: &str) -> Result<Vec<Size>, DigitalOceanError> {
+    let response = self.send_with_retry(|| {
+      self
+        .http
+        .get(format!("{}/v2/sizes", self.base_url))
+        .bearer_auth(token)
+        .send()
+    })?;
+
+    self.expect_status("list_sizes", response, &[StatusCode::OK])?
+      .json::<SizesEnvelope>()
+      .map(|envelope| envelope.sizes)
+      .map_err(|source| DigitalOceanError::Decode {
+        action: "list_sizes",
+        detail: "DigitalOcean sizes response could not be parsed.".to_string(),
+        source,
+      })
+  }
+
   pub fn get_droplet(&self, token: &str, droplet_id: u64) -> Result<Droplet, DigitalOceanError> {
     let response = self.send_with_retry(|| {
       self
@@ -374,6 +393,25 @@ pub struct DropletNetworkV4 {
   pub kind: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SizesEnvelope {
+  pub sizes: Vec<Size>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Size {
+  pub slug: String,
+  pub available: bool,
+  pub memory: u64,
+  pub vcpus: u64,
+  pub disk: u64,
+  pub transfer: f64,
+  pub price_monthly: f64,
+  pub price_hourly: f64,
+  pub regions: Vec<String>,
+  pub description: String,
+}
+
 #[cfg(test)]
 mod tests {
   use std::time::Duration;
@@ -571,5 +609,39 @@ mod tests {
     assert!(request_count.load(Ordering::SeqCst) >= 2);
 
     let _ = server.join();
+  }
+
+  #[test]
+  fn lists_sizes_from_api() {
+    let mut server = Server::new();
+    let _m = server
+      .mock("GET", "/v2/sizes")
+      .match_header("authorization", Matcher::Regex("^Bearer .+".to_string()))
+      .with_status(200)
+      .with_body(
+        r#"{
+          "sizes": [
+            {
+              "slug": "s-1vcpu-1gb",
+              "available": true,
+              "memory": 1024,
+              "vcpus": 1,
+              "disk": 25,
+              "transfer": 1,
+              "price_monthly": 6,
+              "price_hourly": 0.00893,
+              "regions": ["nyc1","sfo3"],
+              "description": "Basic"
+            }
+          ]
+        }"#,
+      )
+      .create();
+
+    let api = client(&server.url());
+    let sizes = api.list_sizes("test-token").expect("sizes should list");
+    assert_eq!(sizes.len(), 1);
+    assert_eq!(sizes[0].slug, "s-1vcpu-1gb");
+    assert_eq!(sizes[0].price_monthly, 6.0);
   }
 }

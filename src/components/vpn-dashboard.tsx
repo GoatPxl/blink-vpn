@@ -396,7 +396,7 @@ export function VpnDashboard({ view }: { view: AppView }) {
   async function onCreateNode() {
     setBusyAction("create-node");
     try {
-      const result = await createVpnNode({ nodeId, providerId, nodeName, region });
+      const result = await createVpnNode({ nodeId, providerId, nodeName, region, planKey: "starter" });
       setNodeFeedback(result);
       setRecovery(null);
       pushToast("success", "Node created", result);
@@ -918,6 +918,11 @@ export function VpnDashboard({ view }: { view: AppView }) {
                     provider_id: "",
                     name: "No nodes yet",
                     region: "",
+                    plan_key: null,
+                    size_slug: null,
+                    price_monthly_usd: null,
+                    price_hourly_usd: null,
+                    price_source_timestamp: null,
                     lifecycle_status: "new",
                     external_ref: null,
                     public_ipv4: null,
@@ -956,6 +961,14 @@ export function VpnDashboard({ view }: { view: AppView }) {
                           <div>
                             <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">Latency</div>
                             <div className="mt-1 font-mono text-[13px] text-[var(--secondary)]">{index === 0 ? "12ms" : index === 1 ? "68%" : "--"}</div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">Plan / Size</div>
+                            <div className="mt-1 font-mono text-[12px] text-[var(--on-surface)]">{node.plan_key ?? "n/a"} {node.size_slug ? `(${node.size_slug})` : ""}</div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">Est. Monthly</div>
+                            <div className="mt-1 font-mono text-[13px] text-[var(--on-surface)]">{node.price_monthly_usd !== null ? `$${node.price_monthly_usd.toFixed(2)}` : "n/a"}</div>
                           </div>
                         </div>
                         <div className="mt-8 flex items-center justify-end gap-2 border-t border-[color:var(--outline-variant)] pt-4 opacity-80">

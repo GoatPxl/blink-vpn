@@ -35,6 +35,11 @@ export interface VpnNodeRecord {
   provider_id: string;
   name: string;
   region: string;
+  plan_key: string | null;
+  size_slug: string | null;
+  price_monthly_usd: number | null;
+  price_hourly_usd: number | null;
+  price_source_timestamp: string | null;
   lifecycle_status: NodeLifecycleStatus;
   external_ref: string | null;
   public_ipv4: string | null;
@@ -96,6 +101,22 @@ export interface WireGuardInstallResult {
   next_action: string;
 }
 
+export interface ProviderPlanPricing {
+  plan_key: string;
+  plan_label: string;
+  size_slug: string;
+  region: string;
+  monthly_usd: number;
+  hourly_usd: number;
+  source_timestamp: string;
+}
+
+export interface ProviderPricingResponse {
+  provider_id: string;
+  region: string;
+  plans: ProviderPlanPricing[];
+}
+
 async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (typeof window === "undefined") {
     throw new Error("UI is rendering on the server.");
@@ -137,17 +158,23 @@ export async function validateProviderToken(providerId: string): Promise<string>
   return invokeCommand<string>("validate_provider_token", { providerId });
 }
 
+export async function listProviderPricing(providerId: string, region: string): Promise<ProviderPricingResponse> {
+  return invokeCommand<ProviderPricingResponse>("list_provider_pricing", { providerId, region });
+}
+
 export async function createVpnNode(params: {
   nodeId: string;
   providerId: string;
   nodeName: string;
   region: string;
+  planKey: string;
 }): Promise<string> {
   return invokeCommand<string>("create_vpn_node_to_ready", {
     nodeId: params.nodeId,
     providerId: params.providerId,
     nodeName: params.nodeName,
     region: params.region,
+    planKey: params.planKey,
   });
 }
 

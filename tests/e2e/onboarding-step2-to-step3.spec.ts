@@ -1,0 +1,157 @@
+import { expect, test } from "@playwright/test";
+
+test.describe("Onboarding Step 2", () => {
+  test.beforeEach(async ({ page }) => {
+    const apiToken = process.env.DO_API_TOKEN ?? "dop_v1_test_token";
+
+    await page.addInitScript((tokenFromEnv) => {
+      type TauriArgs = Record<string, unknown> | undefined;
+      type Plan = {
+        plan_key: string;
+        plan_label: string;
+        size_slug: string;
+        region: string;
+        monthly_usd: number;
+        hourly_usd: number;
+        source_timestamp: string;
+      };
+
+      const state = {
+        tokenSaved: false,
+        apiToken: tokenFromEnv,
+      };
+
+      const successPricing: Plan[] = [
+        {
+          plan_key: "starter",
+          plan_label: "Starter",
+          size_slug: "s-1vcpu-1gb",
+          region: "nyc1",
+          monthly_usd: 6,
+          hourly_usd: 0.00893,
+          source_timestamp: "2026-08-01T00:00:00Z",
+        },
+        {
+          plan_key: "balanced",
+          plan_label: "Balanced",
+          size_slug: "s-1vcpu-2gb",
+          region: "nyc1",
+          monthly_usd: 12,
+          hourly_usd: 0.01786,
+          source_timestamp: "2026-08-01T00:00:00Z",
+        },
+        {
+          plan_key: "performance",
+          plan_label: "Performance",
+          size_slug: "s-2vcpu-4gb",
+          region: "nyc1",
+          monthly_usd: 24,
+          hourly_usd: 0.03571,
+          source_timestamp: "2026-08-01T00:00:00Z",
+        },
+      ];
+
+      const internals = {
+        invoke: async (command: string, args?: TauriArgs) => {
+          if (command === "check_wireguard_readiness") {
+            return {
+              installed: true,
+              executable_found: true,
+              service_available: true,
+              version: "0.5.3",
+              message: "WireGuard is ready.",
+              action_guidance: "Continue onboarding.",
+            };
+          }
+
+          if (command === "register_digitalocean_provider_token") {
+            const candidate = String(args?.apiToken ?? "");
+            if (!candidate || !candidate.startsWith("dop_v1_")) {
+              throw new Error("DigitalOcean token was rejected. Verify token format and scope.");
+            }
+            state.tokenSaved = true;
+            state.apiToken = candidate;
+            return "Provider registered with secure token reference.";
+          }
+
+          if (command === "validate_provider_token") {
+            if (!state.tokenSaved || !state.apiToken) {
+              throw new Error("Provider 'provider-1' has no token_ref. Provider must be initialized with a token before adapter operations.");
+            }
+            return "Provider token is valid for DigitalOcean API.";
+          }
+
+          if (command === "list_provider_pricing") {
+            const forcePricingStale = Boolean((window as unknown as { __TEST_FORCE_STALE?: boolean }).__TEST_FORCE_STALE);
+            if (forcePricingStale) {
+              state.tokenSaved = false;
+              throw new Error("Provider token_ref 'do-token:provider-1:stale' has no stored secret. Stored token reference is stale: secure storage entry is missing.");
+            }
+
+            if (!state.tokenSaved) {
+              throw new Error("Provider 'provider-1' has no token_ref. Provider must be initialized with a token before adapter operations.");
+            }
+
+            const region = String(args?.region ?? "nyc1");
+            return {
+              provider_id: "provider-1",
+              region,
+              plans: successPricing.map((plan) => ({ ...plan, region })),
+            };
+          }
+
+          throw new Error(`Unhandled mocked command: ${command}`);
+        },
+      };
+
+      (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = internals;
+    }, apiToken);
+
+    await page.goto("/onboarding");
+
+    await expect(page.getByRole("heading", { name: "WireGuard Readiness" })).toBeVisible();
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "DigitalOcean Token" })).toBeVisible();
+  });
+
+  test("requires save before validation", async ({ page }) => {
+    const validateButton = page.getByRole("button", { name: "Validate Token", exact: true });
+    await expect(validateButton).toBeDisabled();
+  });
+
+  test("does not allow advancing to step 3 before token registration", async ({ page }) => {
+    await expect(page.getByRole("button", { name: "Next", exact: true })).toBeDisabled();
+  });
+
+  test("save and validate token in one action advances to step 3 with live pricing", async ({ page }) => {
+    const tokenInput = page.getByPlaceholder("dop_v1_...");
+    await tokenInput.fill(process.env.DO_API_TOKEN ?? "dop_v1_test_token");
+
+    await page.getByRole("button", { name: "Save + Validate Token", exact: true }).click();
+    await expect(page.getByText("Provider registered with secure token reference.")).toBeVisible();
+    await expect(page.getByText("Provider token is valid for DigitalOcean API.")).toBeVisible();
+
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+
+    await expect(page.getByRole("heading", { name: "Server Configuration" })).toBeVisible();
+    await expect(page.getByText("Live pricing")).toBeVisible();
+    await expect(page.getByText("$6.00/mo")).toBeVisible();
+  });
+
+  test("returns to step 2 with guidance when token becomes stale during step 3 pricing load", async ({ page }) => {
+    const tokenInput = page.getByPlaceholder("dop_v1_...");
+    await tokenInput.fill(process.env.DO_API_TOKEN ?? "dop_v1_test_token");
+
+    await page.getByRole("button", { name: "Save + Validate Token", exact: true }).click();
+    await expect(page.getByText("Provider token is valid for DigitalOcean API.")).toBeVisible();
+
+    await page.evaluate(() => {
+      (window as unknown as { __TEST_FORCE_STALE?: boolean }).__TEST_FORCE_STALE = true;
+    });
+
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+
+    await expect(page.getByRole("heading", { name: "DigitalOcean Token" })).toBeVisible();
+    await expect(page.getByText("Provider token is no longer valid in secure storage. Save Token, then Validate Token to continue.")).toBeVisible();
+  });
+});

@@ -11,6 +11,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (3, include_str!("../../../migrations/0003_provider_token_ref.sql")),
   (4, include_str!("../../../migrations/0004_vpn_node_server_key.sql")),
   (5, include_str!("../../../migrations/0005_tunnel_stats_snapshot.sql")),
+  (6, include_str!("../../../migrations/0006_vpn_node_pricing_snapshot.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -151,12 +152,17 @@ pub struct ProviderRecord {
   pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VpnNodeRecord {
   pub id: String,
   pub provider_id: String,
   pub name: String,
   pub region: String,
+  pub plan_key: Option<String>,
+  pub size_slug: Option<String>,
+  pub price_monthly_usd: Option<f64>,
+  pub price_hourly_usd: Option<f64>,
+  pub price_source_timestamp: Option<String>,
   pub lifecycle_status: NodeLifecycleStatus,
   pub external_ref: Option<String>,
   pub public_ipv4: Option<String>,
@@ -487,8 +493,9 @@ impl Database {
     let connection = self.open_connection()?;
     let mut statement = connection
       .prepare(
-        "SELECT id, provider_id, name, region, lifecycle_status, external_ref,
-                public_ipv4, server_public_key, error_reason, created_at, updated_at
+        "SELECT id, provider_id, name, region, plan_key, size_slug, price_monthly_usd,
+          price_hourly_usd, price_source_timestamp, lifecycle_status, external_ref,
+          public_ipv4, server_public_key, error_reason, created_at, updated_at
          FROM vpn_nodes
          ORDER BY created_at ASC",
       )
@@ -524,8 +531,9 @@ impl Database {
     let connection = self.open_connection()?;
     connection
       .query_row(
-        "SELECT id, provider_id, name, region, lifecycle_status, external_ref,
-                public_ipv4, server_public_key, error_reason, created_at, updated_at
+        "SELECT id, provider_id, name, region, plan_key, size_slug, price_monthly_usd,
+          price_hourly_usd, price_source_timestamp, lifecycle_status, external_ref,
+          public_ipv4, server_public_key, error_reason, created_at, updated_at
          FROM vpn_nodes
          WHERE id = ?1",
         params![id],
@@ -622,6 +630,52 @@ impl Database {
         id: id.to_string(),
         detail: "Runtime detail update skipped because no row matched the id."
           .to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
+  pub fn update_vpn_node_pricing_snapshot(
+    &self,
+    id: &str,
+    plan_key: Option<&str>,
+    size_slug: Option<&str>,
+    price_monthly_usd: Option<f64>,
+    price_hourly_usd: Option<f64>,
+    price_source_timestamp: Option<&str>,
+  ) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let changed = connection
+      .execute(
+        "UPDATE vpn_nodes
+         SET plan_key = ?2,
+             size_slug = ?3,
+             price_monthly_usd = ?4,
+             price_hourly_usd = ?5,
+             price_source_timestamp = ?6,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1",
+        params![
+          id,
+          plan_key,
+          size_slug,
+          price_monthly_usd,
+          price_hourly_usd,
+          price_source_timestamp,
+        ],
+      )
+      .map_err(|source| DbError::Query {
+        action: "update_vpn_node_pricing_snapshot",
+        detail: "Failed updating node pricing snapshot metadata.".to_string(),
+        source,
+      })?;
+
+    if changed == 0 {
+      return Err(DbError::NotFound {
+        entity: "vpn_node",
+        id: id.to_string(),
+        detail: "Pricing snapshot update skipped because no row matched the id.".to_string(),
       });
     }
 
@@ -853,10 +907,10 @@ fn map_provider_row(row: &Row<'_>) -> rusqlite::Result<ProviderRecord> {
 }
 
 fn map_vpn_node_row(row: &Row<'_>) -> rusqlite::Result<VpnNodeRecord> {
-  let raw_status: String = row.get(4)?;
+  let raw_status: String = row.get(9)?;
   let lifecycle_status = NodeLifecycleStatus::try_from(raw_status.as_str()).map_err(|err| {
     rusqlite::Error::FromSqlConversionFailure(
-      4,
+      9,
       rusqlite::types::Type::Text,
       Box::new(err),
     )
@@ -867,13 +921,18 @@ fn map_vpn_node_row(row: &Row<'_>) -> rusqlite::Result<VpnNodeRecord> {
     provider_id: row.get(1)?,
     name: row.get(2)?,
     region: row.get(3)?,
+    plan_key: row.get(4)?,
+    size_slug: row.get(5)?,
+    price_monthly_usd: row.get(6)?,
+    price_hourly_usd: row.get(7)?,
+    price_source_timestamp: row.get(8)?,
     lifecycle_status,
-    external_ref: row.get(5)?,
-    public_ipv4: row.get(6)?,
-    server_public_key: row.get(7)?,
-    error_reason: row.get(8)?,
-    created_at: row.get(9)?,
-    updated_at: row.get(10)?,
+    external_ref: row.get(10)?,
+    public_ipv4: row.get(11)?,
+    server_public_key: row.get(12)?,
+    error_reason: row.get(13)?,
+    created_at: row.get(14)?,
+    updated_at: row.get(15)?,
   })
 }
 

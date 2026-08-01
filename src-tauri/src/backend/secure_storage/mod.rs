@@ -46,6 +46,7 @@ pub enum SecretStoreError {
 #[derive(Clone)]
 pub struct SecureStorage {
   inner: Arc<dyn SecretStore>,
+  session_cache: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl SecureStorage {
@@ -54,6 +55,7 @@ impl SecureStorage {
     {
       Self {
         inner: Arc::new(WindowsCredentialStore::new()),
+        session_cache: Arc::new(Mutex::new(HashMap::new())),
       }
     }
 
@@ -61,17 +63,22 @@ impl SecureStorage {
     {
       Self {
         inner: Arc::new(MockSecretStore::default()),
+        session_cache: Arc::new(Mutex::new(HashMap::new())),
       }
     }
   }
 
   pub fn from_store(store: Arc<dyn SecretStore>) -> Self {
-    Self { inner: store }
+    Self {
+      inner: store,
+      session_cache: Arc::new(Mutex::new(HashMap::new())),
+    }
   }
 
   pub fn dev_mock() -> Self {
     Self {
       inner: Arc::new(MockSecretStore::default()),
+      session_cache: Arc::new(Mutex::new(HashMap::new())),
     }
   }
 
@@ -84,20 +91,44 @@ impl SecureStorage {
     provider_id: &str,
     token: &str,
   ) -> Result<String, SecretStoreError> {
-    self
+    let token_ref = self
       .inner
-      .store_secret(SecretKind::DigitalOceanApiToken, provider_id, token)
+      .store_secret(SecretKind::DigitalOceanApiToken, provider_id, token)?;
+
+    if let Ok(mut guard) = self.session_cache.lock() {
+      guard.insert(token_ref.clone(), token.to_string());
+    }
+
+    Ok(token_ref)
   }
 
   pub fn get_digitalocean_api_token(
     &self,
     token_ref: &str,
   ) -> Result<Option<String>, SecretStoreError> {
-    self.inner.retrieve_secret(token_ref)
+    let resolved = self.inner.retrieve_secret(token_ref)?;
+    if let Some(value) = resolved {
+      if let Ok(mut guard) = self.session_cache.lock() {
+        guard.insert(token_ref.to_string(), value.clone());
+      }
+      return Ok(Some(value));
+    }
+
+    if let Ok(guard) = self.session_cache.lock() {
+      if let Some(cached) = guard.get(token_ref) {
+        return Ok(Some(cached.clone()));
+      }
+    }
+
+    Ok(None)
   }
 
   pub fn delete_digitalocean_api_token(&self, token_ref: &str) -> Result<(), SecretStoreError> {
-    self.inner.delete_secret(token_ref)
+    self.inner.delete_secret(token_ref)?;
+    if let Ok(mut guard) = self.session_cache.lock() {
+      guard.remove(token_ref);
+    }
+    Ok(())
   }
 
   pub fn store_client_private_key(
@@ -105,20 +136,44 @@ impl SecureStorage {
     node_id: &str,
     private_key: &str,
   ) -> Result<String, SecretStoreError> {
-    self
+    let key_ref = self
       .inner
-      .store_secret(SecretKind::ClientPrivateKey, node_id, private_key)
+      .store_secret(SecretKind::ClientPrivateKey, node_id, private_key)?;
+
+    if let Ok(mut guard) = self.session_cache.lock() {
+      guard.insert(key_ref.clone(), private_key.to_string());
+    }
+
+    Ok(key_ref)
   }
 
   pub fn get_client_private_key(
     &self,
     key_ref: &str,
   ) -> Result<Option<String>, SecretStoreError> {
-    self.inner.retrieve_secret(key_ref)
+    let resolved = self.inner.retrieve_secret(key_ref)?;
+    if let Some(value) = resolved {
+      if let Ok(mut guard) = self.session_cache.lock() {
+        guard.insert(key_ref.to_string(), value.clone());
+      }
+      return Ok(Some(value));
+    }
+
+    if let Ok(guard) = self.session_cache.lock() {
+      if let Some(cached) = guard.get(key_ref) {
+        return Ok(Some(cached.clone()));
+      }
+    }
+
+    Ok(None)
   }
 
   pub fn delete_client_private_key(&self, key_ref: &str) -> Result<(), SecretStoreError> {
-    self.inner.delete_secret(key_ref)
+    self.inner.delete_secret(key_ref)?;
+    if let Ok(mut guard) = self.session_cache.lock() {
+      guard.remove(key_ref);
+    }
+    Ok(())
   }
 }
 
@@ -136,32 +191,37 @@ impl WindowsCredentialStore {
     }
   }
 
-  fn build_secret_ref(&self, kind: SecretKind, owner_id: &str) -> String {
+  fn build_secret_ref_legacy(&self, kind: SecretKind, owner_id: &str) -> String {
     let owner = sanitize_segment(owner_id);
     format!("{}:{}:{}", kind.prefix(), owner, Uuid::new_v4())
   }
 
+  fn build_secret_ref_compact(&self, kind: SecretKind, owner_id: &str) -> String {
+    let owner = sanitize_segment(owner_id);
+    format!("{}__{}__{}", kind.prefix(), owner, Uuid::new_v4())
+  }
+
   fn parse_secret_ref(secret_ref: &str) -> Result<(), SecretStoreError> {
-    let parts = secret_ref.split(':').collect::<Vec<_>>();
-    if parts.len() != 3 {
+    if secret_ref.trim().is_empty() {
       return Err(SecretStoreError::InvalidReference {
-        detail: "Expected secret_ref format kind:owner:uuid.".to_string(),
+        detail: "Secret reference must not be empty.".to_string(),
       });
     }
+
+    let has_legacy_shape = secret_ref.split(':').count() == 3;
+    let has_compact_shape = secret_ref.split("__").count() == 3;
+
+    if !has_legacy_shape && !has_compact_shape {
+      return Err(SecretStoreError::InvalidReference {
+        detail: "Expected secret_ref format kind:owner:uuid or kind__owner__uuid.".to_string(),
+      });
+    }
+
     Ok(())
   }
-}
 
-#[cfg(target_os = "windows")]
-impl SecretStore for WindowsCredentialStore {
-  fn store_secret(
-    &self,
-    kind: SecretKind,
-    owner_id: &str,
-    secret: &str,
-  ) -> Result<String, SecretStoreError> {
-    let secret_ref = self.build_secret_ref(kind, owner_id);
-    let entry = keyring::Entry::new(&self.service_name, &secret_ref).map_err(|source| {
+  fn store_and_verify_secret_ref(&self, secret_ref: &str, secret: &str) -> Result<bool, SecretStoreError> {
+    let entry = keyring::Entry::new(&self.service_name, secret_ref).map_err(|source| {
       SecretStoreError::Store {
         detail: format!(
           "Could not initialize Windows credential entry. Ensure Credential Manager is available. ({source})"
@@ -177,7 +237,39 @@ impl SecretStore for WindowsCredentialStore {
         ),
       })?;
 
-    Ok(secret_ref)
+    match entry.get_password() {
+      Ok(roundtrip) => Ok(roundtrip == secret),
+      Err(keyring::Error::NoEntry) => Ok(false),
+      Err(source) => Err(SecretStoreError::Retrieve {
+        detail: format!(
+          "Could not verify secret after write in Windows protected storage. ({source})"
+        ),
+      }),
+    }
+  }
+}
+
+#[cfg(target_os = "windows")]
+impl SecretStore for WindowsCredentialStore {
+  fn store_secret(
+    &self,
+    kind: SecretKind,
+    owner_id: &str,
+    secret: &str,
+  ) -> Result<String, SecretStoreError> {
+    let legacy_ref = self.build_secret_ref_legacy(kind, owner_id);
+    if self.store_and_verify_secret_ref(&legacy_ref, secret)? {
+      return Ok(legacy_ref);
+    }
+
+    let compact_ref = self.build_secret_ref_compact(kind, owner_id);
+    if self.store_and_verify_secret_ref(&compact_ref, secret)? {
+      return Ok(compact_ref);
+    }
+
+    Err(SecretStoreError::Store {
+      detail: "Secret write succeeded but immediate read-back failed; token was not persisted reliably. Retry the save action.".to_string(),
+    })
   }
 
   fn retrieve_secret(&self, secret_ref: &str) -> Result<Option<String>, SecretStoreError> {
@@ -288,7 +380,35 @@ fn sanitize_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::Arc;
+
   use super::SecureStorage;
+  use super::{SecretKind, SecretStore, SecretStoreError};
+
+  struct VolatileNoReadStore;
+
+  impl SecretStore for VolatileNoReadStore {
+    fn store_secret(
+      &self,
+      kind: SecretKind,
+      owner_id: &str,
+      _secret: &str,
+    ) -> Result<String, SecretStoreError> {
+      Ok(format!("{}:{}:volatile", kind.prefix(), owner_id))
+    }
+
+    fn retrieve_secret(&self, _secret_ref: &str) -> Result<Option<String>, SecretStoreError> {
+      Ok(None)
+    }
+
+    fn delete_secret(&self, _secret_ref: &str) -> Result<(), SecretStoreError> {
+      Ok(())
+    }
+
+    fn backend_name(&self) -> &'static str {
+      "volatile-no-read"
+    }
+  }
 
   #[test]
   fn mock_secret_store_roundtrip_for_api_token_and_private_key() {
@@ -333,5 +453,20 @@ mod tests {
         .expect("private key lookup should succeed")
         .is_none()
     );
+  }
+
+  #[test]
+  fn session_cache_returns_secret_when_backend_lookup_temporarily_missing() {
+    let storage = SecureStorage::from_store(Arc::new(VolatileNoReadStore));
+
+    let token_ref = storage
+      .store_digitalocean_api_token("provider-1", "dop_v1_secret")
+      .expect("token should store");
+
+    let token = storage
+      .get_digitalocean_api_token(&token_ref)
+      .expect("token lookup should succeed");
+
+    assert_eq!(token.as_deref(), Some("dop_v1_secret"));
   }
 }
