@@ -31,6 +31,35 @@ pub fn run() {
 
       backend.db.run_migrations()?;
 
+      match backend.orchestrator.reconcile_startup(
+        &backend.provider,
+        &backend.wireguard,
+        &backend.db,
+        &backend.secure_storage,
+      ) {
+        Ok(report) => {
+          if !report.issues.is_empty() {
+            log::warn!(
+              "Startup reconciliation completed with {} issue(s).",
+              report.issues.len()
+            );
+            for issue in report.issues {
+              log::warn!(
+                "reconcile_issue kind={:?} node_id={:?} tunnel_id={:?} repaired={} detail={}",
+                issue.kind,
+                issue.node_id,
+                issue.tunnel_id,
+                issue.repaired,
+                issue.detail
+              );
+            }
+          }
+        }
+        Err(err) => {
+          log::error!("Startup reconciliation failed: {}", err);
+        }
+      }
+
       app.manage(backend.clone());
       Ok(())
     })
@@ -41,6 +70,8 @@ pub fn run() {
       commands::system::create_and_activate_client_tunnel,
       commands::system::activate_client_tunnel,
       commands::system::deactivate_client_tunnel,
+      commands::system::connect_tunnel,
+      commands::system::disconnect_tunnel,
       commands::system::read_client_tunnel_status,
       commands::system::validate_provider_token,
       commands::system::provision_provider_droplet,

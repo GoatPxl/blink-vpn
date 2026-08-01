@@ -1,7 +1,9 @@
 use tauri::State;
 
 use crate::backend::Backend;
-use crate::backend::orchestrator::{CreateClientTunnelRequest, CreateVpnNodeRequest};
+use crate::backend::orchestrator::{
+  ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
+};
 
 #[tauri::command]
 pub fn hello(name: Option<String>, backend: State<'_, Backend>) -> String {
@@ -41,7 +43,10 @@ pub fn provision_provider_droplet(
       &provider_id,
       &droplet_name,
     )
-    .map_err(|err| err.to_string())?;
+    .map_err(|err| {
+      let user_error = err.to_user_facing();
+      format!("{} Next: {}", user_error.message, user_error.next_action)
+    })?;
 
   Ok(format!(
     "Droplet provisioned: id={}, public_ipv4={}",
@@ -199,4 +204,42 @@ pub fn read_client_tunnel_status(
     status.rx_bytes,
     status.tx_bytes
   ))
+}
+
+#[tauri::command]
+pub fn connect_tunnel(
+  node_id: String,
+  tunnel_id: String,
+  backend: State<'_, Backend>,
+) -> Result<(), String> {
+  backend
+    .orchestrator
+    .connect_tunnel(
+      &backend.wireguard,
+      &backend.db,
+      &ConnectTunnelRequest { node_id, tunnel_id },
+    )
+    .map_err(|err| {
+      let user_error = err.to_user_facing();
+      format!("{} Next: {}", user_error.message, user_error.next_action)
+    })
+}
+
+#[tauri::command]
+pub fn disconnect_tunnel(
+  node_id: String,
+  tunnel_id: String,
+  backend: State<'_, Backend>,
+) -> Result<(), String> {
+  backend
+    .orchestrator
+    .disconnect_tunnel(
+      &backend.wireguard,
+      &backend.db,
+      &DisconnectTunnelRequest { node_id, tunnel_id },
+    )
+    .map_err(|err| {
+      let user_error = err.to_user_facing();
+      format!("{} Next: {}", user_error.message, user_error.next_action)
+    })
 }

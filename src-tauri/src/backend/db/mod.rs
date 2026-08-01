@@ -9,6 +9,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (2, include_str!("../../../migrations/0002_indexes.sql")),
   (3, include_str!("../../../migrations/0003_provider_token_ref.sql")),
   (4, include_str!("../../../migrations/0004_vpn_node_server_key.sql")),
+  (5, include_str!("../../../migrations/0005_tunnel_stats_snapshot.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +172,10 @@ pub struct TunnelRecord {
   pub status: TunnelStatus,
   pub interface_name: Option<String>,
   pub assigned_ipv4: Option<String>,
+  pub last_handshake_age_seconds: Option<i64>,
+  pub rx_bytes: Option<i64>,
+  pub tx_bytes: Option<i64>,
+  pub stats_updated_at: Option<String>,
   pub last_error: Option<String>,
   pub created_at: String,
   pub updated_at: String,
@@ -673,7 +678,8 @@ impl Database {
     connection
       .query_row(
         "SELECT id, node_id, name, status, interface_name, assigned_ipv4,
-                last_error, created_at, updated_at
+          last_handshake_age_seconds, rx_bytes, tx_bytes, stats_updated_at,
+          last_error, created_at, updated_at
          FROM tunnels
          WHERE id = ?1",
         params![id],
@@ -693,7 +699,8 @@ impl Database {
     let mut statement = connection
       .prepare(
         "SELECT id, node_id, name, status, interface_name, assigned_ipv4,
-                last_error, created_at, updated_at
+          last_handshake_age_seconds, rx_bytes, tx_bytes, stats_updated_at,
+          last_error, created_at, updated_at
          FROM tunnels
          WHERE node_id = ?1
          ORDER BY created_at ASC",
@@ -756,6 +763,42 @@ impl Database {
         id: id.to_string(),
         detail: "Status update skipped because no row matched the id."
           .to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
+  pub fn update_tunnel_stats_snapshot(
+    &self,
+    id: &str,
+    last_handshake_age_seconds: Option<i64>,
+    rx_bytes: Option<i64>,
+    tx_bytes: Option<i64>,
+  ) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let changed = connection
+      .execute(
+        "UPDATE tunnels
+         SET last_handshake_age_seconds = ?2,
+             rx_bytes = ?3,
+             tx_bytes = ?4,
+             stats_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1",
+        params![id, last_handshake_age_seconds, rx_bytes, tx_bytes],
+      )
+      .map_err(|source| DbError::Query {
+        action: "update_tunnel_stats_snapshot",
+        detail: "Failed persisting tunnel runtime stats snapshot.".to_string(),
+        source,
+      })?;
+
+    if changed == 0 {
+      return Err(DbError::NotFound {
+        entity: "tunnel",
+        id: id.to_string(),
+        detail: "Stats snapshot update skipped because no row matched the id.".to_string(),
       });
     }
 
@@ -849,9 +892,13 @@ fn map_tunnel_row(row: &Row<'_>) -> rusqlite::Result<TunnelRecord> {
     status,
     interface_name: row.get(4)?,
     assigned_ipv4: row.get(5)?,
-    last_error: row.get(6)?,
-    created_at: row.get(7)?,
-    updated_at: row.get(8)?,
+    last_handshake_age_seconds: row.get(6)?,
+    rx_bytes: row.get(7)?,
+    tx_bytes: row.get(8)?,
+    stats_updated_at: row.get(9)?,
+    last_error: row.get(10)?,
+    created_at: row.get(11)?,
+    updated_at: row.get(12)?,
   })
 }
 

@@ -249,6 +249,13 @@ impl DigitalOceanApiClient {
       });
     }
 
+    if status == StatusCode::NOT_FOUND {
+      return Err(DigitalOceanError::NotFound {
+        action,
+        detail: "DigitalOcean resource was not found.".to_string(),
+      });
+    }
+
     let body_snippet = response
       .text()
       .unwrap_or_else(|_| "<unavailable>".to_string())

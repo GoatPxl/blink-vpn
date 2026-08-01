@@ -134,16 +134,22 @@ impl WireGuardManager {
     validate_tunnel_name(tunnel_name)?;
 
     let service_name = wireguard_service_name(tunnel_name);
-    self
+    let start_result = self
       .runner
       .run("sc", &["start", &service_name], None)
-      .map_err(|source| WireGuardError::Command {
-        command: format!("sc start {service_name}"),
-        detail: "Could not activate WireGuard tunnel service.".to_string(),
-        source,
-      })?;
+      .map_err(|source| map_sc_tunnel_error(source, &service_name, "start"));
 
-    Ok(())
+    match start_result {
+      Ok(_) => Ok(()),
+      Err(WireGuardError::Command {
+        source: CommandExecError::NonZeroExit {
+          code: Some(1056),
+          ..
+        },
+        ..
+      }) => Ok(()),
+      Err(error) => Err(error),
+    }
   }
 
   pub fn deactivate_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
@@ -151,16 +157,22 @@ impl WireGuardManager {
     validate_tunnel_name(tunnel_name)?;
 
     let service_name = wireguard_service_name(tunnel_name);
-    self
+    let stop_result = self
       .runner
       .run("sc", &["stop", &service_name], None)
-      .map_err(|source| WireGuardError::Command {
-        command: format!("sc stop {service_name}"),
-        detail: "Could not deactivate WireGuard tunnel service.".to_string(),
-        source,
-      })?;
+      .map_err(|source| map_sc_tunnel_error(source, &service_name, "stop"));
 
-    Ok(())
+    match stop_result {
+      Ok(_) => Ok(()),
+      Err(WireGuardError::Command {
+        source: CommandExecError::NonZeroExit {
+          code: Some(1062),
+          ..
+        },
+        ..
+      }) => Ok(()),
+      Err(error) => Err(error),
+    }
   }
 
   pub fn unregister_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
@@ -187,11 +199,7 @@ impl WireGuardManager {
     let service_out = self
       .runner
       .run("sc", &["query", &service_name], None)
-      .map_err(|source| WireGuardError::Command {
-        command: format!("sc query {service_name}"),
-        detail: "Could not read tunnel service state from Windows Service Control.".to_string(),
-        source,
-      })?;
+      .map_err(|source| map_sc_tunnel_error(source, &service_name, "query"))?;
 
     let state = parse_sc_state(&service_out.stdout)?;
 
@@ -409,6 +417,8 @@ pub enum WireGuardError {
   },
   #[error("WireGuard output parsing failed: {detail}")]
   InvalidOutput { detail: String },
+  #[error("WireGuard tunnel service '{tunnel_name}' was not found locally. {detail}")]
+  TunnelNotFound { tunnel_name: String, detail: String },
   #[error("WireGuard IO operation '{action}' failed: {detail}")]
   Io {
     action: &'static str,
@@ -600,6 +610,26 @@ fn map_install_error(source: CommandExecError, command: &str) -> WireGuardError 
       detail: "WireGuard command exists but failed during install check.".to_string(),
       source: other,
     },
+  }
+}
+
+fn map_sc_tunnel_error(source: CommandExecError, service_name: &str, operation: &str) -> WireGuardError {
+  if let CommandExecError::NonZeroExit {
+    code: Some(1060),
+    ..
+  } = source
+  {
+    return WireGuardError::TunnelNotFound {
+      tunnel_name: service_name.strip_prefix("WireGuardTunnel$").unwrap_or(service_name).to_string(),
+      detail: "WireGuard tunnel service does not exist on this machine. Re-import the tunnel configuration."
+        .to_string(),
+    };
+  }
+
+  WireGuardError::Command {
+    command: format!("sc {operation} {service_name}"),
+    detail: "Could not complete WireGuard tunnel service operation.".to_string(),
+    source,
   }
 }
 

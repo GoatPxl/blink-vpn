@@ -56,6 +56,59 @@ pub struct CreateClientTunnelResult {
   pub client_public_key: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ConnectTunnelRequest {
+  pub node_id: String,
+  pub tunnel_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DisconnectTunnelRequest {
+  pub node_id: String,
+  pub tunnel_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileIssueKind {
+  StaleTunnelStatusRepaired,
+  MissingDroplet,
+  MissingTunnelArtifact,
+  MissingNodeRuntimeData,
+  StartupDependencyUnavailable,
+  ProviderCheckFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileIssue {
+  pub kind: ReconcileIssueKind,
+  pub node_id: Option<String>,
+  pub tunnel_id: Option<String>,
+  pub repaired: bool,
+  pub detail: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReconcileReport {
+  pub issues: Vec<ReconcileIssue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserFacingErrorKind {
+  InvalidState,
+  MissingResource,
+  Provider,
+  WireGuard,
+  Persistence,
+  Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserFacingError {
+  pub kind: UserFacingErrorKind,
+  pub message: String,
+  pub next_action: String,
+}
+
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
   #[error("Provider orchestration failed: {detail}")]
@@ -456,6 +509,14 @@ impl Orchestrator {
           detail: "Failed creating tunnel row before activation.".to_string(),
           source,
         })?;
+    } else {
+      let existing = existing.expect("checked is_some above");
+      if existing.node_id != request.node_id {
+        return Err(OrchestratorError::InvalidState {
+          node_id: request.node_id.clone(),
+          detail: "Tunnel id already belongs to a different vpn node.".to_string(),
+        });
+      }
     }
 
     let keypair = wireguard
@@ -493,26 +554,14 @@ impl Orchestrator {
       });
     }
 
-    if let Err(error) = wireguard.activate_tunnel(&request.tunnel_name) {
-      let _ = db.update_tunnel_status(
-        &request.tunnel_id,
-        TunnelStatus::Error,
-        Some("WireGuard tunnel activation failed"),
-      );
-      return Err(OrchestratorError::WireGuard {
-        detail: "Could not activate client tunnel service.".to_string(),
-        source: error,
-      });
-    }
-
-    db
-      .update_tunnel_status(&request.tunnel_id, TunnelStatus::Connected, None)
-      .map_err(|source| OrchestratorError::Database {
-        detail: "Failed marking tunnel as Connected after activation.".to_string(),
-        source,
-      })?;
-
-    let _ = db.transition_vpn_node_status(&request.node_id, NodeLifecycleStatus::Connected, None);
+    self.connect_tunnel(
+      wireguard,
+      db,
+      &ConnectTunnelRequest {
+        node_id: request.node_id.clone(),
+        tunnel_id: request.tunnel_id.clone(),
+      },
+    )?;
 
     Ok(CreateClientTunnelResult {
       tunnel_id: request.tunnel_id.clone(),
@@ -542,22 +591,14 @@ impl Orchestrator {
         },
       })?;
 
-    wireguard
-      .deactivate_tunnel(&tunnel.name)
-      .map_err(|source| OrchestratorError::WireGuard {
-        detail: "Could not deactivate WireGuard tunnel service.".to_string(),
-        source,
-      })?;
-
-    db
-      .update_tunnel_status(tunnel_id, TunnelStatus::Disconnected, None)
-      .map_err(|source| OrchestratorError::Database {
-        detail: "Failed marking tunnel as Disconnected after stop.".to_string(),
-        source,
-      })?;
-
-    let _ = db.transition_vpn_node_status(&tunnel.node_id, NodeLifecycleStatus::Ready, None);
-    Ok(())
+    self.disconnect_tunnel(
+      wireguard,
+      db,
+      &DisconnectTunnelRequest {
+        node_id: tunnel.node_id,
+        tunnel_id: tunnel_id.to_string(),
+      },
+    )
   }
 
   pub fn activate_client_tunnel(
@@ -581,21 +622,186 @@ impl Orchestrator {
         },
       })?;
 
+    self.connect_tunnel(
+      wireguard,
+      db,
+      &ConnectTunnelRequest {
+        node_id: tunnel.node_id,
+        tunnel_id: tunnel_id.to_string(),
+      },
+    )
+  }
+
+  pub fn connect_tunnel(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    request: &ConnectTunnelRequest,
+  ) -> Result<(), OrchestratorError> {
+    let node = db
+      .get_vpn_node(&request.node_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading vpn node before connect flow.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "Connect requested for a vpn node that does not exist.".to_string(),
+      })?;
+
+    if !matches!(
+      node.lifecycle_status,
+      NodeLifecycleStatus::Ready | NodeLifecycleStatus::Connected
+    ) {
+      return Err(OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "Connect flow requires node lifecycle status Ready or Connected.".to_string(),
+      });
+    }
+
+    let tunnel = db
+      .get_tunnel(&request.tunnel_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading tunnel before connect flow.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::Database {
+        detail: "Connect flow requested for unknown tunnel id.".to_string(),
+        source: DbError::NotFound {
+          entity: "tunnel",
+          id: request.tunnel_id.clone(),
+          detail: "No tunnel row matched the id for connect flow.".to_string(),
+        },
+      })?;
+
+    if tunnel.node_id != request.node_id {
+      return Err(OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "Connect flow tunnel id does not belong to the requested node.".to_string(),
+      });
+    }
+
+    if tunnel.status == TunnelStatus::Connected && node.lifecycle_status == NodeLifecycleStatus::Connected {
+      let runtime = self.read_client_tunnel_status(wireguard, db, &request.tunnel_id)?;
+      if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
+        return Ok(());
+      }
+    }
+
     wireguard
       .activate_tunnel(&tunnel.name)
       .map_err(|source| OrchestratorError::WireGuard {
-        detail: "Could not activate WireGuard tunnel service.".to_string(),
+        detail: "Could not activate WireGuard tunnel service in connect flow.".to_string(),
         source,
       })?;
+
+    let runtime = wireguard
+      .read_tunnel_status(&tunnel.name)
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not verify tunnel runtime state after connect.".to_string(),
+        source,
+      })?;
+
+    persist_tunnel_stats_snapshot(db, &request.tunnel_id, &runtime)?;
+
+    let status = match runtime.state {
+      crate::backend::wireguard::TunnelServiceState::Running => TunnelStatus::Connected,
+      crate::backend::wireguard::TunnelServiceState::Stopped => TunnelStatus::Disconnected,
+      crate::backend::wireguard::TunnelServiceState::Unknown => TunnelStatus::Connected,
+    };
 
     db
-      .update_tunnel_status(tunnel_id, TunnelStatus::Connected, None)
+      .update_tunnel_status(&request.tunnel_id, status, None)
       .map_err(|source| OrchestratorError::Database {
-        detail: "Failed marking tunnel as Connected after activation.".to_string(),
+        detail: "Failed persisting tunnel status after connect flow.".to_string(),
         source,
       })?;
 
-    let _ = db.transition_vpn_node_status(&tunnel.node_id, NodeLifecycleStatus::Connected, None);
+    if status == TunnelStatus::Connected {
+      let _ = db.transition_vpn_node_status(&request.node_id, NodeLifecycleStatus::Connected, None);
+      return Ok(());
+    }
+
+    Err(OrchestratorError::InvalidState {
+      node_id: request.node_id.clone(),
+      detail: "Tunnel did not report Running after activation. Retry connect or inspect WireGuard logs."
+        .to_string(),
+    })
+  }
+
+  pub fn disconnect_tunnel(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    request: &DisconnectTunnelRequest,
+  ) -> Result<(), OrchestratorError> {
+    let node = db
+      .get_vpn_node(&request.node_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading vpn node before disconnect flow.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "Disconnect requested for a vpn node that does not exist.".to_string(),
+      })?;
+
+    if !matches!(
+      node.lifecycle_status,
+      NodeLifecycleStatus::Connected | NodeLifecycleStatus::Ready
+    ) {
+      return Err(OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "Disconnect flow requires node lifecycle status Connected or Ready.".to_string(),
+      });
+    }
+
+    let tunnel = db
+      .get_tunnel(&request.tunnel_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading tunnel before disconnect flow.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::Database {
+        detail: "Disconnect flow requested for unknown tunnel id.".to_string(),
+        source: DbError::NotFound {
+          entity: "tunnel",
+          id: request.tunnel_id.clone(),
+          detail: "No tunnel row matched the id for disconnect flow.".to_string(),
+        },
+      })?;
+
+    if tunnel.node_id != request.node_id {
+      return Err(OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "Disconnect flow tunnel id does not belong to the requested node.".to_string(),
+      });
+    }
+
+    wireguard
+      .deactivate_tunnel(&tunnel.name)
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not deactivate WireGuard tunnel service in disconnect flow.".to_string(),
+        source,
+      })?;
+
+    let runtime = wireguard
+      .read_tunnel_status(&tunnel.name)
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not verify tunnel runtime state after disconnect.".to_string(),
+        source,
+      })?;
+
+    persist_tunnel_stats_snapshot(db, &request.tunnel_id, &runtime)?;
+
+    db
+      .update_tunnel_status(&request.tunnel_id, TunnelStatus::Disconnected, None)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed persisting tunnel status after disconnect flow.".to_string(),
+        source,
+      })?;
+
+    let _ = db.transition_vpn_node_status(&request.node_id, NodeLifecycleStatus::Ready, None);
     Ok(())
   }
 
@@ -633,9 +839,209 @@ impl Orchestrator {
       crate::backend::wireguard::TunnelServiceState::Unknown => tunnel.status,
     };
     let _ = db.update_tunnel_status(tunnel_id, db_status, None);
+    let _ = persist_tunnel_stats_snapshot(db, tunnel_id, &status);
 
     Ok(status)
   }
+
+  pub fn reconcile_startup(
+    &self,
+    providers: &ProviderRegistry,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    secure_storage: &SecureStorage,
+  ) -> Result<ReconcileReport, OrchestratorError> {
+    let mut report = ReconcileReport::default();
+    let nodes = db
+      .list_vpn_nodes()
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed listing vpn nodes during startup reconciliation.".to_string(),
+        source,
+      })?;
+
+    for node in nodes {
+      if matches!(node.lifecycle_status, NodeLifecycleStatus::Ready | NodeLifecycleStatus::Connected) {
+        match node.external_ref.as_deref() {
+          None => {
+            let detail = "Node is Ready/Connected but has no droplet reference.".to_string();
+            let _ = db.transition_vpn_node_status(&node.id, NodeLifecycleStatus::Error, Some(&detail));
+            report.issues.push(ReconcileIssue {
+              kind: ReconcileIssueKind::MissingNodeRuntimeData,
+              node_id: Some(node.id.clone()),
+              tunnel_id: None,
+              repaired: false,
+              detail,
+            });
+          }
+          Some(external_ref) => {
+            if let Ok(droplet_id) = external_ref.parse::<u64>() {
+              match providers.provider_droplet_exists(
+                db,
+                secure_storage,
+                &node.provider_id,
+                droplet_id,
+              ) {
+                Ok(true) => {}
+                Ok(false) => {
+                  let detail = format!(
+                    "Provider droplet '{}' no longer exists for node '{}'.",
+                    droplet_id, node.id
+                  );
+                  let _ = db.transition_vpn_node_status(
+                    &node.id,
+                    NodeLifecycleStatus::Error,
+                    Some(&detail),
+                  );
+                  report.issues.push(ReconcileIssue {
+                    kind: ReconcileIssueKind::MissingDroplet,
+                    node_id: Some(node.id.clone()),
+                    tunnel_id: None,
+                    repaired: false,
+                    detail,
+                  });
+                }
+                Err(err) => {
+                  report.issues.push(ReconcileIssue {
+                    kind: ReconcileIssueKind::ProviderCheckFailed,
+                    node_id: Some(node.id.clone()),
+                    tunnel_id: None,
+                    repaired: false,
+                    detail: format!("Provider droplet existence check failed: {err}"),
+                  });
+                }
+              }
+            } else {
+              let detail = "Node droplet reference is invalid and cannot be parsed as numeric id."
+                .to_string();
+              let _ = db.transition_vpn_node_status(&node.id, NodeLifecycleStatus::Error, Some(&detail));
+              report.issues.push(ReconcileIssue {
+                kind: ReconcileIssueKind::MissingNodeRuntimeData,
+                node_id: Some(node.id.clone()),
+                tunnel_id: None,
+                repaired: false,
+                detail,
+              });
+            }
+          }
+        }
+      }
+
+      let tunnels = db
+        .list_tunnels_for_node(&node.id)
+        .map_err(|source| OrchestratorError::Database {
+          detail: "Failed listing tunnels during startup reconciliation.".to_string(),
+          source,
+        })?;
+
+      let mut any_connected = false;
+      for tunnel in tunnels {
+        match wireguard.read_tunnel_status(&tunnel.name) {
+          Ok(runtime) => {
+            any_connected |= runtime.state == crate::backend::wireguard::TunnelServiceState::Running;
+            let _ = persist_tunnel_stats_snapshot(db, &tunnel.id, &runtime);
+
+            let reconciled_status = match runtime.state {
+              crate::backend::wireguard::TunnelServiceState::Running => TunnelStatus::Connected,
+              crate::backend::wireguard::TunnelServiceState::Stopped => TunnelStatus::Disconnected,
+              crate::backend::wireguard::TunnelServiceState::Unknown => tunnel.status,
+            };
+
+            if reconciled_status != tunnel.status {
+              let _ = db.update_tunnel_status(&tunnel.id, reconciled_status, None);
+              report.issues.push(ReconcileIssue {
+                kind: ReconcileIssueKind::StaleTunnelStatusRepaired,
+                node_id: Some(node.id.clone()),
+                tunnel_id: Some(tunnel.id.clone()),
+                repaired: true,
+                detail: format!(
+                  "Tunnel status repaired from '{}' to '{}'.",
+                  tunnel.status,
+                  reconciled_status
+                ),
+              });
+            }
+          }
+          Err(WireGuardError::TunnelNotFound { .. }) => {
+            let detail = "Tunnel service is missing locally; re-import tunnel configuration."
+              .to_string();
+            let _ = db.update_tunnel_status(&tunnel.id, TunnelStatus::Error, Some(&detail));
+            report.issues.push(ReconcileIssue {
+              kind: ReconcileIssueKind::MissingTunnelArtifact,
+              node_id: Some(node.id.clone()),
+              tunnel_id: Some(tunnel.id.clone()),
+              repaired: false,
+              detail,
+            });
+          }
+          Err(WireGuardError::NotInstalled { .. } | WireGuardError::UnsupportedPlatform { .. }) => {
+            report.issues.push(ReconcileIssue {
+              kind: ReconcileIssueKind::StartupDependencyUnavailable,
+              node_id: Some(node.id.clone()),
+              tunnel_id: Some(tunnel.id.clone()),
+              repaired: false,
+              detail: "WireGuard runtime tooling is unavailable; install/repair WireGuard for Windows."
+                .to_string(),
+            });
+          }
+          Err(other) => {
+            let detail = format!("Runtime status probe failed: {other}");
+            let _ = db.update_tunnel_status(&tunnel.id, TunnelStatus::Error, Some(&detail));
+            report.issues.push(ReconcileIssue {
+              kind: ReconcileIssueKind::StartupDependencyUnavailable,
+              node_id: Some(node.id.clone()),
+              tunnel_id: Some(tunnel.id.clone()),
+              repaired: false,
+              detail,
+            });
+          }
+        }
+      }
+
+      if node.lifecycle_status == NodeLifecycleStatus::Connected && !any_connected {
+        let _ = db.transition_vpn_node_status(&node.id, NodeLifecycleStatus::Ready, None);
+        report.issues.push(ReconcileIssue {
+          kind: ReconcileIssueKind::StaleTunnelStatusRepaired,
+          node_id: Some(node.id.clone()),
+          tunnel_id: None,
+          repaired: true,
+          detail: "Node lifecycle was Connected but no running tunnel was found; set node to Ready."
+            .to_string(),
+        });
+      }
+
+      if node.lifecycle_status == NodeLifecycleStatus::Ready && any_connected {
+        let _ = db.transition_vpn_node_status(&node.id, NodeLifecycleStatus::Connected, None);
+        report.issues.push(ReconcileIssue {
+          kind: ReconcileIssueKind::StaleTunnelStatusRepaired,
+          node_id: Some(node.id.clone()),
+          tunnel_id: None,
+          repaired: true,
+          detail: "Node lifecycle was Ready but active tunnel exists; set node to Connected."
+            .to_string(),
+        });
+      }
+    }
+
+    Ok(report)
+  }
+}
+
+fn persist_tunnel_stats_snapshot(
+  db: &Database,
+  tunnel_id: &str,
+  status: &TunnelRuntimeStatus,
+) -> Result<(), OrchestratorError> {
+  db
+    .update_tunnel_stats_snapshot(
+      tunnel_id,
+      status.last_handshake_age_seconds.map(|value| value as i64),
+      status.rx_bytes.map(|value| value as i64),
+      status.tx_bytes.map(|value| value as i64),
+    )
+    .map_err(|source| OrchestratorError::Database {
+      detail: "Failed persisting tunnel runtime stats snapshot.".to_string(),
+      source,
+    })
 }
 
 #[cfg(test)]
@@ -649,10 +1055,12 @@ mod tests {
   use crate::backend::provider::{Account, ProviderAdapter, ProviderAdapterError};
   use crate::backend::secure_storage::SecureStorage;
   use crate::backend::provider::ProviderRegistry;
+  use crate::backend::wireguard::{CommandExecError, CommandOutput, CommandRunner};
 
   #[derive(Default)]
   struct MockAdapterState {
     delete_calls: usize,
+    droplet_exists: bool,
   }
 
   struct MockProviderAdapter {
@@ -664,7 +1072,10 @@ mod tests {
     fn new(fail_bootstrap_wait: bool) -> Self {
       Self {
         fail_bootstrap_wait,
-        state: Arc::new(Mutex::new(MockAdapterState::default())),
+        state: Arc::new(Mutex::new(MockAdapterState {
+          delete_calls: 0,
+          droplet_exists: true,
+        })),
       }
     }
   }
@@ -723,6 +1134,188 @@ mod tests {
       state.delete_calls += 1;
       Ok(())
     }
+
+    fn droplet_exists(&self, _token: &str, _droplet_id: u64) -> Result<bool, ProviderAdapterError> {
+      let state = self.state.lock().expect("lock must work");
+      Ok(state.droplet_exists)
+    }
+  }
+
+  #[derive(Clone)]
+  struct MockWireGuardRunner {
+    state: Arc<Mutex<MockWireGuardState>>,
+  }
+
+  #[derive(Clone)]
+  struct MockWireGuardState {
+    service_exists: bool,
+    service_running: bool,
+  }
+
+  impl MockWireGuardRunner {
+    fn running() -> Self {
+      Self {
+        state: Arc::new(Mutex::new(MockWireGuardState {
+          service_exists: true,
+          service_running: true,
+        })),
+      }
+    }
+
+    fn stopped() -> Self {
+      Self {
+        state: Arc::new(Mutex::new(MockWireGuardState {
+          service_exists: true,
+          service_running: false,
+        })),
+      }
+    }
+
+    fn missing_service() -> Self {
+      Self {
+        state: Arc::new(Mutex::new(MockWireGuardState {
+          service_exists: false,
+          service_running: false,
+        })),
+      }
+    }
+  }
+
+  impl CommandRunner for MockWireGuardRunner {
+    fn run(
+      &self,
+      program: &str,
+      args: &[&str],
+      _stdin: Option<&str>,
+    ) -> Result<CommandOutput, CommandExecError> {
+      if program == "wg" && args == ["--version"] {
+        return Ok(CommandOutput {
+          stdout: "wireguard-tools v1".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program == "wireguard" && args == ["/help"] {
+        return Ok(CommandOutput {
+          stdout: "WireGuard for Windows".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program == "sc" && args.len() >= 2 {
+        let mut state = self.state.lock().expect("lock must succeed");
+        match args[0] {
+          "query" => {
+            if !state.service_exists {
+              return Err(CommandExecError::NonZeroExit {
+                program: "sc".to_string(),
+                code: Some(1060),
+                detail: "service missing".to_string(),
+              });
+            }
+
+            let service_state = if state.service_running {
+              "STATE              : 4  RUNNING"
+            } else {
+              "STATE              : 1  STOPPED"
+            };
+
+            return Ok(CommandOutput {
+              stdout: service_state.to_string(),
+              stderr: String::new(),
+            });
+          }
+          "start" => {
+            if !state.service_exists {
+              return Err(CommandExecError::NonZeroExit {
+                program: "sc".to_string(),
+                code: Some(1060),
+                detail: "service missing".to_string(),
+              });
+            }
+            state.service_running = true;
+            return Ok(CommandOutput {
+              stdout: "started".to_string(),
+              stderr: String::new(),
+            });
+          }
+          "stop" => {
+            if !state.service_exists {
+              return Err(CommandExecError::NonZeroExit {
+                program: "sc".to_string(),
+                code: Some(1060),
+                detail: "service missing".to_string(),
+              });
+            }
+            state.service_running = false;
+            return Ok(CommandOutput {
+              stdout: "stopped".to_string(),
+              stderr: String::new(),
+            });
+          }
+          _ => {}
+        }
+      }
+
+      if program == "wg" && args.len() == 3 && args[0] == "show" && args[2] == "dump" {
+        let state = self.state.lock().expect("lock must succeed");
+        if !state.service_exists {
+          return Err(CommandExecError::NonZeroExit {
+            program: "sc".to_string(),
+            code: Some(1060),
+            detail: "service missing".to_string(),
+          });
+        }
+
+        let handshake = if state.service_running { "1700000050" } else { "0" };
+        let dump = format!(
+          "iface-private\tiface-public\t51820\toff\npeerpub\t(none)\t203.0.113.10:51820\t0.0.0.0/0\t{}\t10\t20\t25\n",
+          handshake
+        );
+        return Ok(CommandOutput {
+          stdout: dump,
+          stderr: String::new(),
+        });
+      }
+
+      Err(CommandExecError::NonZeroExit {
+        program: program.to_string(),
+        code: Some(1),
+        detail: "unsupported mock command".to_string(),
+      })
+    }
+  }
+
+  fn setup_connected_node_and_tunnel(db: &Database) {
+    db
+      .create_vpn_node("node-connect", "provider-1", "Node Connect", "nyc1")
+      .expect("node should insert");
+    db
+      .transition_vpn_node_status("node-connect", NodeLifecycleStatus::Provisioning, None)
+      .expect("transition to provisioning should succeed");
+    db
+      .transition_vpn_node_status("node-connect", NodeLifecycleStatus::Bootstrapping, None)
+      .expect("transition to bootstrapping should succeed");
+    db
+      .transition_vpn_node_status("node-connect", NodeLifecycleStatus::Ready, None)
+      .expect("transition to ready should succeed");
+    db
+      .update_vpn_node_runtime_details(
+        "node-connect",
+        Some("42"),
+        Some("203.0.113.10"),
+        Some("server-pub-key-123"),
+      )
+      .expect("runtime details should persist");
+    db
+      .create_tunnel("tunnel-connect", "node-connect", "wg-node-connect", Some("wg-node-connect"))
+      .expect("tunnel should insert");
+    db
+      .update_tunnel_status("tunnel-connect", TunnelStatus::Connected, None)
+      .expect("tunnel status should update");
+    db
+      .transition_vpn_node_status("node-connect", NodeLifecycleStatus::Connected, None)
+      .expect("node should transition to connected");
   }
 
   fn test_db_path(test_name: &str) -> PathBuf {
@@ -824,5 +1417,197 @@ mod tests {
 
     let delete_calls = state.lock().expect("lock should work").delete_calls;
     assert_eq!(delete_calls, 1);
+  }
+
+  #[test]
+  fn connect_flow_requires_existing_tunnel() {
+    let db = Database::new(test_db_path("connect_missing_tunnel"));
+    db.run_migrations().expect("migrations should succeed");
+
+    db
+      .create_provider("provider-1", "DigitalOcean", "digitalocean", Some("do-token:provider-1:abc"))
+      .expect("provider should insert");
+    db
+      .create_vpn_node("node-1", "provider-1", "Node", "nyc1")
+      .expect("node should insert");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Provisioning, None)
+      .expect("transition should succeed");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Bootstrapping, None)
+      .expect("transition should succeed");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Ready, None)
+      .expect("transition should succeed");
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+    let orchestrator = Orchestrator::new();
+    let result = orchestrator.connect_tunnel(
+      &wireguard,
+      &db,
+      &ConnectTunnelRequest {
+        node_id: "node-1".to_string(),
+        tunnel_id: "missing-tunnel".to_string(),
+      },
+    );
+
+    assert!(matches!(
+      result,
+      Err(OrchestratorError::Database {
+        source: DbError::NotFound { .. },
+        ..
+      })
+    ));
+  }
+
+  #[test]
+  fn reconcile_flags_deleted_droplet() {
+    let db = Database::new(test_db_path("reconcile_deleted_droplet"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    db
+      .create_vpn_node("node-1", "provider-1", "Node", "nyc1")
+      .expect("node should insert");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Provisioning, None)
+      .expect("transition should succeed");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Bootstrapping, None)
+      .expect("transition should succeed");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Ready, None)
+      .expect("transition should succeed");
+    db
+      .update_vpn_node_runtime_details(
+        "node-1",
+        Some("99"),
+        Some("203.0.113.10"),
+        Some("server-pub-key-123"),
+      )
+      .expect("runtime details should persist");
+
+    let adapter = Arc::new(MockProviderAdapter::new(false));
+    {
+      let mut state = adapter.state.lock().expect("lock should work");
+      state.droplet_exists = false;
+    }
+    let providers = ProviderRegistry::from_adapter(adapter);
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+
+    let report = Orchestrator::new()
+      .reconcile_startup(&providers, &wireguard, &db, &secure_storage)
+      .expect("reconcile should complete");
+
+    assert!(report
+      .issues
+      .iter()
+      .any(|issue| issue.kind == ReconcileIssueKind::MissingDroplet));
+
+    let node = db
+      .get_vpn_node("node-1")
+      .expect("query should succeed")
+      .expect("node should exist");
+    assert_eq!(node.lifecycle_status, NodeLifecycleStatus::Error);
+  }
+
+  #[test]
+  fn reconcile_repairs_stale_connected_status_to_ready() {
+    let db = Database::new(test_db_path("reconcile_stale_status"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    setup_connected_node_and_tunnel(&db);
+    let providers = ProviderRegistry::from_adapter(Arc::new(MockProviderAdapter::new(false)));
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+
+    let report = Orchestrator::new()
+      .reconcile_startup(&providers, &wireguard, &db, &secure_storage)
+      .expect("reconcile should complete");
+
+    assert!(report
+      .issues
+      .iter()
+      .any(|issue| issue.kind == ReconcileIssueKind::StaleTunnelStatusRepaired));
+
+    let tunnel = db
+      .get_tunnel("tunnel-connect")
+      .expect("query should succeed")
+      .expect("tunnel should exist");
+    assert_eq!(tunnel.status, TunnelStatus::Disconnected);
+    assert!(tunnel.stats_updated_at.is_some());
+
+    let node = db
+      .get_vpn_node("node-connect")
+      .expect("query should succeed")
+      .expect("node should exist");
+    assert_eq!(node.lifecycle_status, NodeLifecycleStatus::Ready);
+  }
+
+  #[test]
+  fn reconcile_flags_missing_local_tunnel_artifact() {
+    let db = Database::new(test_db_path("reconcile_missing_tunnel_artifact"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    setup_connected_node_and_tunnel(&db);
+    let providers = ProviderRegistry::from_adapter(Arc::new(MockProviderAdapter::new(false)));
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::missing_service()));
+
+    let report = Orchestrator::new()
+      .reconcile_startup(&providers, &wireguard, &db, &secure_storage)
+      .expect("reconcile should complete");
+
+    assert!(report
+      .issues
+      .iter()
+      .any(|issue| issue.kind == ReconcileIssueKind::MissingTunnelArtifact));
+
+    let tunnel = db
+      .get_tunnel("tunnel-connect")
+      .expect("query should succeed")
+      .expect("tunnel should exist");
+    assert_eq!(tunnel.status, TunnelStatus::Error);
+  }
+}
+
+impl OrchestratorError {
+  pub fn to_user_facing(&self) -> UserFacingError {
+    match self {
+      Self::InvalidState { detail, .. } => UserFacingError {
+        kind: UserFacingErrorKind::InvalidState,
+        message: detail.clone(),
+        next_action: "Resolve lifecycle mismatch and retry the requested action.".to_string(),
+      },
+      Self::Database { detail, source } => {
+        let kind = if matches!(source, DbError::NotFound { .. }) {
+          UserFacingErrorKind::MissingResource
+        } else {
+          UserFacingErrorKind::Persistence
+        };
+
+        UserFacingError {
+          kind,
+          message: detail.clone(),
+          next_action: "Verify local app data integrity and retry.".to_string(),
+        }
+      }
+      Self::Provider { detail, .. } => UserFacingError {
+        kind: UserFacingErrorKind::Provider,
+        message: detail.clone(),
+        next_action: "Verify provider token and droplet state, then retry.".to_string(),
+      },
+      Self::WireGuard { detail, source } => UserFacingError {
+        kind: UserFacingErrorKind::WireGuard,
+        message: format!("{detail}: {source}"),
+        next_action: "Ensure WireGuard for Windows is installed and tunnel service exists.".to_string(),
+      },
+      Self::Bootstrap { detail, .. } => UserFacingError {
+        kind: UserFacingErrorKind::Unknown,
+        message: detail.clone(),
+        next_action: "Retry node creation and inspect bootstrap settings.".to_string(),
+      },
+    }
   }
 }

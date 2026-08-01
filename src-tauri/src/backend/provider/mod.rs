@@ -34,6 +34,7 @@ pub trait ProviderAdapter: Send + Sync {
     endpoint_ip: &str,
     readiness_marker_path: &str,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError>;
+  fn droplet_exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError>;
   fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError>;
 }
 
@@ -143,6 +144,17 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
         readiness_marker_path
       ),
     })
+  }
+
+  fn droplet_exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError> {
+    match self.client.get_droplet(token, droplet_id) {
+      Ok(_) => Ok(true),
+      Err(DigitalOceanError::NotFound { .. }) => Ok(false),
+      Err(source) => Err(ProviderAdapterError::Api {
+        detail: "DigitalOcean droplet existence check failed.".to_string(),
+        source,
+      }),
+    }
   }
 
   fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError> {
@@ -334,6 +346,23 @@ impl ProviderRegistry {
       .delete_droplet(&token, droplet_id)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Droplet deletion through provider adapter failed.".to_string(),
+        source,
+      })
+  }
+
+  pub fn provider_droplet_exists(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    droplet_id: u64,
+  ) -> Result<bool, ProviderFlowError> {
+    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
+    self
+      .active()
+      .droplet_exists(&token, droplet_id)
+      .map_err(|source| ProviderFlowError::Adapter {
+        detail: "Droplet existence check through provider adapter failed.".to_string(),
         source,
       })
   }
