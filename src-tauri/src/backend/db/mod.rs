@@ -7,6 +7,7 @@ use thiserror::Error;
 const MIGRATIONS: &[(i64, &str)] = &[
   (1, include_str!("../../../migrations/0001_init.sql")),
   (2, include_str!("../../../migrations/0002_indexes.sql")),
+  (3, include_str!("../../../migrations/0003_provider_token_ref.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +142,7 @@ pub struct ProviderRecord {
   pub id: String,
   pub name: String,
   pub slug: String,
+  pub token_ref: Option<String>,
   pub created_at: String,
   pub updated_at: String,
 }
@@ -286,16 +288,22 @@ impl Database {
     Ok(())
   }
 
-  pub fn create_provider(&self, id: &str, name: &str, slug: &str) -> Result<(), DbError> {
+  pub fn create_provider(
+    &self,
+    id: &str,
+    name: &str,
+    slug: &str,
+    token_ref: Option<&str>,
+  ) -> Result<(), DbError> {
     let connection = self.open_connection()?;
     connection
       .execute(
-        "INSERT INTO providers (id, name, slug) VALUES (?1, ?2, ?3)",
-        params![id, name, slug],
+        "INSERT INTO providers (id, name, slug, token_ref) VALUES (?1, ?2, ?3, ?4)",
+        params![id, name, slug, token_ref],
       )
       .map_err(|source| DbError::Query {
         action: "create_provider",
-        detail: "Failed to insert provider. Ensure id and slug are unique."
+        detail: "Failed to insert provider. Ensure id/slug/token_ref values are unique."
           .to_string(),
         source,
       })?;
@@ -307,7 +315,7 @@ impl Database {
     let connection = self.open_connection()?;
     let mut statement = connection
       .prepare(
-        "SELECT id, name, slug, created_at, updated_at
+        "SELECT id, name, slug, token_ref, created_at, updated_at
          FROM providers
          ORDER BY created_at ASC",
       )
@@ -339,7 +347,7 @@ impl Database {
     let connection = self.open_connection()?;
     connection
       .query_row(
-        "SELECT id, name, slug, created_at, updated_at
+        "SELECT id, name, slug, token_ref, created_at, updated_at
          FROM providers WHERE id = ?1",
         params![id],
         map_provider_row,
@@ -358,6 +366,7 @@ impl Database {
     id: &str,
     name: &str,
     slug: &str,
+    token_ref: Option<&str>,
   ) -> Result<(), DbError> {
     let connection = self.open_connection()?;
     let changed = connection
@@ -365,13 +374,14 @@ impl Database {
         "UPDATE providers
          SET name = ?2,
              slug = ?3,
+             token_ref = ?4,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?1",
-        params![id, name, slug],
+        params![id, name, slug, token_ref],
       )
       .map_err(|source| DbError::Query {
         action: "update_provider",
-        detail: "Failed updating provider. Ensure slug remains unique."
+        detail: "Failed updating provider. Ensure slug and token_ref remain unique."
           .to_string(),
         source,
       })?;
@@ -381,6 +391,35 @@ impl Database {
         entity: "provider",
         id: id.to_string(),
         detail: "Update skipped because no row matched the id."
+          .to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
+  pub fn update_provider_token_ref(&self, id: &str, token_ref: Option<&str>) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let changed = connection
+      .execute(
+        "UPDATE providers
+         SET token_ref = ?2,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1",
+        params![id, token_ref],
+      )
+      .map_err(|source| DbError::Query {
+        action: "update_provider_token_ref",
+        detail: "Failed updating provider token reference. Ensure token_ref is unique."
+          .to_string(),
+        source,
+      })?;
+
+    if changed == 0 {
+      return Err(DbError::NotFound {
+        entity: "provider",
+        id: id.to_string(),
+        detail: "Token reference update skipped because no row matched the id."
           .to_string(),
       });
     }
@@ -723,8 +762,9 @@ fn map_provider_row(row: &Row<'_>) -> rusqlite::Result<ProviderRecord> {
     id: row.get(0)?,
     name: row.get(1)?,
     slug: row.get(2)?,
-    created_at: row.get(3)?,
-    updated_at: row.get(4)?,
+    token_ref: row.get(3)?,
+    created_at: row.get(4)?,
+    updated_at: row.get(5)?,
   })
 }
 
@@ -822,7 +862,7 @@ mod tests {
     let db = setup_db("provider_node_crud");
 
     db
-      .create_provider("provider-1", "DigitalOcean", "digitalocean")
+      .create_provider("provider-1", "DigitalOcean", "digitalocean", None)
       .expect("provider insert should succeed");
 
     let providers = db.list_providers().expect("provider query should succeed");
@@ -859,7 +899,7 @@ mod tests {
     let db = setup_db("tunnel_crud");
 
     db
-      .create_provider("provider-1", "DigitalOcean", "digitalocean")
+      .create_provider("provider-1", "DigitalOcean", "digitalocean", None)
       .expect("provider insert should succeed");
     db
       .create_vpn_node("node-1", "provider-1", "Primary", "fra1")
@@ -884,7 +924,7 @@ mod tests {
     let db = setup_db("transition_error");
 
     db
-      .create_provider("provider-1", "DigitalOcean", "digitalocean")
+      .create_provider("provider-1", "DigitalOcean", "digitalocean", None)
       .expect("provider insert should succeed");
     db
       .create_vpn_node("node-1", "provider-1", "Primary", "fra1")
