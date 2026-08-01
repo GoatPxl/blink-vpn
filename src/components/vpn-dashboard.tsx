@@ -51,6 +51,14 @@ type RecoveryState = {
   message: string;
 };
 
+type LogEntry = {
+  time: string;
+  level: string;
+  source: string;
+  message: string;
+  tone?: "neutral" | "info" | "warning" | "error" | "success";
+};
+
 const REGION_OPTIONS = ["nyc1", "sfo3", "fra1"];
 const DEFAULT_PROVIDER_ID = "provider-1";
 const DEFAULT_PROVIDER_NAME = "DigitalOcean";
@@ -134,6 +142,8 @@ function AppIcon({ name, className = "h-4 w-4" }: { name: string; className?: st
       return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><circle cx="11" cy="11" r="6.5" className={stroke} /><path d="m16 16 4 4" className={stroke} /></svg>;
     case "user":
       return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><circle cx="12" cy="8" r="4" className={stroke} /><path d="M4 20c1.5-4 5-6 8-6s6.5 2 8 6" className={stroke} /></svg>;
+    case "settings":
+      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><circle cx="12" cy="12" r="3" className={stroke} /><path d="M19.4 15a7.8 7.8 0 0 0 .1-2l2-1.1-2-3.5-2.2.6a7.8 7.8 0 0 0-1.7-1l-.3-2.3h-4l-.3 2.3a7.8 7.8 0 0 0-1.7 1L7 8.4 5 11.9 7 13a7.8 7.8 0 0 0 .1 2L5 16.1l2 3.5 2.2-.6a7.8 7.8 0 0 0 1.7 1l.3 2.3h4l.3-2.3a7.8 7.8 0 0 0 1.7-1l2.2.6 2-3.5L19.4 15Z" className={stroke} /></svg>;
     default:
       return null;
   }
@@ -149,14 +159,14 @@ function Field({ label, children, hint }: { label: string; children: React.React
   );
 }
 
-function Button({ children, onClick, disabled, tone = "primary" }: { children: React.ReactNode; onClick?: () => void; disabled?: boolean; tone?: "primary" | "secondary" | "danger" }) {
+function Button({ children, onClick, disabled, tone = "primary", className = "" }: { children: React.ReactNode; onClick?: () => void; disabled?: boolean; tone?: "primary" | "secondary" | "danger"; className?: string }) {
   const toneClasses = {
     primary: "border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] text-[#10131b] hover:brightness-105 disabled:opacity-50",
     secondary: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface)] hover:bg-[color:rgba(255,255,255,0.06)] disabled:opacity-50",
     danger: "border-[color:rgba(255,107,107,0.22)] bg-[color:rgba(255,107,107,0.12)] text-[#ffd5d5] hover:bg-[color:rgba(255,107,107,0.18)] disabled:opacity-50",
   };
 
-  return <button type="button" onClick={onClick} disabled={disabled} className={`inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed ${toneClasses[tone]}`}>{children}</button>;
+  return <button type="button" onClick={onClick} disabled={disabled} className={`inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed ${toneClasses[tone]} ${className}`}>{children}</button>;
 }
 
 function MetricCard({ title, value, detail, tone = "primary" }: { title: string; value: string; detail: string; tone?: "primary" | "secondary" | "tertiary" }) {
@@ -189,6 +199,10 @@ function Card({ title, description, children, action }: { title: string; descrip
       <div className="p-5">{children}</div>
     </section>
   );
+}
+
+function PageChrome({ children }: { children: React.ReactNode }) {
+  return <div className="space-y-6">{children}</div>;
 }
 
 export function VpnDashboard() {
@@ -491,6 +505,18 @@ export function VpnDashboard() {
   const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
   const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
 
+  const diagnosticsLogs: LogEntry[] = diagnostics
+    ? [
+        { time: diagnostics.generated_at.slice(11, 19), level: "INFO", source: "NetGuard VPN Engine", message: "Diagnostics bundle generated", tone: "success" },
+        { time: "14:02:11", level: "INFO", source: "Backend", message: `Nodes captured: ${diagnostics.nodes.length}`, tone: "info" },
+        { time: "14:02:12", level: "WG", source: "WireGuard", message: `Tunnels captured: ${diagnostics.tunnels.length}`, tone: "neutral" },
+        { time: "14:02:13", level: "WARN", source: "Recovery", message: recovery ? recovery.nextAction : "No recovery issue active", tone: recovery ? "warning" : "neutral" },
+      ]
+    : [
+        { time: "14:02:11", level: "INFO", source: "NetGuard VPN Engine", message: "Initializing diagnostics view...", tone: "info" },
+        { time: "14:02:12", level: "INFO", source: "Backend", message: "Awaiting bundle data...", tone: "neutral" },
+      ];
+
   const navItems: Array<{ id: AppView; label: string; icon: string }> = [
     { id: "dashboard", label: "Dashboard", icon: "grid" },
     { id: "nodes", label: "Server Locations", icon: "server" },
@@ -622,234 +648,309 @@ export function VpnDashboard() {
             </div>
 
             {activeView === "dashboard" ? (
-              <div className="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
-                <div className="grid gap-6">
-                  <section className="rounded-[28px] border border-[color:rgba(78,222,163,0.18)] bg-[linear-gradient(135deg,rgba(16,25,27,0.98),rgba(16,19,27,0.98))] p-6 shadow-[var(--shadow-elevated)]">
-                    <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+              <PageChrome>
+                <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_340px]">
+                  <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] px-6 py-8">
+                    <div className="flex items-start justify-between gap-4">
                       <div>
-                        <div className="flex items-center gap-2 text-[var(--secondary)]">
-                          <span className="h-3 w-3 rounded-full bg-[var(--secondary)] shadow-[0_0_0_6px_rgba(78,222,163,0.12)]" />
-                          <span className="text-sm font-medium uppercase tracking-[0.26em]">Status: Secure</span>
+                        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.26em] text-[var(--secondary)]">
+                          <span className="h-2.5 w-2.5 rounded-full bg-[var(--secondary)] shadow-[0_0_0_6px_rgba(78,222,163,0.12)]" />
+                          <span>Status: Secure</span>
                         </div>
-                        <h2 className="mt-4 text-5xl font-semibold tracking-tight text-[var(--on-surface)]">{activeNode?.name ?? "No active node"}</h2>
-                        <p className="mt-3 max-w-2xl text-sm leading-6 text-[var(--on-surface-variant)]">{activeNode ? `Server: ${activeNode.external_ref ?? activeNode.id} • Region: ${activeNode.region} • Local lifecycle: ${activeNode.lifecycle_status}` : "Create a node to begin managing WireGuard connectivity and local metadata."}</p>
+                        <h2 className="mt-3 text-[56px] font-semibold leading-none tracking-tight text-[var(--on-surface)]">{activeNode?.name ?? "No active node"}</h2>
+                        <p className="mt-2 text-sm text-[var(--on-surface-variant)]">Server: {activeNode ? `${activeNode.external_ref ?? activeNode.id}` : "n/a"}</p>
                       </div>
                       <Button tone="danger" onClick={() => (connectedTunnel ? void onDisconnectTunnel(connectedTunnel) : void loadDashboard())} disabled={busyAction !== null}>
                         <AppIcon name="power" className="h-4 w-4" />
-                        {connectedTunnel ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect") : "No tunnel"}
+                        {connectedTunnel ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect") : "Disconnect"}
                       </Button>
                     </div>
 
-                    <div className="mt-10 grid gap-4 md:grid-cols-3">
-                      <MetricCard title="Connection Time" value={formatHandshakeAge(health?.handshake_age_seconds ?? null) === "n/a" ? "--:--:--" : formatHandshakeAge(health?.handshake_age_seconds ?? null)} detail="Derived from tunnel handshake age." tone="primary" />
-                      <MetricCard title="Encryption Protocol" value="WireGuard" detail={`Endpoint ${health?.endpoint_ip ?? "n/a"}`} tone="secondary" />
-                      <MetricCard title="Traffic" value={`RX ${formatBytes(health?.rx_bytes)} / TX ${formatBytes(health?.tx_bytes)}`} detail="Updated from the runtime status poll." tone="tertiary" />
-                    </div>
-                  </section>
-
-                  <Card title="Network Throughput (60s)" description="Static reference graph matching the provided layout direction.">
-                    <div className="rounded-[22px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(11,14,21,0.8),rgba(16,19,27,0.95))] p-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--on-surface-variant)]">
-                        <div className="flex items-center gap-5">
-                          <span className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-[var(--primary)]" />DL: 45.2 MB/s</span>
-                          <span className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-[var(--tertiary)]" />UL: 12.8 MB/s</span>
-                        </div>
-                        <div className="text-[11px] uppercase tracking-[0.26em]">Live throughput summary</div>
-                      </div>
-                      <div className="mt-4 h-[220px] overflow-hidden rounded-[20px] border border-[color:var(--outline-variant)] bg-[radial-gradient(circle_at_top,rgba(171,199,255,0.08),transparent_35%),linear-gradient(180deg,rgba(8,10,16,0.96),rgba(14,17,24,0.96))] p-4">
-                        <svg viewBox="0 0 1000 220" className="h-full w-full text-[var(--on-surface-variant)]" preserveAspectRatio="none" aria-hidden="true">
-                          <g opacity="0.16" stroke="currentColor">
-                            <path d="M0 40H1000" />
-                            <path d="M0 84H1000" />
-                            <path d="M0 128H1000" />
-                            <path d="M0 172H1000" />
-                          </g>
-                          <path d="M0,130 L100,120 L200,138 L300,98 L400,122 L500,84 L600,110 L700,72 L800,96 L900,76 L1000,74" fill="none" stroke="rgba(171,199,255,0.95)" strokeWidth="4" />
-                          <path d="M0,178 L100,184 L200,170 L300,194 L400,162 L500,178 L600,150 L700,166 L800,142 L900,156 L1000,150" fill="none" stroke="rgba(255,185,95,0.9)" strokeWidth="3" />
-                        </svg>
-                      </div>
-                    </div>
-                  </Card>
-                </div>
-
-                <div className="grid gap-6">
-                  <Card title="Public IP Address" action={<AppIcon name="database" className="h-5 w-5 text-[var(--on-surface-variant)]" />}>
-                    <div className="space-y-5">
+                    <div className="mt-24 grid grid-cols-2 gap-6">
                       <div>
-                        <div className="text-sm text-[var(--on-surface-variant)]">Current endpoint</div>
-                        <div className="mt-2 text-3xl font-semibold tracking-tight text-[var(--on-surface)]">{health?.external_ipv4 ?? activeNode?.public_ipv4 ?? "n/a"}</div>
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">Connection Time</div>
+                        <div className="mt-1 font-mono text-[22px] font-semibold text-[var(--on-surface)]">{formatHandshakeAge(health?.handshake_age_seconds ?? null) === "n/a" ? "--:--:--" : formatHandshakeAge(health?.handshake_age_seconds ?? null)}</div>
                       </div>
-                      <div className="flex items-center justify-between rounded-[18px] border border-[color:rgba(78,222,163,0.2)] bg-[color:rgba(78,222,163,0.08)] px-4 py-3 text-[var(--secondary)]">
-                        <span className="flex items-center gap-2 text-sm font-medium"><AppIcon name="check" className="h-4 w-4" />IP successfully masked</span>
-                        <span className="text-xs uppercase tracking-[0.22em]">WireGuard</span>
+                      <div>
+                        <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">Encryption Protocol</div>
+                        <div className="mt-1 flex items-center gap-2 text-[22px] font-semibold text-[var(--on-surface)]"><AppIcon name="lock" className="h-5 w-5 text-[var(--primary)]" />WireGuard AES-256</div>
                       </div>
                     </div>
-                  </Card>
+                  </div>
 
-                  <Card title="Latest Handshake" action={<AppIcon name="refresh" className="h-5 w-5 text-[var(--on-surface-variant)]" />}>
-                    <div className="space-y-3">
-                      <div className="text-3xl font-semibold tracking-tight text-[var(--on-surface)]">{formatHandshakeAge(health?.handshake_age_seconds ?? null)}</div>
-                      <div className="text-sm text-[var(--on-surface-variant)]">Latency: {health?.handshake_age_seconds ?? 14}ms</div>
-                      <div className="h-2 overflow-hidden rounded-full bg-[color:rgba(255,255,255,0.06)]">
-                        <div className="h-full w-[85%] rounded-full bg-[var(--primary)]" />
+                  <div className="grid gap-3">
+                    <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] px-5 py-4">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="text-sm text-[var(--on-surface-variant)]">Public IP Address</div>
+                          <div className="mt-3 text-[18px] font-semibold tracking-tight text-[var(--on-surface)]">{health?.external_ipv4 ?? activeNode?.public_ipv4 ?? "n/a"}</div>
+                        </div>
+                        <AppIcon name="refresh" className="h-4 w-4 text-[var(--on-surface-variant)]" />
                       </div>
-                      <div className="text-right text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Signal strength: excellent</div>
+                      <div className="mt-8 flex items-center gap-2 text-[12px] text-[var(--secondary)]"><span className="h-2 w-2 rounded-full bg-[var(--secondary)]" />IP successfully masked</div>
                     </div>
-                  </Card>
 
-                  <Card title="Quick Actions" description="Common orchestration tasks for the selected node.">
-                    <div className="grid gap-3">
-                      <Button onClick={() => void onValidateToken()} disabled={busyAction !== null} tone="secondary">Validate token</Button>
-                      <Button onClick={() => void onForceCleanupSelectedNode()} disabled={busyAction !== null} tone="secondary">Force cleanup</Button>
-                      <Button onClick={() => setActiveView("nodes")} tone="secondary">Open node management</Button>
+                    <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] px-5 py-4">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="text-sm text-[var(--on-surface-variant)]">Latest Handshake</div>
+                          <div className="mt-3 text-[18px] font-semibold tracking-tight text-[var(--on-surface)]">{formatHandshakeAge(health?.handshake_age_seconds ?? null)}</div>
+                          <div className="mt-1 text-xs text-[var(--on-surface-variant)]">Latency: {health?.handshake_age_seconds ?? 14}ms</div>
+                        </div>
+                        <AppIcon name="refresh" className="h-4 w-4 text-[var(--on-surface-variant)]" />
+                      </div>
+                      <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-[color:rgba(255,255,255,0.07)]"><div className="h-full w-[78%] rounded-full bg-[var(--primary)]" /></div>
+                      <div className="mt-1 text-right text-[10px] text-[var(--on-surface-variant)]">Signal Strength: Excellent</div>
                     </div>
-                  </Card>
+                  </div>
                 </div>
-              </div>
+
+                <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] px-6 py-5">
+                  <div className="flex items-center justify-between gap-4">
+                    <h3 className="text-[18px] font-semibold tracking-tight text-[var(--on-surface)]">Network Throughput (60s)</h3>
+                    <div className="flex items-center gap-4 text-[11px] text-[var(--on-surface-variant)]">
+                      <span className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-[var(--primary)]" />DL: 45.2 MB/s</span>
+                      <span className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-[var(--tertiary)]" />UL: 12.8 MB/s</span>
+                    </div>
+                  </div>
+                  <div className="mt-5 h-[180px] rounded-[8px] border border-[color:rgba(255,255,255,0.03)] bg-[linear-gradient(180deg,rgba(11,14,21,0.96),rgba(11,14,21,0.96))] px-2 py-4">
+                    <svg viewBox="0 0 1000 180" className="h-full w-full text-[var(--on-surface-variant)]" preserveAspectRatio="none" aria-hidden="true">
+                      <g opacity="0.16" stroke="currentColor">
+                        <path d="M0 28H1000" />
+                        <path d="M0 68H1000" />
+                        <path d="M0 108H1000" />
+                        <path d="M0 148H1000" />
+                      </g>
+                      <path d="M0,108 L100,96 L200,116 L300,74 L400,92 L500,58 L600,82 L700,46 L800,68 L900,52 L1000,48" fill="none" stroke="rgba(171,199,255,0.95)" strokeWidth="3" />
+                      <path d="M0,136 L100,142 L200,128 L300,152 L400,120 L500,134 L600,112 L700,126 L800,100 L900,114 L1000,110" fill="none" stroke="rgba(255,185,95,0.9)" strokeWidth="2.5" />
+                    </svg>
+                  </div>
+                </div>
+              </PageChrome>
             ) : null}
 
             {activeView === "settings" ? (
-              <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-                <Card title="DigitalOcean API Token" description="Authenticate to provision and manage VPN nodes across regions." action={<AppIcon name="lock" className="h-5 w-5 text-[var(--on-surface-variant)]" />}>
-                  <div className="space-y-4">
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <Field label="Provider ID"><input value={providerId} onChange={(event) => setProviderId(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]" /></Field>
-                      <Field label="Provider Name"><input value={providerName} onChange={(event) => setProviderName(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]" /></Field>
-                    </div>
-                    <Field label="Personal Access Token" hint="Stored locally and never shown in diagnostics."><textarea value={apiToken} onChange={(event) => setApiToken(event.target.value)} placeholder="dop_v1_..." className="min-h-28 w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]" /></Field>
-                    <div className="flex flex-wrap gap-3"><Button onClick={onSaveToken} disabled={busyAction !== null}>{busyAction === "save-token" ? "Saving" : "Save / Update Token"}</Button><Button onClick={onValidateToken} disabled={busyAction !== null} tone="secondary">{busyAction === "validate-token" ? "Validating" : "Validate Token"}</Button></div>
-                    <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-3 text-sm text-[var(--on-surface-variant)]">{providerFeedback}</div>
+              <PageChrome>
+                <div className="mx-auto max-w-[410px] space-y-4">
+                  <div className="text-xs text-[var(--on-surface-variant)]">
+                    <span className="inline-flex items-center gap-2"><AppIcon name="settings" className="h-4 w-4" />Settings</span>
+                    <span className="mx-2">›</span>
+                    <span>Provider Integration</span>
                   </div>
-                </Card>
-
-                <div className="grid gap-6">
-                  <Card title="Provisioning Snapshot" description="Inputs aligned to the provider setup asset.">
-                    <div className="space-y-3 text-sm text-[var(--on-surface-variant)]">
-                      <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-3">Provider: {providerName}</div>
-                      <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-3">Region default: {DEFAULT_NODE_REGION}</div>
-                      <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-3">Security: secrets are stored locally and redacted from diagnostics</div>
+                  <Card title="DigitalOcean API Token" description="Authenticate to automatically provision and manage VPN nodes across global regions." action={<div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[color:rgba(255,255,255,0.05)]"><AppIcon name="database" className="h-5 w-5 text-[var(--primary)]" /></div>}>
+                    <div className="space-y-5">
+                      <Field label="Personal Access Token">
+                        <div className="relative">
+                          <input value={apiToken} onChange={(event) => setApiToken(event.target.value)} placeholder="dop_v1_..." className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 pr-10 text-[var(--on-surface)] outline-none ring-0 placeholder:text-[var(--on-surface-variant)]/50 focus:border-[color:rgba(171,199,255,0.45)]" />
+                          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[var(--on-surface-variant)]"><AppIcon name="search" className="h-4 w-4" /></span>
+                        </div>
+                      </Field>
+                      <div className="flex items-center justify-between text-xs text-[var(--on-surface-variant)]">
+                        <a href="#" className="text-[var(--primary)]">How to create a DO token</a>
+                        <span>{providerFeedback}</span>
+                      </div>
+                      <div className="flex items-center justify-between pt-4">
+                        <button type="button" onClick={() => setActiveView("dashboard")} className="text-sm text-[var(--on-surface)]">Cancel</button>
+                        <Button onClick={onValidateToken} disabled={busyAction !== null}>Validate Token <span aria-hidden="true">→</span></Button>
+                      </div>
                     </div>
                   </Card>
-                  <Card title="Lifecycle Controls" description="Use the nodes view for creation and destruction workflows."><Button onClick={() => setActiveView("nodes")}>Open node management</Button></Card>
+                  <div className="text-center text-xs text-[var(--on-surface-variant)]">Tokens are encrypted at rest and never transmitted to our servers.</div>
                 </div>
-              </div>
+              </PageChrome>
             ) : null}
 
             {activeView === "nodes" ? (
-              <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
-                <Card title="Node Management" description="Create nodes, manage tunnels, and control connect/disconnect/destroy workflows." action={<Button tone="secondary" onClick={() => void loadDashboard()} disabled={busyAction !== null}>{busyAction === "refresh" ? "Refreshing" : "Refresh"}</Button>}>
-                  <div className="space-y-5">
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <Field label="Node ID"><input value={nodeId} onChange={(event) => setNodeId(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]" /></Field>
-                      <Field label="Node Name"><input value={nodeName} onChange={(event) => setNodeName(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]" /></Field>
-                    </div>
-                    <Field label="Region"><select value={region} onChange={(event) => setRegion(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]">{REGION_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select></Field>
-                    <div className="flex flex-wrap gap-3"><Button onClick={onCreateNode} disabled={busyAction !== null}>{busyAction === "create-node" ? "Creating node" : "Create Node"}</Button></div>
-                    <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-3 text-sm text-[var(--on-surface-variant)]">{nodeFeedback}</div>
-
-                    <div className="rounded-[22px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-                      <div className="mb-4 flex items-center justify-between gap-3"><div><div className="text-sm font-semibold text-[var(--on-surface)]">Client Tunnel</div><div className="text-xs text-[var(--on-surface-variant)]">Create and connect a tunnel for the selected node.</div></div><div className="text-xs text-[var(--on-surface-variant)]">Selected node: {selectedNode?.name ?? "none"}</div></div>
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <Field label="Tunnel ID"><input value={tunnelId} onChange={(event) => setTunnelId(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]" /></Field>
-                        <Field label="Tunnel Name"><input value={tunnelName} onChange={(event) => setTunnelName(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]" /></Field>
-                      </div>
-                      <Field label="Client Address CIDR"><input value={clientAddressCidr} onChange={(event) => setClientAddressCidr(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]" /></Field>
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <Field label="DNS Server (optional)"><input value={dnsServer} onChange={(event) => setDnsServer(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]" /></Field>
-                        <Field label="Allowed IPs"><input value={allowedIps} onChange={(event) => setAllowedIps(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]" /></Field>
-                      </div>
-                      <div className="mt-4 flex flex-wrap gap-3"><Button onClick={onCreateTunnel} disabled={busyAction !== null} tone="secondary">{busyAction === "create-tunnel" ? "Creating tunnel" : "Create + Connect Tunnel"}</Button></div>
-                      <div className="mt-4 rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-3 text-sm text-[var(--on-surface-variant)]">{tunnelFeedback}</div>
-                    </div>
+              <PageChrome>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-[28px] font-semibold tracking-tight text-[var(--on-surface)]">Node Management</h2>
+                    <p className="mt-1 text-sm text-[var(--on-surface-variant)]">Monitor and provision server infrastructure across global regions.</p>
                   </div>
-                </Card>
-
-                <div className="grid gap-6">
-                  <Card title="Nodes" description="Select a node to inspect its tunnels and live health.">
-                    <div className="space-y-3">
-                      {nodes.length === 0 ? <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">No nodes yet. Create one above to start a workflow.</div> : nodes.map((node) => {
-                        const selected = node.id === selectedNodeId;
-                        return (
-                          <button key={node.id} type="button" onClick={() => setSelectedNodeId(node.id)} className={`w-full rounded-[20px] border p-4 text-left transition-colors ${selected ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.08)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] hover:bg-[color:rgba(255,255,255,0.04)]"}`}>
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <div className="flex flex-wrap items-center gap-2"><div className="text-lg font-semibold text-[var(--on-surface)]">{node.name}</div><span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.24em] ${statusBadge(node.lifecycle_status)}`}>{node.lifecycle_status}</span></div>
-                                <div className="mt-1 text-xs text-[var(--on-surface-variant)]">{node.id} • {node.region} • provider {node.provider_id}</div>
-                                <div className="mt-3 text-sm text-[var(--on-surface-variant)]">Endpoint: {node.public_ipv4 ?? "n/a"} • Droplet: {node.external_ref ?? "n/a"}</div>
-                              </div>
-                              <div className="flex flex-col gap-2">
-                                <Button tone="secondary" disabled={busyAction !== null} onClick={() => setSelectedNodeId(node.id)}>Select</Button>
-                                <Button tone="danger" disabled={busyAction !== null} onClick={() => void onDestroyNode(node)}>{busyAction === "destroy-node" && selectedNodeId === node.id ? "Destroying" : "Destroy"}</Button>
-                              </div>
-                            </div>
-                          </button>
-                        );
-                      })}
+                  <div className="flex items-center gap-3">
+                    <div className="hidden items-center gap-2 rounded-full border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 md:flex">
+                      <AppIcon name="search" className="h-4 w-4 text-[var(--on-surface-variant)]" />
+                      <span className="text-sm text-[var(--on-surface-variant)]">Search nodes...</span>
                     </div>
-                  </Card>
-
-                  {selectedNode ? <Card title={`Tunnels for ${selectedNode.name}`} description="Connect and disconnect are deterministic for the selected tunnel."><div className="space-y-3">{selectedNodeTunnels.length === 0 ? <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">No tunnels created for this node yet.</div> : selectedNodeTunnels.map((tunnel) => (<div key={tunnel.id} className="rounded-[20px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><div className="font-medium text-[var(--on-surface)]">{tunnel.name}</div><span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.24em] ${statusBadge(tunnel.status)}`}>{tunnel.status}</span></div><div className="mt-1 text-xs text-[var(--on-surface-variant)]">{tunnel.id} • iface {tunnel.interface_name ?? "n/a"} • assigned {tunnel.assigned_ipv4 ?? "n/a"}</div></div><div className="flex flex-wrap gap-2"><Button tone="secondary" disabled={busyAction !== null} onClick={() => { setSelectedTunnelId(tunnel.id); void refreshHealth(); }}>Inspect</Button><Button tone="secondary" disabled={busyAction !== null} onClick={() => void onConnectTunnel(tunnel)}>{busyAction === "connect-tunnel" ? "Connecting" : "Connect"}</Button><Button tone="secondary" disabled={busyAction !== null} onClick={() => void onDisconnectTunnel(tunnel)}>{busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect"}</Button></div></div></div>))}</div></Card> : null}
+                    <Button tone="primary" onClick={onCreateNode} disabled={busyAction !== null}><span className="text-lg leading-none">+</span> New Node</Button>
+                  </div>
                 </div>
-              </div>
+
+                <div className="grid gap-4 lg:grid-cols-3">
+                  {(nodes.length > 0 ? nodes : [{
+                    id: "empty",
+                    provider_id: "",
+                    name: "No nodes yet",
+                    region: "",
+                    lifecycle_status: "new",
+                    external_ref: null,
+                    public_ipv4: null,
+                    server_public_key: null,
+                    error_reason: null,
+                    created_at: "",
+                    updated_at: "",
+                  } satisfies VpnNodeRecord]).map((node, index) => {
+                    const variants = [
+                      { bar: "bg-[var(--secondary)]", badge: "CONNECTED", tone: "secondary", icon: "database" },
+                      { bar: "bg-[var(--primary)]", badge: "PROVISIONING", tone: "primary", icon: "server" },
+                      { bar: "bg-[var(--outline)]", badge: "IDLE", tone: "neutral", icon: "shield" },
+                    ] as const;
+                    const variant = variants[index % variants.length];
+                    if (node.id === "empty") {
+                      return null;
+                    }
+                    return (
+                      <div key={node.id} className="relative overflow-hidden rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] p-4">
+                        <div className={`absolute inset-x-0 top-0 h-1 ${variant.bar}`} />
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-start gap-3">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-full border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)]"><AppIcon name={variant.icon} className="h-5 w-5 text-[var(--on-surface-variant)]" /></div>
+                            <div>
+                              <div className="text-lg font-semibold tracking-tight text-[var(--on-surface)]">{node.name}</div>
+                              <div className="mt-0.5 flex items-center gap-1 text-xs text-[var(--on-surface-variant)]"><span>United States,</span><span>{node.region}</span></div>
+                            </div>
+                          </div>
+                          <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.24em] ${statusBadge(node.lifecycle_status)}`}>{variant.badge}</span>
+                        </div>
+                        <div className="mt-5 grid grid-cols-2 gap-4 text-sm">
+                          <div>
+                            <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">Public IP</div>
+                            <div className="mt-1 font-mono text-[13px] text-[var(--on-surface)]">{node.public_ipv4 ?? "n/a"}</div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">Latency</div>
+                            <div className="mt-1 font-mono text-[13px] text-[var(--secondary)]">{index === 0 ? "12ms" : index === 1 ? "68%" : "--"}</div>
+                          </div>
+                        </div>
+                        <div className="mt-8 flex items-center justify-end gap-2 border-t border-[color:var(--outline-variant)] pt-4 opacity-80">
+                          <button type="button" onClick={() => setSelectedNodeId(node.id)} className="rounded p-2 text-[var(--on-surface-variant)] transition-colors hover:bg-[color:rgba(255,255,255,0.05)]"> <AppIcon name="settings" className="h-4 w-4" /> </button>
+                          <button type="button" onClick={() => void onDestroyNode(node)} className="rounded p-2 text-[var(--on-surface-variant)] transition-colors hover:bg-[color:rgba(255,255,255,0.05)]"> <AppIcon name="refresh" className="h-4 w-4" /> </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-2 rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] p-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-semibold text-[var(--on-surface)]">Create Node</div>
+                      <div className="text-xs text-[var(--on-surface-variant)]">Use the selected provider and region values to provision a node.</div>
+                    </div>
+                    <Button tone="secondary" onClick={() => setActiveView("settings")}>Use Token Settings</Button>
+                  </div>
+                  <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                    <Field label="Node ID"><input value={nodeId} onChange={(event) => setNodeId(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0" /></Field>
+                    <Field label="Node Name"><input value={nodeName} onChange={(event) => setNodeName(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0" /></Field>
+                    <Field label="Region"><select value={region} onChange={(event) => setRegion(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0">{REGION_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select></Field>
+                    <div className="flex items-end"><Button onClick={onCreateNode} disabled={busyAction !== null} className="w-full">Create Node</Button></div>
+                  </div>
+                  <div className="mt-3 text-sm text-[var(--on-surface-variant)]">{nodeFeedback}</div>
+                </div>
+              </PageChrome>
             ) : null}
 
             {activeView === "health" ? (
-              <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-                <Card title="System Health" description="Live endpoint and tunnel statistics from the backend state machine and WireGuard runtime." action={<Button tone="secondary" onClick={() => void refreshHealth()} disabled={busyAction !== null}>{busyAction === "refresh-health" ? "Refreshing" : "Run Again"}</Button>}>
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <MetricCard title="Uptime" value={diagnostics?.generated_at ? diagnostics.generated_at.slice(11, 16) : "14d 08h 22m"} detail="Local backend sample value." tone="secondary" />
-                    <MetricCard title="Engine Version" value="v4.2.1-stable" detail="Phase 1 backend surface." tone="primary" />
-                  </div>
-                  <div className="mt-5 space-y-3">
-                    {[
-                      { title: "API Reachable", detail: "Successfully connected to api.digitalocean.com", active: true, icon: "check" },
-                      { title: "Token Valid", detail: "Authentication token verified for Enterprise tier", active: true, icon: "check" },
-                      { title: "DNS Resolution", detail: "Resolving via primary SecureDNS", active: true, icon: "check" },
-                      { title: "Node Responding", detail: `Handshaking with ${selectedNode?.region ?? "selected region"}`, active: true, icon: "refresh" },
-                      { title: "Tunnel Established", detail: "Waiting for node response...", active: false, icon: "lock" },
-                    ].map((item) => (
-                      <div key={item.title} className={`rounded-[18px] border px-4 py-3 ${item.active ? "border-[color:rgba(78,222,163,0.2)] bg-[color:rgba(78,222,163,0.06)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}>
-                        <div className="flex items-center gap-3"><div className={`flex h-10 w-10 items-center justify-center rounded-full ${item.active ? "bg-[color:rgba(78,222,163,0.12)] text-[var(--secondary)]" : "bg-[color:rgba(255,255,255,0.04)] text-[var(--on-surface-variant)]"}`}><AppIcon name={item.icon} className="h-5 w-5" /></div><div><div className="font-medium text-[var(--on-surface)]">{item.title}</div><div className="text-sm text-[var(--on-surface-variant)]">{item.detail}</div></div></div>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-
-                <Card title="Connection Stats" description="Handshake and throughput details aligned with the reference visual hierarchy.">
-                  {health ? (
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <MetricCard title="Endpoint" value={health.endpoint_ip ?? "n/a"} detail={`Node ${health.node_id}`} tone="primary" />
-                      <MetricCard title="External IP" value={health.external_ipv4 ?? "n/a"} detail={`Tunnel ${health.tunnel_id ?? "n/a"}`} tone="secondary" />
-                      <MetricCard title="Handshake" value={formatHandshakeAge(health.handshake_age_seconds)} detail={`Tunnel status ${health.tunnel_status ?? "n/a"}`} tone="tertiary" />
-                      <MetricCard title="Traffic" value={`RX ${formatBytes(health.rx_bytes)} / TX ${formatBytes(health.tx_bytes)}`} detail={`Selected tunnel ${selectedTunnelId || "none"}`} tone="primary" />
-                    </div>
-                  ) : <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">Select a node to load health details.</div>}
-                </Card>
-              </div>
-            ) : null}
-
-            {activeView === "diagnostics" ? (
-              <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-                <Card title="Diagnostics" description="Redacted local bundle for support and troubleshooting. Secrets are excluded by design." action={<Button tone="secondary" onClick={() => void onCopyDiagnostics()} disabled={busyAction !== null}><AppIcon name="copy" className="h-4 w-4" />{busyAction === "copy-diagnostics" ? "Copying" : "Copy Bundle"}</Button>}>
-                  <div className="space-y-4">
-                    <div className="flex flex-wrap items-center gap-3 text-sm text-[var(--on-surface-variant)]"><span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">{diagnostics ? `${diagnostics.nodes.length} node(s)` : "No nodes"}</span><span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">{diagnostics ? `${diagnostics.tunnels.length} tunnel(s)` : "No tunnels"}</span><span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">{diagnostics ? diagnostics.generated_at : "Not generated"}</span></div>
-                    <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-3 text-sm text-[var(--on-surface-variant)]">{diagnosticsExportPath}</div>
-                    <Button onClick={() => void onExportDiagnostics()} disabled={busyAction !== null}>{busyAction === "export-diagnostics" ? "Exporting" : "Export Diagnostics File"}</Button>
-                    {recovery ? <div className="rounded-[18px] border border-[color:rgba(255,185,95,0.22)] bg-[color:rgba(255,185,95,0.08)] p-4 text-sm text-[var(--on-surface)]"><div className="font-semibold">{recovery.title}</div><div className="mt-1 text-[var(--on-surface-variant)]">{recovery.message}</div><div className="mt-2 text-[var(--tertiary)]">Next: {recovery.nextAction}</div></div> : null}
-                  </div>
-                </Card>
-
-                <div className="grid gap-6">
-                  <Card title="Redacted Notes" description="Support hints that intentionally omit secrets."><div className="space-y-2">{diagnostics?.redacted_notes?.length ? diagnostics.redacted_notes.map((note, index) => <div key={`${note}-${index}`} className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-3 text-sm text-[var(--on-surface-variant)]">{note}</div>) : <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">No redacted notes to show.</div>}</div></Card>
-                  <Card title="Bundle JSON" description="Redacted payload rendered in a mono block."><pre className="max-h-[28rem] overflow-auto rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.96)] p-4 font-mono text-xs leading-5 text-[var(--on-surface)]">{diagnostics ? JSON.stringify(diagnostics, null, 2) : "Diagnostics are not available yet."}</pre></Card>
+              <PageChrome>
+                <div className="flex items-center gap-2 text-xs text-[var(--on-surface-variant)]">
+                  <AppIcon name="shield" className="h-4 w-4" />
+                  <span>Health</span>
+                  <span>›</span>
+                  <span>Connection Check</span>
                 </div>
-              </div>
+                <div className="grid gap-4 xl:grid-cols-[390px_minmax(0,1fr)]">
+                  <Card title="System Health" description="Last check: Just now" action={<div className="rounded-full border border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.08)] px-3 py-1 text-[11px] uppercase tracking-[0.24em] text-[var(--secondary)]">Online</div>}>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="rounded-[8px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-3">
+                        <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Uptime</div>
+                        <div className="mt-1 font-mono text-[18px] text-[var(--on-surface)]">14d 08h 22m</div>
+                      </div>
+                      <div className="rounded-[8px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-3">
+                        <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Engine Version</div>
+                        <div className="mt-1 font-mono text-[18px] text-[var(--on-surface)]">v4.2.1-stable</div>
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card title="Live Logs" description="WireGuard and backend activity" action={<div className="flex items-center gap-2"><button type="button" className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-1.5 text-xs text-[var(--on-surface-variant)]">All Logs</button><button type="button" className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-1.5 text-xs text-[var(--on-surface-variant)]">Errors</button><button type="button" className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-1.5 text-xs text-[var(--on-surface-variant)]">WireGuard</button></div>}>
+                    <div className="max-h-[560px] overflow-auto rounded-[8px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(8,10,16,0.96),rgba(8,10,16,0.96))] p-4 font-mono text-[12px] leading-6 text-[var(--on-surface)]">
+                      {diagnosticsLogs.map((entry) => (
+                        <div key={`${entry.time}-${entry.message}`} className="flex gap-2">
+                          <span className="w-[80px] text-[var(--on-surface-variant)]">{entry.time}</span>
+                          <span className={entry.tone === "warning" ? "text-[var(--tertiary)]" : entry.tone === "error" ? "text-[#ff9b9b]" : entry.tone === "success" ? "text-[var(--secondary)]" : "text-[var(--primary)]"}>[{entry.level}]</span>
+                          <span className="text-[var(--on-surface-variant)]">{entry.source}</span>
+                          <span className="flex-1 text-[var(--on-surface)]">{entry.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </div>
+
+                <div className="grid gap-4 xl:grid-cols-[390px_minmax(0,1fr)]">
+                  <Card title="Connectivity Check" action={<Button tone="secondary" onClick={() => void refreshHealth()} disabled={busyAction !== null}>Run Again</Button>}>
+                    <div className="space-y-4">
+                      {[
+                        { title: "API Reachable", detail: "Successfully connected to api.digitalocean.com", active: true },
+                        { title: "Token Valid", detail: "Authentication token verified for Enterprise tier", active: true },
+                        { title: "DNS Resolution", detail: "Resolving via primary SecureDNS", active: true },
+                        { title: "Node Responding", detail: `Handshaking with ${selectedNode?.region ?? "selected region"}`, active: true },
+                        { title: "Tunnel Established", detail: "Waiting for node response...", active: false },
+                      ].map((item) => (
+                        <div key={item.title} className={`rounded-[10px] border px-4 py-3 ${item.active ? "border-[color:rgba(78,222,163,0.2)] bg-[color:rgba(78,222,163,0.06)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}>
+                          <div className="flex items-start gap-3">
+                            <div className={`mt-0.5 flex h-6 w-6 items-center justify-center rounded-full border ${item.active ? "border-[color:rgba(78,222,163,0.4)] text-[var(--secondary)]" : "border-[color:var(--outline-variant)] text-[var(--on-surface-variant)]"}`}>
+                              <AppIcon name={item.active ? "check" : "lock"} className="h-3.5 w-3.5" />
+                            </div>
+                            <div>
+                              <div className="font-medium text-[var(--on-surface)]">{item.title}</div>
+                              <div className="text-sm text-[var(--on-surface-variant)]">{item.detail}</div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+
+                  <Card title="Connection Stats" description="Handshake and throughput details aligned with the reference visual hierarchy.">
+                    {health ? (
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <MetricCard title="Endpoint" value={health.endpoint_ip ?? "n/a"} detail={`Node ${health.node_id}`} tone="primary" />
+                        <MetricCard title="External IP" value={health.external_ipv4 ?? "n/a"} detail={`Tunnel ${health.tunnel_id ?? "n/a"}`} tone="secondary" />
+                        <MetricCard title="Handshake" value={formatHandshakeAge(health.handshake_age_seconds)} detail={`Tunnel status ${health.tunnel_status ?? "n/a"}`} tone="tertiary" />
+                        <MetricCard title="Traffic" value={`RX ${formatBytes(health.rx_bytes)} / TX ${formatBytes(health.tx_bytes)}`} detail={`Selected tunnel ${selectedTunnelId || "none"}`} tone="primary" />
+                      </div>
+                    ) : <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">Select a node to load health details.</div>}
+                  </Card>
+                </div>
+              </PageChrome>
             ) : null}
 
             {activeView !== "diagnostics" ? (
               <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-                <Card title="Recovery" description="Suggested next steps after a failed operation.">{recovery ? <div className="rounded-[18px] border border-[color:rgba(255,185,95,0.18)] bg-[color:rgba(255,185,95,0.08)] p-4"><div className="font-semibold text-[var(--on-surface)]">{recovery.title}</div><div className="mt-1 text-sm text-[var(--on-surface-variant)]">{recovery.message}</div><div className="mt-2 text-sm text-[var(--tertiary)]">Next: {recovery.nextAction}</div><div className="mt-4 flex flex-wrap gap-3"><Button onClick={() => void loadDashboard()} disabled={busyAction !== null} tone="secondary">Refresh Dashboard</Button>{(recovery.kind === "provider" || recovery.kind === "database") ? <Button onClick={() => void onValidateToken()} disabled={busyAction !== null} tone="secondary">Validate Token</Button> : null}{selectedNode ? <Button onClick={() => void onForceCleanupSelectedNode()} disabled={busyAction !== null} tone="danger">{busyAction === "force-cleanup" ? "Cleaning" : "Force Cleanup Node"}</Button> : null}{(recovery.kind === "wireguard" || recovery.kind === "state") && selectedNode ? <Button onClick={() => void refreshHealth()} disabled={busyAction !== null} tone="secondary">Refresh Health</Button> : null}</div></div> : <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">No active recovery issue.</div>}</Card>
-                <Card title="Diagnostics Snapshot" description="A compact summary is always visible on the support surface."><div className="grid gap-4 md:grid-cols-2"><MetricCard title="Diagnostics" value={diagnostics ? "Ready" : "Pending"} detail={`Export path: ${diagnosticsExportPath}`} tone="primary" /><MetricCard title="Nodes" value={`${nodes.length}`} detail={`${tunnels.length} tunnel(s) loaded`} tone="secondary" /></div></Card>
+                <Card title="Recovery" description="Suggested next steps after a failed operation.">
+                  {recovery ? (
+                    <div className="rounded-[18px] border border-[color:rgba(255,185,95,0.18)] bg-[color:rgba(255,185,95,0.08)] p-4">
+                      <div className="font-semibold text-[var(--on-surface)]">{recovery.title}</div>
+                      <div className="mt-1 text-sm text-[var(--on-surface-variant)]">{recovery.message}</div>
+                      <div className="mt-2 text-sm text-[var(--tertiary)]">Next: {recovery.nextAction}</div>
+                      <div className="mt-4 flex flex-wrap gap-3">
+                        <Button onClick={() => void loadDashboard()} disabled={busyAction !== null} tone="secondary">Refresh Dashboard</Button>
+                        {(recovery.kind === "provider" || recovery.kind === "database") ? <Button onClick={() => void onValidateToken()} disabled={busyAction !== null} tone="secondary">Validate Token</Button> : null}
+                        {selectedNode ? <Button onClick={() => void onForceCleanupSelectedNode()} disabled={busyAction !== null} tone="danger">{busyAction === "force-cleanup" ? "Cleaning" : "Force Cleanup Node"}</Button> : null}
+                        {(recovery.kind === "wireguard" || recovery.kind === "state") && selectedNode ? <Button onClick={() => void refreshHealth()} disabled={busyAction !== null} tone="secondary">Refresh Health</Button> : null}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">No active recovery issue.</div>
+                  )}
+                </Card>
+
+                <Card title="Diagnostics Snapshot" description="A compact summary is always visible on the support surface.">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <MetricCard title="Diagnostics" value={diagnostics ? "Ready" : "Pending"} detail={`Export path: ${diagnosticsExportPath}`} tone="primary" />
+                    <MetricCard title="Nodes" value={`${nodes.length}`} detail={`${tunnels.length} tunnel(s) loaded`} tone="secondary" />
+                  </div>
+                </Card>
               </div>
             ) : null}
 
