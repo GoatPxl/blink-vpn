@@ -35,9 +35,10 @@ export function NodesView({
   busyAction,
   onCreateNode,
   onNavigateToCreate,
+  onInstallHost,
+  onUninstallHost,
   onConnectTunnel,
   onDisconnectTunnel,
-  onDestroyNode,
   onForceCleanupSelectedNode,
   onNavigateToView,
   nodeFeedback,
@@ -76,9 +77,10 @@ export function NodesView({
   busyAction: DashboardBusyAction;
   onCreateNode: () => Promise<void>;
   onNavigateToCreate: () => void;
+  onInstallHost: (node: VpnNodeRecord) => Promise<void>;
+  onUninstallHost: (node: VpnNodeRecord) => Promise<void>;
   onConnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onDisconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
-  onDestroyNode: (node: VpnNodeRecord) => Promise<void>;
   onForceCleanupSelectedNode: () => Promise<void>;
   onNavigateToView: (view: AppView) => void;
   nodeFeedback: string;
@@ -164,6 +166,9 @@ export function NodesView({
                   {nodes.map((node) => {
                     const tunnelForNode = (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === node.id) ?? null;
                     const nodeCanConnect = !!tunnelForNode && tunnelForNode.status !== "connected";
+                    const canInstallHost = node.lifecycle_status === "new";
+                    const hostInstallInProgress = node.lifecycle_status === "provisioning" || node.lifecycle_status === "bootstrapping";
+                    const canUninstallHost = node.lifecycle_status === "ready" || node.lifecycle_status === "connected" || node.lifecycle_status === "error";
                     const nodePricing = getNodePricingDisplay(node, pricingByRegion);
                     return (
                       <tr key={node.id} className={`border-t border-[color:var(--outline-variant)] ${selectedNodeId === node.id ? "bg-[color:rgba(171,199,255,0.08)]" : "bg-transparent"}`}>
@@ -184,9 +189,28 @@ export function NodesView({
                         <td className="px-4 py-4 align-top text-[var(--on-surface-variant)]">{formatCreatedTime(node.created_at)}</td>
                         <td className="px-4 py-4 align-top">
                           <div className="flex flex-wrap justify-end gap-2">
+                            {canInstallHost ? (
+                              <Button tone="primary" onClick={() => void onInstallHost(node)} disabled={busyAction !== null} className="px-3 py-2 text-xs">
+                                {busyAction === "create-node" ? "Installing Host" : "Install Host"}
+                              </Button>
+                            ) : (
+                              <Button
+                                tone={canUninstallHost ? "danger" : "secondary"}
+                                onClick={() => (canUninstallHost ? void onUninstallHost(node) : undefined)}
+                                disabled={busyAction !== null || hostInstallInProgress || !canUninstallHost}
+                                className="px-3 py-2 text-xs"
+                              >
+                                {hostInstallInProgress
+                                  ? "Installing Host"
+                                  : busyAction === "destroy-node"
+                                    ? "Uninstalling Host"
+                                    : canUninstallHost
+                                      ? "Uninstall Host"
+                                      : "Host Pending"}
+                              </Button>
+                            )}
                             <Button tone={nodeCanConnect ? "primary" : tunnelForNode ? "danger" : "secondary"} onClick={() => (tunnelForNode ? (nodeCanConnect ? void onConnectTunnel(tunnelForNode) : void onDisconnectTunnel(tunnelForNode)) : undefined)} disabled={!tunnelForNode || busyAction !== null} className="px-3 py-2 text-xs">{nodeCanConnect ? "Connect" : tunnelForNode ? "Disconnect" : "No Tunnel"}</Button>
                             <Button tone="secondary" onClick={() => onOpenNodeDetails(node.id)} disabled={busyAction !== null} className="px-3 py-2 text-xs">View Details</Button>
-                            <Button tone="danger" onClick={() => void onDestroyNode(node)} disabled={busyAction !== null} className="px-3 py-2 text-xs">Destroy</Button>
                           </div>
                         </td>
                       </tr>

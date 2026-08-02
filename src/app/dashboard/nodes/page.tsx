@@ -19,7 +19,6 @@ export default function DashboardNodesPage() {
     busyAction,
     configuredProvider,
     diagnostics,
-    destroyNode,
     forceCleanupSelectedNode,
     health,
     nodes,
@@ -32,6 +31,8 @@ export default function DashboardNodesPage() {
     selectedNode,
     selectedNodeId,
     setSelectedNodeId,
+    installHostForNode,
+    uninstallHostForNode,
     connectTunnel,
     disconnectTunnel,
   } = useDashboard();
@@ -173,9 +174,10 @@ export default function DashboardNodesPage() {
       busyAction={busyAction}
       onCreateNode={() => Promise.resolve()}
       onNavigateToCreate={handleNavigateToCreate}
+      onInstallHost={installHostForNode}
+      onUninstallHost={uninstallHostForNode}
       onConnectTunnel={connectTunnel}
       onDisconnectTunnel={disconnectTunnel}
-      onDestroyNode={destroyNode}
       onForceCleanupSelectedNode={forceCleanupSelectedNode}
       onNavigateToView={handleNavigateToView}
       nodeFeedback={pricingError ?? "No node action yet."}

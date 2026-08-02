@@ -103,6 +103,8 @@ type DashboardContextValue = {
   saveDockerFauxToken: (value: string) => Promise<void>;
   validateDockerReadiness: (options?: { silent?: boolean }) => Promise<void>;
   createNode: (input: CreateNodeInput) => Promise<void>;
+  installHostForNode: (node: VpnNodeRecord) => Promise<void>;
+  uninstallHostForNode: (node: VpnNodeRecord) => Promise<void>;
   connectPrimary: () => Promise<void>;
   connectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   disconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
@@ -531,6 +533,38 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, loadDashboard, providerId, pushToast]);
 
+  const installHostForNode = useCallback(async (node: VpnNodeRecord) => {
+    if (node.lifecycle_status !== "new") {
+      pushToast("warning", "Host already provisioned", `Node ${node.name} is already in ${node.lifecycle_status} state.`);
+      return;
+    }
+
+    const planKey = node.plan_key ?? node.size_slug;
+    if (!planKey) {
+      pushToast("error", "Missing plan", `Node ${node.name} is missing a plan key and cannot be installed.`);
+      return;
+    }
+
+    setBusyAction("create-node");
+    try {
+      const result = await createVpnNode({
+        nodeId: node.id,
+        providerId: node.provider_id,
+        nodeName: node.name,
+        region: node.region,
+        planKey,
+      });
+
+      setRecovery(null);
+      pushToast("success", "Host installed", result);
+      await loadDashboard(node.id);
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [handleError, loadDashboard, pushToast]);
+
   const connectPrimary = useCallback(async () => {
     if (!activeNode) {
       pushToast("warning", "No node selected", "Select a node before connecting.");
@@ -632,6 +666,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setBusyAction(null);
     }
   }, [handleError, loadDashboard, pushToast]);
+
+  const uninstallHostForNode = useCallback(async (node: VpnNodeRecord) => {
+    await destroyNode(node);
+  }, [destroyNode]);
 
   const forceCleanupSelectedNode = useCallback(async () => {
     if (!selectedNode) {
@@ -853,6 +891,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     saveDockerFauxToken,
     validateDockerReadiness,
     createNode,
+    installHostForNode,
+    uninstallHostForNode,
     connectPrimary,
     connectTunnel,
     disconnectTunnel,
