@@ -150,6 +150,11 @@ test.describe("Dashboard Nodes", () => {
         ],
       } as Record<string, unknown>;
 
+      const commandCounts = {
+        list_provider_regions: 0,
+        list_provider_pricing: 0,
+      };
+
       const tunnels = [{ id: "tunnel-1", node_id: "node-1", name: "wg-primary", status: "connected", interface_name: "wg-primary", assigned_ipv4: "10.44.0.2", last_handshake_age_seconds: 12, rx_bytes: 1024, tx_bytes: 2048, stats_updated_at: "2026-08-01T00:00:00Z", last_error: null, created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z" }];
 
       const internals = {
@@ -162,15 +167,24 @@ test.describe("Dashboard Nodes", () => {
             return [{ id: "provider-1", name: "DigitalOcean", slug: "digitalocean", token_ref: "do-token:provider-1:seeded", created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z" }];
           }
           if (command === "validate_provider_token") return "Provider token valid for account acct-1 (active)";
-          if (command === "list_provider_regions") return Object.keys(pricingByRegion);
-          if (command === "list_provider_pricing") return { provider_id: "provider-1", region: String(args?.region ?? "nyc1"), plans: pricingByRegion[String(args?.region ?? "nyc1")] ?? [] };
+          if (command === "list_provider_regions") {
+            commandCounts.list_provider_regions += 1;
+            return Object.keys(pricingByRegion);
+          }
+          if (command === "list_provider_pricing") {
+            commandCounts.list_provider_pricing += 1;
+            return { provider_id: "provider-1", region: String(args?.region ?? "nyc1"), plans: pricingByRegion[String(args?.region ?? "nyc1")] ?? [] };
+          }
           if (command === "list_tunnels_for_node") return tunnels.filter((tunnel) => tunnel.node_id === args?.nodeId);
           if (command === "get_health_panel_data") {
             return { node_id: String(args?.nodeId ?? "node-1"), tunnel_id: "tunnel-1", endpoint_ip: "203.0.113.10", handshake_age_seconds: 12, rx_bytes: 1024, tx_bytes: 2048, external_ipv4: "203.0.113.10", tunnel_status: "connected" };
           }
+          (window as unknown as { __TEST_COMMAND_COUNTS__?: typeof commandCounts }).__TEST_COMMAND_COUNTS__ = commandCounts;
           throw new Error(`Unhandled mocked command: ${command}`);
         },
       };
+
+      (window as unknown as { __TEST_COMMAND_COUNTS__?: typeof commandCounts }).__TEST_COMMAND_COUNTS__ = commandCounts;
 
       (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = internals;
     });
@@ -188,5 +202,8 @@ test.describe("Dashboard Nodes", () => {
     await page.getByRole("button", { name: "View Details", exact: true }).click();
     await expect(page.getByText("Bootstrap marker missing. Next: retry validation, recreate the node, or use force cleanup if partial resources remain.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Force Cleanup", exact: true })).toBeVisible();
+
+    const commandCounts = await page.evaluate(() => (window as unknown as { __TEST_COMMAND_COUNTS__?: { list_provider_regions: number; list_provider_pricing: number } }).__TEST_COMMAND_COUNTS__ ?? null);
+    expect(commandCounts).toEqual({ list_provider_regions: 1, list_provider_pricing: 2 });
   });
 });

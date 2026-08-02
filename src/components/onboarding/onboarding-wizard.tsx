@@ -6,8 +6,6 @@ import {
   createVpnNode,
   installWireGuardWithPrerequisites,
   listProviders,
-  listProviderPricing,
-  listProviderRegions,
   listVpnNodes,
   registerProviderToken,
   validateProviderToken,
@@ -16,6 +14,7 @@ import {
   type VpnNodeRecord,
   type WireGuardReadiness,
 } from "@/lib/tauri";
+import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
 import {
   DEFAULT_ONBOARDING_STATE,
   loadOnboardingState,
@@ -51,7 +50,7 @@ export function OnboardingWizard() {
   const [pricingBusy, setPricingBusy] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
   const [availableRegions, setAvailableRegions] = useState<string[]>([]);
-  const [livePricing, setLivePricing] = useState<ProviderPlanPricing[]>([]);
+  const [pricingByRegion, setPricingByRegion] = useState<Record<string, ProviderPlanPricing[]>>({});
 
   const [provisionBusy, setProvisionBusy] = useState(false);
   const [provisionPhase, setProvisionPhase] = useState<"idle" | "provisioning" | "bootstrapping" | "ready" | "error">("idle");
@@ -104,9 +103,11 @@ export function OnboardingWizard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isHydrated, step, state.region, state.providerId, state.tokenSaved, state.tokenValidated]);
 
+  const selectedRegionPricing = useMemo(() => pricingByRegion[state.region] ?? [], [pricingByRegion, state.region]);
+
   const selectedPlanPricing = useMemo(() => {
-    return livePricing.find((entry) => entry.plan_key === state.plan) ?? null;
-  }, [livePricing, state.plan]);
+    return selectedRegionPricing.find((entry) => entry.plan_key === state.plan) ?? null;
+  }, [selectedRegionPricing, state.plan]);
 
   const hasUnsavedTokenInput = apiToken.trim().length > 0;
   const hasStoredProviderToken = !!storedProviderTokenRef;
@@ -179,31 +180,30 @@ export function OnboardingWizard() {
     setPricingBusy(true);
     setPricingError(null);
     try {
-      const regions = await listProviderRegions(state.providerId);
-      setAvailableRegions(regions);
-      if (regions.length === 0) {
-        setLivePricing([]);
+      const catalog = await loadProviderPricingCatalog(state.providerId);
+      setAvailableRegions(catalog.regions);
+      setPricingByRegion(catalog.pricingByRegion);
+      if (catalog.regions.length === 0) {
         setState((current) => ({ ...current, region: "", plan: "" }));
         setPricingError("No available regions were returned by the provider API.");
         return;
       }
 
-      const selectedRegion = regions.includes(state.region) ? state.region : regions[0];
-      const response = await listProviderPricing(state.providerId, selectedRegion);
-      setLivePricing(response.plans);
-      const hasSelectedPlan = response.plans.some((entry) => entry.plan_key === state.plan);
-      const nextPlan = hasSelectedPlan ? state.plan : (response.plans[0]?.plan_key ?? "");
+      const selectedRegion = catalog.regions.includes(state.region) ? state.region : catalog.regions[0];
+      const responsePlans = catalog.pricingByRegion[selectedRegion] ?? [];
+      const hasSelectedPlan = responsePlans.some((entry) => entry.plan_key === state.plan);
+      const nextPlan = hasSelectedPlan ? state.plan : (responsePlans[0]?.plan_key ?? "");
       setState((current) => ({
         ...current,
         region: selectedRegion,
         plan: nextPlan,
       }));
-      if (response.plans.length === 0) {
+      if (responsePlans.length === 0) {
         setPricingError("No supported plan pricing is currently available for the selected region.");
       }
     } catch (error) {
       setAvailableRegions([]);
-      setLivePricing([]);
+      setPricingByRegion({});
       const message = error instanceof Error ? error.message : String(error);
       const isTokenRecoveryNeeded = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
       if (isTokenRecoveryNeeded) {
@@ -560,7 +560,7 @@ export function OnboardingWizard() {
               <div>
                 <h2 className="text-sm font-medium text-[var(--on-surface)]">Plan</h2>
                 <div className="mt-3 grid gap-3 md:grid-cols-3">
-                  {livePricing.map((plan) => (
+                  {selectedRegionPricing.map((plan) => (
                     <button
                       key={plan.plan_key}
                       type="button"
@@ -573,7 +573,7 @@ export function OnboardingWizard() {
                       <div className="mt-2 text-xs text-[var(--secondary)]">${plan.monthly_usd.toFixed(2)}/mo</div>
                     </button>
                   ))}
-                  {livePricing.length === 0 ? <div className="rounded-xl border border-dashed border-[color:var(--outline-variant)] px-4 py-3 text-xs text-[var(--on-surface-variant)]">No plans available for this region.</div> : null}
+                  {selectedRegionPricing.length === 0 ? <div className="rounded-xl border border-dashed border-[color:var(--outline-variant)] px-4 py-3 text-xs text-[var(--on-surface-variant)]">No plans available for this region.</div> : null}
                 </div>
               </div>
               <div className="rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3 text-sm text-[var(--on-surface-variant)]">

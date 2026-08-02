@@ -9,9 +9,10 @@ import {
   type NodeSort,
   VIEW_ROUTE,
 } from "@/components/dashboard/shared";
-import { listProviderPricing, listProviderRegions, type ProviderPlanPricing } from "@/lib/tauri";
+import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
+import { type ProviderPlanPricing } from "@/lib/tauri";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export default function DashboardNodesPage() {
   const router = useRouter();
@@ -46,24 +47,41 @@ export default function DashboardNodesPage() {
   const [pricingByRegion, setPricingByRegion] = useState<Record<string, ProviderPlanPricing[]>>({});
   const [pricingBusy, setPricingBusy] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
+  const regionRef = useRef(region);
+  const planKeyRef = useRef(planKey);
+
+  useEffect(() => {
+    regionRef.current = region;
+    planKeyRef.current = planKey;
+  }, [planKey, region]);
 
   const providerBadge = providerAccessBadge(providerAccessState);
   const nodesProvisioningDisabled = providerAccessState !== "ready";
 
   useEffect(() => {
+    let active = true;
+
     async function loadPricingCatalog() {
       if (!providerId || providerAccessState !== "ready") {
-        setAvailableRegions([]);
-        setPricingByRegion({});
-        setRegion("");
-        setPlanKey("");
+        if (active) {
+          setAvailableRegions([]);
+          setPricingByRegion({});
+          setRegion("");
+          setPlanKey("");
+        }
         return;
       }
 
-      setPricingBusy(true);
+      if (active) {
+        setPricingBusy(true);
+      }
       try {
-        const regions = await listProviderRegions(providerId);
-        if (regions.length === 0) {
+        const catalog = await loadProviderPricingCatalog(providerId);
+        if (!active) {
+          return;
+        }
+
+        if (catalog.regions.length === 0) {
           setAvailableRegions([]);
           setPricingByRegion({});
           setRegion("");
@@ -72,25 +90,23 @@ export default function DashboardNodesPage() {
           return;
         }
 
-        const pricingEntries = await Promise.all(
-          regions.map(async (regionValue) => {
-            const response = await listProviderPricing(providerId, regionValue);
-            return [regionValue, response.plans] as const;
-          }),
-        );
-
-        const nextPricingByRegion = Object.fromEntries(pricingEntries);
-        const nextRegion = regions.includes(region) ? region : regions[0];
+        const currentRegion = regionRef.current;
+        const currentPlanKey = planKeyRef.current;
+        const nextPricingByRegion = catalog.pricingByRegion;
+        const nextRegion = catalog.regions.includes(currentRegion) ? currentRegion : catalog.regions[0];
         const nextRegionPlans = nextPricingByRegion[nextRegion] ?? [];
-        const hasCurrentPlan = nextRegionPlans.some((plan) => plan.plan_key === planKey);
-        const nextPlanKey = hasCurrentPlan ? planKey : (nextRegionPlans[0]?.plan_key ?? "");
+        const hasCurrentPlan = nextRegionPlans.some((plan) => plan.plan_key === currentPlanKey);
+        const nextPlanKey = hasCurrentPlan ? currentPlanKey : (nextRegionPlans[0]?.plan_key ?? "");
 
-        setAvailableRegions(regions);
+        setAvailableRegions(catalog.regions);
         setPricingByRegion(nextPricingByRegion);
         setRegion(nextRegion);
         setPlanKey(nextPlanKey);
         setPricingError(null);
       } catch (error) {
+        if (!active) {
+          return;
+        }
         setPricingByRegion({});
         setAvailableRegions([]);
         setRegion("");
@@ -98,12 +114,17 @@ export default function DashboardNodesPage() {
         const message = error instanceof Error ? error.message : String(error);
         setPricingError(message);
       } finally {
-        setPricingBusy(false);
+        if (active) {
+          setPricingBusy(false);
+        }
       }
     }
 
     void loadPricingCatalog();
-  }, [planKey, providerAccessState, providerId, region]);
+    return () => {
+      active = false;
+    };
+  }, [providerAccessState, providerId]);
 
   const filteredNodes = useMemo(() => {
     const filtered = nodes.filter((node) => {

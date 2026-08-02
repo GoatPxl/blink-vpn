@@ -26,6 +26,12 @@ test.describe("Onboarding Step 2", () => {
         tokenSaved: false,
         apiToken: tokenFromEnv,
         tokenRef: null as string | null,
+        nodes: [] as Array<Record<string, unknown>>,
+      };
+
+      const commandCounts = {
+        list_provider_regions: 0,
+        list_provider_pricing: 0,
       };
 
       const successPricing: Plan[] = [
@@ -91,6 +97,32 @@ test.describe("Onboarding Step 2", () => {
             };
           }
 
+          if (command === "create_vpn_node_to_ready") {
+            const nodeId = String(args?.nodeId ?? "node-1");
+            const region = String(args?.region ?? "nyc1");
+            const planKey = String(args?.planKey ?? "s-1vcpu-1gb");
+            const node = {
+              id: nodeId,
+              provider_id: "provider-1",
+              name: String(args?.nodeName ?? "Primary Node"),
+              region,
+              plan_key: planKey,
+              size_slug: planKey,
+              price_monthly_usd: 6,
+              price_hourly_usd: 0.00893,
+              price_source_timestamp: "2026-08-01T00:00:00Z",
+              lifecycle_status: "ready",
+              external_ref: "42",
+              public_ipv4: "203.0.113.10",
+              server_public_key: "server-key-1",
+              error_reason: null,
+              created_at: "2026-08-01T00:00:00Z",
+              updated_at: "2026-08-01T00:00:00Z",
+            };
+            state.nodes = [node];
+            return "Node created and ready.";
+          }
+
           if (command === "register_digitalocean_provider_token") {
             const candidate = String(args?.apiToken ?? "");
             if (!candidate || !candidate.startsWith("dop_v1_")) {
@@ -125,6 +157,7 @@ test.describe("Onboarding Step 2", () => {
           }
 
           if (command === "list_provider_pricing") {
+            commandCounts.list_provider_pricing += 1;
             const forcePricingStale = Boolean((window as unknown as { __TEST_FORCE_STALE?: boolean }).__TEST_FORCE_STALE);
             if (forcePricingStale) {
               state.tokenSaved = false;
@@ -145,12 +178,62 @@ test.describe("Onboarding Step 2", () => {
           }
 
           if (command === "list_provider_regions") {
+            commandCounts.list_provider_regions += 1;
             return ["nyc1", "sfo3", "fra1"];
           }
+
+          if (command === "list_vpn_nodes") {
+            return state.nodes.length > 0
+              ? state.nodes
+              : [
+              {
+                id: "node-1",
+                provider_id: "provider-1",
+                name: "Primary Node",
+                region: "nyc1",
+                plan_key: "s-1vcpu-1gb",
+                size_slug: "s-1vcpu-1gb",
+                price_monthly_usd: 6,
+                price_hourly_usd: 0.00893,
+                price_source_timestamp: "2026-08-01T00:00:00Z",
+                lifecycle_status: "ready",
+                external_ref: "42",
+                public_ipv4: "203.0.113.10",
+                server_public_key: "server-key-1",
+                error_reason: null,
+                created_at: "2026-08-01T00:00:00Z",
+                updated_at: "2026-08-01T00:00:00Z",
+              },
+              ];
+          }
+
+          if (command === "get_diagnostics_bundle") {
+            return { generated_at: "2026-08-01T00:00:00Z", providers: [], nodes: [], tunnels: [], redacted_notes: [] };
+          }
+
+          if (command === "list_providers") {
+            return [{ id: "provider-1", name: "DigitalOcean", slug: "digitalocean", token_ref: "do-token:provider-1:test-token-ref", created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z" }];
+          }
+
+          if (command === "validate_provider_token") {
+            return "Provider token is valid for DigitalOcean API.";
+          }
+
+          if (command === "list_tunnels_for_node") {
+            return [];
+          }
+
+          if (command === "get_health_panel_data") {
+            return { node_id: "node-1", tunnel_id: null, endpoint_ip: "203.0.113.10", handshake_age_seconds: null, rx_bytes: null, tx_bytes: null, external_ipv4: "203.0.113.10", tunnel_status: "ready" };
+          }
+
+          (window as unknown as { __TEST_COMMAND_COUNTS__?: typeof commandCounts }).__TEST_COMMAND_COUNTS__ = commandCounts;
 
           throw new Error(`Unhandled mocked command: ${command}`);
         },
       };
+
+      (window as unknown as { __TEST_COMMAND_COUNTS__?: typeof commandCounts }).__TEST_COMMAND_COUNTS__ = commandCounts;
 
       (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = internals;
     }, apiToken);
@@ -184,6 +267,23 @@ test.describe("Onboarding Step 2", () => {
     await expect(page.getByRole("heading", { name: "Server Configuration" })).toBeVisible();
     await expect(page.getByText("Live pricing")).toBeVisible();
     await expect(page.getByText("$6.00/mo")).toBeVisible();
+
+    const pricingCounts = await page.evaluate(() => (window as unknown as { __TEST_COMMAND_COUNTS__?: { list_provider_regions: number; list_provider_pricing: number } }).__TEST_COMMAND_COUNTS__ ?? null);
+    expect(pricingCounts).toEqual({ list_provider_regions: 1, list_provider_pricing: 3 });
+
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await page.getByRole("button", { name: "Start Provisioning", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Next", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Go to Dashboard", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Go to Dashboard", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Network Stats" })).toBeVisible();
+
+    await page.getByRole("link", { name: "Server Locations" }).click();
+    await expect(page.getByRole("heading", { name: "Node Management" }).first()).toBeVisible();
+
+    const postNavCounts = await page.evaluate(() => (window as unknown as { __TEST_COMMAND_COUNTS__?: { list_provider_regions: number; list_provider_pricing: number } }).__TEST_COMMAND_COUNTS__ ?? null);
+    expect(postNavCounts).toEqual({ list_provider_regions: 1, list_provider_pricing: 3 });
   });
 
   test("returns to step 2 with guidance when token becomes stale during step 3 pricing load", async ({ page }) => {
