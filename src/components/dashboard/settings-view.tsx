@@ -10,6 +10,7 @@ import {
   type AppView,
   type ProviderRecord,
   type DashboardBusyAction,
+  type VpnNodeRecord,
 } from "./shared";
 import { maskTokenReference } from "./shared";
 
@@ -21,6 +22,7 @@ export function SettingsView({
   configuredProvider,
   providerId,
   providers,
+  nodes,
   onSelectProvider,
   apiToken,
   setApiToken,
@@ -41,6 +43,7 @@ export function SettingsView({
   configuredProvider: ProviderRecord | null;
   providerId: string;
   providers: ProviderRecord[];
+  nodes: VpnNodeRecord[];
   onSelectProvider: (providerId: string) => void;
   apiToken: string;
   setApiToken: (value: string) => void;
@@ -66,22 +69,29 @@ export function SettingsView({
   }, [configuredProvider, providerId, providers, tokenModalProviderId]);
 
   const isDockerProviderModal = selectedProvider?.slug === "docker";
-  const canDeleteProviders = providers.length > 1;
   const modalPlaceholder = isDockerProviderModal ? "dev-docker-token" : "dop_v1_...";
   const modalHint = isDockerProviderModal
     ? "Local-only token used for Docker development emulation."
     : "Token is encrypted at rest and stored as a write-only reference.";
   const modalTokenValue = isDockerProviderModal ? dockerFauxToken : apiToken;
 
-  function providerStatusBadge(provider: ProviderRecord): { label: string; classes: string } {
+  function providerStatusBadge(provider: ProviderRecord, tokenConfigured: boolean): { label: string; classes: string } {
+    if (!tokenConfigured) {
+      return {
+        label: "Missing key",
+        classes: "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]",
+      };
+    }
+
     if (provider.status === "suspended") {
       return {
         label: "Suspended",
         classes: "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]",
       };
     }
+
     return {
-      label: "Connected",
+      label: "Active",
       classes: "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]",
     };
   }
@@ -118,18 +128,26 @@ export function SettingsView({
 
   const providerRows = useMemo(() => {
     return providers.map((provider) => {
+      const attachedNodeCount = nodes.filter((node) => node.provider_id === provider.id).length;
       const tokenConfigured = provider.slug === "docker"
         ? (dockerFauxTokenConfigured || !!provider.token_ref)
         : !!provider.token_ref;
+
+      const deleteDisabledReason = attachedNodeCount > 0
+        ? `Delete is blocked until ${attachedNodeCount} attached node${attachedNodeCount === 1 ? " is" : "s are"} destroyed.`
+        : null;
+
       return {
         provider,
+        attachedNodeCount,
         tokenConfigured,
+        deleteDisabledReason,
         tokenReference: provider.slug === "docker"
           ? (provider.token_ref ?? (dockerFauxTokenConfigured ? "dev-token-configured" : null))
           : provider.token_ref,
       };
     });
-  }, [providers, dockerFauxTokenConfigured]);
+  }, [providers, dockerFauxTokenConfigured, nodes]);
 
   return (
     <PageChrome>
@@ -154,12 +172,13 @@ export function SettingsView({
                       <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Provider</th>
                       <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">API Key</th>
                       <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Status</th>
+                      <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Attached Nodes</th>
                       <th className="px-4 py-3 text-right font-medium text-[var(--on-surface-variant)]">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {providerRows.map(({ provider, tokenConfigured, tokenReference }) => {
-                      const statusBadge = providerStatusBadge(provider);
+                    {providerRows.map(({ provider, attachedNodeCount, tokenConfigured, deleteDisabledReason, tokenReference }) => {
+                      const statusBadge = providerStatusBadge(provider, tokenConfigured);
                       return (
                         <tr key={provider.id} className="border-b border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.01)] last:border-b-0">
                           <td className="px-4 py-3">
@@ -173,8 +192,23 @@ export function SettingsView({
                           <td className="px-4 py-3">
                             <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${statusBadge.classes}`}>{statusBadge.label}</span>
                           </td>
+                          <td className="px-4 py-3 text-[var(--on-surface)]">
+                            <span className={`inline-flex min-w-9 items-center justify-center rounded-full border px-2.5 py-1 text-xs ${attachedNodeCount > 0 ? "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface-variant)]"}`}>{attachedNodeCount}</span>
+                            <div className="mt-1 text-xs text-[var(--on-surface-variant)]">{attachedNodeCount > 0 ? "Destroy nodes first" : "No dependencies"}</div>
+                          </td>
                           <td className="px-4 py-3 text-right">
                             <div className="inline-flex flex-wrap items-center justify-end gap-2">
+                              <Button
+                                tone="secondary"
+                                onClick={() => {
+                                  setTokenModalProviderId(provider.id);
+                                  onSelectProvider(provider.id);
+                                  setIsTokenModalOpen(true);
+                                }}
+                                disabled={busyAction !== null}
+                              >
+                                {tokenConfigured ? "Edit Key" : "Add Key"}
+                              </Button>
                               <Button
                                 tone="secondary"
                                 onClick={() => {
@@ -202,15 +236,16 @@ export function SettingsView({
                               <Button
                                 tone="danger"
                                 onClick={() => {
-                                  if (window.confirm(`Delete ${provider.name}? This removes its token reference and provider record from this device.`)) {
+                                  if (window.confirm(`Delete ${provider.name} key? This removes its local credential and resets provider access on this device.`)) {
                                     void onDeleteProvider(provider);
                                   }
                                 }}
-                                disabled={busyAction !== null || !canDeleteProviders}
+                                disabled={busyAction !== null || !!deleteDisabledReason}
                               >
                                 {busyAction === "delete-provider" ? "Deleting" : "Delete"}
                               </Button>
                             </div>
+                            <div className="mt-2 text-xs text-[var(--on-surface-variant)]">{deleteDisabledReason ?? "Delete removes the local credential but keeps this provider available."}</div>
                           </td>
                         </tr>
                       );
@@ -219,9 +254,7 @@ export function SettingsView({
                 </table>
               </div>
               <p className="mt-3 text-xs text-[var(--on-surface-variant)]">
-                {canDeleteProviders
-                  ? "Suspending blocks provider operations. Deleting removes provider metadata and any stored token reference."
-                  : "At least one provider record must remain configured on this device."}
+                Suspending blocks provider operations. Deleting removes the stored credential for that provider while keeping the integration row available.
               </p>
             </div>
           </div>

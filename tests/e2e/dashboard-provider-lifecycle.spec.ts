@@ -8,7 +8,7 @@ test.describe("Dashboard provider lifecycle", () => {
     await page.goto("/dashboard/settings");
 
     const digitalOceanRow = page.getByRole("row", { name: /DigitalOcean/i });
-    await expect(digitalOceanRow.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(digitalOceanRow.getByText("Active", { exact: true })).toBeVisible();
 
     page.once("dialog", async (dialog) => {
       await dialog.accept();
@@ -33,7 +33,7 @@ test.describe("Dashboard provider lifecycle", () => {
     await page.goto("/dashboard/settings");
     await digitalOceanRow.getByRole("button", { name: "Resume" }).click();
 
-    await expect(digitalOceanRow).toContainText("Connected");
+    await expect(digitalOceanRow).toContainText("Active");
     await expect(digitalOceanRow.getByRole("button", { name: "Suspend" })).toBeVisible();
 
     await page.goto("/dashboard/nodes/create");

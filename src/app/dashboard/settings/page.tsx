@@ -16,6 +16,7 @@ export default function DashboardSettingsPage() {
     deleteProvider,
     dockerDevEnabled,
     dockerFauxTokenConfigured,
+    nodes,
     providerId,
     providers,
     selectProviderId,
@@ -46,6 +47,7 @@ export default function DashboardSettingsPage() {
       configuredProvider={configuredProvider}
       providerId={providerId}
       providers={providers}
+      nodes={nodes}
       onSelectProvider={selectProviderId}
       apiToken={apiToken}
       setApiToken={setApiToken}

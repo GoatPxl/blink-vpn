@@ -6,7 +6,7 @@ use tauri::State;
 use tauri::{AppHandle, Manager};
 
 use crate::backend::Backend;
-use crate::backend::db::ProviderRecord;
+use crate::backend::db::{Database, ProviderRecord, ProviderStatus};
 use crate::backend::logging;
 use crate::backend::provider::ProviderPlanPricing;
 use crate::backend::orchestrator::{
@@ -14,7 +14,15 @@ use crate::backend::orchestrator::{
   ForceCleanupResult,
 };
 use crate::backend::db::{TunnelRecord, VpnNodeRecord};
+use crate::backend::secure_storage::SecureStorage;
 use crate::backend::wireguard::WireGuardReadiness;
+
+const BUILTIN_DIGITALOCEAN_PROVIDER_ID: &str = "provider-1";
+const BUILTIN_DIGITALOCEAN_PROVIDER_NAME: &str = "DigitalOcean";
+const BUILTIN_DIGITALOCEAN_PROVIDER_SLUG: &str = "digitalocean";
+const BUILTIN_DOCKER_PROVIDER_ID: &str = "provider-docker";
+const BUILTIN_DOCKER_PROVIDER_NAME: &str = "Docker";
+const BUILTIN_DOCKER_PROVIDER_SLUG: &str = "docker";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthPanelData {
@@ -71,6 +79,85 @@ pub struct ProviderPricingResponse {
   pub provider_id: String,
   pub region: String,
   pub plans: Vec<ProviderPlanPricing>,
+}
+
+fn ensure_provider_present(
+  db: &Database,
+  provider_id: &str,
+  provider_name: &str,
+  provider_slug: &str,
+) -> Result<(), String> {
+  if db
+    .get_provider(provider_id)
+    .map_err(|err| err.to_string())?
+    .is_none()
+  {
+    db.create_provider(provider_id, provider_name, provider_slug, None)
+      .map_err(|err| err.to_string())?;
+  }
+
+  Ok(())
+}
+
+fn ensure_builtin_providers(db: &Database, docker_dev_enabled: bool) -> Result<(), String> {
+  ensure_provider_present(
+    db,
+    BUILTIN_DIGITALOCEAN_PROVIDER_ID,
+    BUILTIN_DIGITALOCEAN_PROVIDER_NAME,
+    BUILTIN_DIGITALOCEAN_PROVIDER_SLUG,
+  )?;
+
+  if docker_dev_enabled {
+    ensure_provider_present(
+      db,
+      BUILTIN_DOCKER_PROVIDER_ID,
+      BUILTIN_DOCKER_PROVIDER_NAME,
+      BUILTIN_DOCKER_PROVIDER_SLUG,
+    )?;
+  }
+
+  Ok(())
+}
+
+fn clear_provider_credential(
+  db: &Database,
+  secure_storage: &SecureStorage,
+  provider_id: &str,
+) -> Result<(), String> {
+  let provider = db
+    .get_provider(provider_id)
+    .map_err(|err| err.to_string())?
+    .ok_or_else(|| format!("Provider '{}' was not found.", provider_id))?;
+
+  let provider_nodes = db
+    .list_vpn_nodes()
+    .map_err(|err| err.to_string())?
+    .into_iter()
+    .filter(|node| node.provider_id == provider_id)
+    .count();
+
+  if provider_nodes > 0 {
+    return Err(format!(
+      "Cannot delete provider key while {} node{} are still attached. Destroy dependent nodes first.",
+      provider_nodes,
+      if provider_nodes == 1 { "" } else { "s" }
+    ));
+  }
+
+  if let Some(token_ref) = provider.token_ref.as_deref() {
+    secure_storage
+      .delete_provider_api_token(token_ref)
+      .map_err(|err| err.to_string())?;
+  }
+
+  db.update_provider_token_ref(provider_id, None)
+    .map_err(|err| err.to_string())?;
+
+  if provider.status == ProviderStatus::Suspended {
+    db.resume_provider(provider_id).map_err(|err| err.to_string())?;
+  }
+
+  Ok(())
 }
 
 #[tauri::command]
@@ -235,6 +322,7 @@ pub fn list_vpn_nodes(backend: State<'_, Backend>) -> Result<Vec<VpnNodeRecord>,
 
 #[tauri::command]
 pub fn list_providers(backend: State<'_, Backend>) -> Result<Vec<ProviderRecord>, String> {
+  ensure_builtin_providers(&backend.db, backend.feature_flags.docker_dev)?;
   backend.db.list_providers().map_err(|err| err.to_string())
 }
 
@@ -276,47 +364,7 @@ pub fn resume_provider(provider_id: String, backend: State<'_, Backend>) -> Resu
 
 #[tauri::command]
 pub fn delete_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), String> {
-  let existing_providers = backend
-    .db
-    .list_providers()
-    .map_err(|err| err.to_string())?;
-
-  if existing_providers.len() <= 1 {
-    return Err("At least one provider must remain configured on this device.".to_string());
-  }
-
-  let provider = backend
-    .db
-    .get_provider(&provider_id)
-    .map_err(|err| err.to_string())?
-    .ok_or_else(|| format!("Provider '{}' was not found.", provider_id))?;
-
-  let provider_nodes = backend
-    .db
-    .list_vpn_nodes()
-    .map_err(|err| err.to_string())?
-    .into_iter()
-    .filter(|node| node.provider_id == provider_id)
-    .count();
-
-  if provider_nodes > 0 {
-    return Err(
-      "Cannot delete provider while nodes are still attached. Destroy dependent nodes first."
-        .to_string(),
-    );
-  }
-
-  if let Some(token_ref) = provider.token_ref {
-    backend
-      .secure_storage
-      .delete_provider_api_token(&token_ref)
-      .map_err(|err| err.to_string())?;
-  }
-
-  backend
-    .db
-    .delete_provider(&provider_id)
-    .map_err(|err| err.to_string())
+  clear_provider_credential(&backend.db, &backend.secure_storage, &provider_id)
 }
 
 #[tauri::command]
@@ -513,6 +561,7 @@ pub fn connect_tunnel(
 
   #[tauri::command]
   pub fn get_diagnostics_bundle(backend: State<'_, Backend>) -> Result<DiagnosticsBundleResponse, String> {
+    ensure_builtin_providers(&backend.db, backend.feature_flags.docker_dev)?;
     let bundle = backend
       .orchestrator
       .build_diagnostics_bundle(&backend.db)
@@ -787,4 +836,105 @@ if (-not $service) {
   path.push(format!("goatstare-wireguard-install-{}.ps1", uuid::Uuid::new_v4()));
   fs::write(&path, script_content)?;
   Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{clear_provider_credential, ensure_builtin_providers};
+  use crate::backend::db::{Database, ProviderStatus};
+  use crate::backend::secure_storage::SecureStorage;
+  use std::fs;
+  use std::path::PathBuf;
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  fn test_db_path(name: &str) -> PathBuf {
+    let unique = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("system time should be after unix epoch")
+      .as_nanos();
+
+    std::env::temp_dir().join(format!("goatstare-system-{name}-{unique}.db"))
+  }
+
+  fn create_test_db(name: &str) -> (Database, PathBuf) {
+    let path = test_db_path(name);
+    let db = Database::new(path.clone());
+    db.run_migrations().expect("migrations should succeed");
+    (db, path)
+  }
+
+  #[test]
+  fn ensure_builtin_providers_recreates_missing_builtin_rows() {
+    let (db, path) = create_test_db("restore-builtins");
+
+    db.delete_provider("provider-docker")
+      .expect("seeded docker provider should delete cleanly");
+
+    ensure_builtin_providers(&db, true).expect("builtin providers should be restored");
+
+    let providers = db.list_providers().expect("provider listing should succeed");
+    assert!(providers.iter().any(|provider| provider.id == "provider-1"));
+    assert!(providers.iter().any(|provider| provider.id == "provider-docker"));
+
+    let _ = fs::remove_file(path);
+  }
+
+  #[test]
+  fn clear_provider_credential_keeps_provider_row_and_resets_state() {
+    let (db, path) = create_test_db("clear-provider-credential");
+    let secure_storage = SecureStorage::dev_mock();
+    let token_ref = secure_storage
+      .store_provider_api_token("provider-1", "dop_v1_secret")
+      .expect("token store should succeed");
+
+    db.update_provider("provider-1", "DigitalOcean", "digitalocean", Some(&token_ref))
+      .expect("provider should accept token ref update");
+    db.suspend_provider("provider-1")
+      .expect("provider suspend should succeed");
+
+    clear_provider_credential(&db, &secure_storage, "provider-1")
+      .expect("credential clear should succeed without attached nodes");
+
+    let provider = db
+      .get_provider("provider-1")
+      .expect("provider lookup should succeed")
+      .expect("provider row should still exist");
+
+    assert_eq!(provider.token_ref, None);
+    assert_eq!(provider.status, ProviderStatus::Active);
+    assert_eq!(
+      secure_storage
+        .get_provider_api_token(&token_ref)
+        .expect("secret lookup should succeed"),
+      None
+    );
+
+    let _ = fs::remove_file(path);
+  }
+
+  #[test]
+  fn clear_provider_credential_rejects_when_nodes_are_attached() {
+    let (db, path) = create_test_db("clear-provider-credential-attached-node");
+    let secure_storage = SecureStorage::dev_mock();
+    let token_ref = secure_storage
+      .store_provider_api_token("provider-1", "dop_v1_secret")
+      .expect("token store should succeed");
+
+    db.update_provider("provider-1", "DigitalOcean", "digitalocean", Some(&token_ref))
+      .expect("provider should accept token ref update");
+    db.create_vpn_node("node-1", "provider-1", "Primary", "nyc1")
+      .expect("node creation should succeed");
+
+    let error = clear_provider_credential(&db, &secure_storage, "provider-1")
+      .expect_err("credential clear should fail with attached nodes");
+
+    assert!(error.contains("Destroy dependent nodes first"));
+    let provider = db
+      .get_provider("provider-1")
+      .expect("provider lookup should succeed")
+      .expect("provider row should still exist");
+    assert_eq!(provider.token_ref.as_deref(), Some(token_ref.as_str()));
+
+    let _ = fs::remove_file(path);
+  }
 }

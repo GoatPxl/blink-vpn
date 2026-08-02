@@ -439,6 +439,179 @@ export async function installProviderLifecycleMock(page: Page): Promise<void> {
   });
 }
 
+export async function installSettingsLifecycleMock(
+  page: Page,
+  options?: {
+    attachNodeToDigitalOcean?: boolean;
+  },
+): Promise<void> {
+  await page.addInitScript((initOptions) => {
+    type TauriArgs = Record<string, unknown> | undefined;
+    type ProviderRecord = {
+      id: string;
+      name: string;
+      slug: string;
+      status: "active" | "suspended";
+      token_ref: string | null;
+      created_at: string;
+      updated_at: string;
+    };
+    type VpnNodeRecord = {
+      id: string;
+      provider_id: string;
+      name: string;
+      region: string;
+      plan_key: string | null;
+      size_slug: string | null;
+      price_monthly_usd: number | null;
+      price_hourly_usd: number | null;
+      price_source_timestamp: string | null;
+      lifecycle_status: string;
+      external_ref: string | null;
+      public_ipv4: string | null;
+      server_public_key: string | null;
+      error_reason: string | null;
+      created_at: string;
+      updated_at: string;
+    };
+
+    const providers: ProviderRecord[] = [
+      {
+        id: "provider-1",
+        name: "DigitalOcean",
+        slug: "digitalocean",
+        status: "active",
+        token_ref: "do-token:provider-1:seeded",
+        created_at: "2026-08-01T00:00:00Z",
+        updated_at: "2026-08-01T00:00:00Z",
+      },
+      {
+        id: "provider-docker",
+        name: "Docker",
+        slug: "docker",
+        status: "active",
+        token_ref: "do-token:provider-docker:seeded",
+        created_at: "2026-08-01T00:01:00Z",
+        updated_at: "2026-08-01T00:01:00Z",
+      },
+    ];
+
+    const nodes: VpnNodeRecord[] = initOptions?.attachNodeToDigitalOcean
+      ? [
+          {
+            id: "node-1",
+            provider_id: "provider-1",
+            name: "Primary Node",
+            region: "nyc1",
+            plan_key: "s-1vcpu-1gb",
+            size_slug: "s-1vcpu-1gb",
+            price_monthly_usd: 6,
+            price_hourly_usd: 0.00893,
+            price_source_timestamp: "2026-08-01T00:00:00Z",
+            lifecycle_status: "ready",
+            external_ref: "42",
+            public_ipv4: "203.0.113.10",
+            server_public_key: "server-key-1",
+            error_reason: null,
+            created_at: "2026-08-01T00:00:00Z",
+            updated_at: "2026-08-01T00:00:00Z",
+          },
+        ]
+      : [];
+
+    const internals = {
+      invoke: async (command: string, args?: TauriArgs) => {
+        if (command === "list_vpn_nodes") {
+          return nodes.map((node) => ({ ...node }));
+        }
+
+        if (command === "get_diagnostics_bundle") {
+          return {
+            generated_at: "2026-08-01T00:00:00Z",
+            providers: providers.map((provider) => ({ ...provider, token_ref: null })),
+            nodes: nodes.map((node) => ({ ...node })),
+            tunnels: [],
+            redacted_notes: ["token_ref removed from diagnostics bundle"],
+          };
+        }
+
+        if (command === "list_providers") {
+          return providers.map((provider) => ({ ...provider }));
+        }
+
+        if (command === "validate_provider_token") {
+          const provider = providers.find((item) => item.id === String(args?.providerId ?? ""));
+          if (!provider || !provider.token_ref) {
+            throw new Error(`Provider '${String(args?.providerId ?? "")}' has no token_ref. Provider must be initialized with a token before adapter operations.`);
+          }
+
+          return `Provider token valid for account ${provider.id} (active)`;
+        }
+
+        if (command === "suspend_provider") {
+          const provider = providers.find((item) => item.id === String(args?.providerId ?? ""));
+          if (!provider) {
+            throw new Error("Provider not found.");
+          }
+
+          provider.status = "suspended";
+          provider.updated_at = "2026-08-01T00:10:00Z";
+          return;
+        }
+
+        if (command === "resume_provider") {
+          const provider = providers.find((item) => item.id === String(args?.providerId ?? ""));
+          if (!provider) {
+            throw new Error("Provider not found.");
+          }
+
+          provider.status = "active";
+          provider.updated_at = "2026-08-01T00:11:00Z";
+          return;
+        }
+
+        if (command === "delete_provider") {
+          const provider = providers.find((item) => item.id === String(args?.providerId ?? ""));
+          if (!provider) {
+            throw new Error("Provider not found.");
+          }
+
+          const attachedNodes = nodes.filter((node) => node.provider_id === provider.id).length;
+          if (attachedNodes > 0) {
+            throw new Error(`Cannot delete provider key while ${attachedNodes} node${attachedNodes === 1 ? "" : "s"} are still attached. Destroy dependent nodes first.`);
+          }
+
+          provider.token_ref = null;
+          provider.status = "active";
+          provider.updated_at = "2026-08-01T00:12:00Z";
+          return;
+        }
+
+        if (command === "list_tunnels_for_node") {
+          return [];
+        }
+
+        if (command === "get_health_panel_data") {
+          return {
+            node_id: String(args?.nodeId ?? ""),
+            tunnel_id: null,
+            endpoint_ip: null,
+            handshake_age_seconds: null,
+            rx_bytes: null,
+            tx_bytes: null,
+            external_ipv4: null,
+            tunnel_status: null,
+          };
+        }
+
+        throw new Error(`Unhandled mocked command: ${command}`);
+      },
+    };
+
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = internals;
+  }, options);
+}
+
 export function buildProvider(
   overrides: Partial<Provider> & Pick<Provider, "id" | "name" | "slug">,
 ): Provider {
@@ -1003,7 +1176,24 @@ export async function installDockerTunnelLifecycleMock(page: Page): Promise<void
       },
     ];
 
-    const node = {
+    const node: {
+      id: string;
+      provider_id: string;
+      name: string;
+      region: string;
+      plan_key: string;
+      size_slug: string;
+      price_monthly_usd: number;
+      price_hourly_usd: number;
+      price_source_timestamp: string;
+      lifecycle_status: string;
+      external_ref: string;
+      public_ipv4: string;
+      server_public_key: string;
+      error_reason: string | null;
+      created_at: string;
+      updated_at: string;
+    } = {
       id: "node-docker-tunnel-1",
       provider_id: "provider-docker",
       name: "Docker Tunnel Node",
@@ -1022,7 +1212,21 @@ export async function installDockerTunnelLifecycleMock(page: Page): Promise<void
       updated_at: "2026-08-01T00:00:00Z",
     };
 
-    const tunnel = {
+    const tunnel: {
+      id: string;
+      node_id: string;
+      name: string;
+      status: string;
+      interface_name: string;
+      assigned_ipv4: string;
+      last_handshake_age_seconds: number | null;
+      rx_bytes: number | null;
+      tx_bytes: number | null;
+      stats_updated_at: string;
+      last_error: string | null;
+      created_at: string;
+      updated_at: string;
+    } = {
       id: "tunnel-docker-1",
       node_id: "node-docker-tunnel-1",
       name: "wg-docker-primary",

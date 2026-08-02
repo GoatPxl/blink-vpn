@@ -631,9 +631,17 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     setBusyAction("delete-provider");
     try {
       await deleteProviderCommand(provider.id);
-      setProviders((current) => current.filter((item) => item.id !== provider.id));
+      if (provider.slug === "docker" && typeof window !== "undefined") {
+        window.localStorage.removeItem(DOCKER_FAUX_TOKEN_STORAGE_KEY);
+        setDockerFauxTokenConfigured(false);
+        setDockerFauxTokenConfiguredAt(null);
+        setDockerReadiness(null);
+        setDockerReadinessState("missing");
+        setDockerReadinessMessage("Save the Docker faux token first to emulate provider access validation.");
+      }
+
       setRecovery(null);
-      pushToast("warning", "Provider deleted", `${provider.name} has been removed.`);
+      pushToast("warning", "Provider key deleted", `${provider.name} credential was removed from this device.`);
       await loadDashboard();
     } catch (error) {
       handleError(error);
