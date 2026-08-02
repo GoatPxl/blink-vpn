@@ -1,23 +1,25 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { AppIcon, Button, Card, Field, PageChrome, type AppView, type ProviderAccessState, type ProviderRecord, type DashboardBusyAction } from "./shared";
-import { maskTokenReference, providerAccessBadge } from "./shared";
+import {
+  AppIcon,
+  Button,
+  Card,
+  Field,
+  PageChrome,
+  type AppView,
+  type ProviderRecord,
+  type DashboardBusyAction,
+} from "./shared";
+import { maskTokenReference } from "./shared";
 
 export function SettingsView({
-  providerAccessState,
   providerStatusMessage,
   providerFeedback,
   dockerDevEnabled,
-  dockerReadinessState,
-  dockerReadinessMessage,
-  dockerReadiness,
   dockerFauxToken,
   setDockerFauxToken,
   dockerFauxTokenConfigured,
-  dockerFauxTokenConfiguredAt,
-  providerHasStoredToken,
-  providerBadge,
   configuredProvider,
   providerId,
   providers,
@@ -29,24 +31,16 @@ export function SettingsView({
   onValidateToken,
   onValidateDockerReadiness,
   onSuspendProvider,
-  onResumeProvider,
   onDeleteProvider,
   busyAction,
   onNavigateToView,
 }: {
-  providerAccessState: ProviderAccessState;
   providerStatusMessage: string;
   providerFeedback: string;
   dockerDevEnabled: boolean;
-  dockerReadinessState: ProviderAccessState;
-  dockerReadinessMessage: string;
-  dockerReadiness: { cli_version: string | null; daemon_version: string | null; action_guidance: string } | null;
   dockerFauxToken: string;
   setDockerFauxToken: (value: string) => void;
   dockerFauxTokenConfigured: boolean;
-  dockerFauxTokenConfiguredAt: string | null;
-  providerHasStoredToken: boolean;
-  providerBadge: { label: string; classes: string };
   configuredProvider: ProviderRecord | null;
   providerId: string;
   providers: ProviderRecord[];
@@ -58,35 +52,28 @@ export function SettingsView({
   onValidateToken: () => Promise<void>;
   onValidateDockerReadiness: () => Promise<void>;
   onSuspendProvider: (provider: ProviderRecord) => Promise<void>;
-  onResumeProvider: (provider: ProviderRecord) => Promise<void>;
   onDeleteProvider: (provider: ProviderRecord) => Promise<void>;
   busyAction: DashboardBusyAction;
   onNavigateToView: (view: AppView) => void;
 }) {
-  const dockerBadge = providerAccessBadge(dockerReadinessState);
-  const [tokenModalProviderId, setTokenModalProviderId] = useState<string | null>(null);
+  const [tokenModalProviderId, setTokenModalProviderId] = useState<string>(providerId);
+  const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
 
-  const selectedProvider = useMemo(
-    () => providers.find((provider) => provider.id === providerId) ?? configuredProvider ?? providers[0] ?? null,
-    [configuredProvider, providerId, providers],
-  );
-  const tokenModalProvider = useMemo(
-    () => providers.find((provider) => provider.id === tokenModalProviderId) ?? selectedProvider,
-    [providers, selectedProvider, tokenModalProviderId],
-  );
+  const selectedProvider = useMemo(() => {
+    return providers.find((provider) => provider.id === tokenModalProviderId)
+      ?? providers.find((provider) => provider.id === providerId)
+      ?? configuredProvider
+      ?? providers[0]
+      ?? null;
+  }, [configuredProvider, providerId, providers, tokenModalProviderId]);
 
-  const isTokenModalOpen = tokenModalProviderId !== null;
-  const isDockerProviderModal = tokenModalProvider?.slug === "docker";
+  const isDockerProviderModal = selectedProvider?.slug === "docker";
   const canDeleteProviders = providers.length > 1;
   const modalPlaceholder = isDockerProviderModal ? "dev-docker-token" : "dop_v1_...";
   const modalHint = isDockerProviderModal
-    ? "Docker development token is local-only emulation state."
-    : "Personal access token is encrypted at rest and stored as a write-only reference.";
+    ? "Local-only token used for Docker development emulation."
+    : "Token is encrypted at rest and stored as a write-only reference.";
   const modalTokenValue = isDockerProviderModal ? dockerFauxToken : apiToken;
-
-  function providerIconName(provider: ProviderRecord): string {
-    return provider.slug === "docker" ? "server" : "cloud";
-  }
 
   function providerStatusBadge(provider: ProviderRecord): { label: string; classes: string } {
     if (provider.status === "suspended") {
@@ -101,13 +88,18 @@ export function SettingsView({
     };
   }
 
-  function openTokenModal(provider: ProviderRecord) {
-    onSelectProvider(provider.id);
-    setTokenModalProviderId(provider.id);
+  function openTokenModal() {
+    setTokenModalProviderId(providerId);
+    setIsTokenModalOpen(true);
   }
 
   function closeTokenModal() {
-    setTokenModalProviderId(null);
+    setIsTokenModalOpen(false);
+  }
+
+  function changeModalProvider(nextProviderId: string) {
+    setTokenModalProviderId(nextProviderId);
+    onSelectProvider(nextProviderId);
   }
 
   async function handleSaveFromModal() {
@@ -126,82 +118,57 @@ export function SettingsView({
     await onValidateToken();
   }
 
+  const providerRows = useMemo(() => {
+    return providers.map((provider) => {
+      const tokenConfigured = provider.slug === "docker" ? dockerFauxTokenConfigured : !!provider.token_ref;
+      return {
+        provider,
+        tokenConfigured,
+        tokenReference: provider.slug === "docker"
+          ? (dockerFauxTokenConfigured ? "dev-token-configured" : null)
+          : provider.token_ref,
+      };
+    });
+  }, [providers, dockerFauxTokenConfigured]);
+
   return (
     <PageChrome>
-      <div className="mx-auto w-full max-w-5xl space-y-4">
+      <div className="mx-auto w-full max-w-6xl space-y-5">
         <div className="text-xs text-[var(--on-surface-variant)]">
           <span className="inline-flex items-center gap-2"><AppIcon name="settings" className="h-4 w-4" />Settings</span>
           <span className="mx-2">›</span>
           <span>Provider Integration</span>
         </div>
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-          <div className="space-y-4">
-            <Card title="Select Provider" description="Choose a provider card to connect or update token access.">
-              <div className="grid gap-3 sm:grid-cols-2">
-                {providers.map((provider) => {
-                  const hasToken = provider.slug === "docker" ? dockerFauxTokenConfigured : !!provider.token_ref;
-                  const statusBadge = providerStatusBadge(provider);
-                  const isSelected = selectedProvider?.id === provider.id;
-                  return (
-                    <button
-                      key={provider.id}
-                      type="button"
-                      onClick={() => openTokenModal(provider)}
-                      className={`rounded-2xl border p-4 text-left transition-colors ${isSelected ? "border-[color:rgba(171,199,255,0.5)] bg-[color:rgba(171,199,255,0.09)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] hover:bg-[color:rgba(255,255,255,0.05)]"}`}
-                      aria-label={`Select ${provider.name} provider`}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="inline-flex items-center gap-2 text-[var(--on-surface)]">
-                          <AppIcon name={providerIconName(provider)} className="h-4 w-4" />
-                          <span className="font-medium">{provider.name}</span>
-                        </div>
-                        <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${statusBadge.classes}`}>{statusBadge.label}</span>
-                      </div>
-                      <div className="mt-2 font-mono text-[12px] text-[var(--on-surface-variant)]">{provider.slug}</div>
-                      <div className="mt-3 flex items-center gap-2 text-xs text-[var(--on-surface-variant)]">
-                        <span className={`inline-flex rounded-full border px-2 py-0.5 ${hasToken ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>{hasToken ? "Token configured" : "Token missing"}</span>
-                        <span>{isSelected ? "Selected" : "Click to connect"}</span>
-                      </div>
-                    </button>
-                  );
-                })}
+        <Card
+          title="Provider API Keys"
+          description="This page exists to collect API keys. Choose provider, paste key, save, then validate."
+          action={<Button onClick={openTokenModal} disabled={busyAction !== null || providers.length === 0}>Open Key Entry Modal</Button>}
+        >
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+            <div className="rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] p-4">
+              <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Current Provider Context</div>
+              <div className="mt-3 text-lg font-semibold text-[var(--on-surface)]">{selectedProvider?.name ?? "No provider"}</div>
+              <div className="mt-1 font-mono text-[12px] text-[var(--on-surface-variant)]">{selectedProvider?.slug ?? "n/a"}</div>
+              <div className="mt-4 text-sm text-[var(--on-surface-variant)]">{providerStatusMessage}</div>
+              <div className="mt-3 rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-3 py-2 text-xs text-[var(--on-surface-variant)]">
+                {providerFeedback}
               </div>
-            </Card>
+            </div>
 
-            <Card title="Provider Readiness" description="This status drives whether provisioning is available from the Nodes page.">
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Stored Token</div>
-                  <div className="mt-2 flex items-center gap-2">
-                    <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${providerHasStoredToken ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>{providerHasStoredToken ? "Configured" : "Missing"}</span>
-                    <span className="text-sm text-[var(--on-surface)]">{maskTokenReference(selectedProvider?.token_ref ?? null)}</span>
-                  </div>
-                  <p className="mt-2 text-sm text-[var(--on-surface-variant)]">Raw provider tokens remain write-only. This view only exposes the stored reference.</p>
-                </div>
-                <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Provider Access</div>
-                  <div className="mt-2 flex items-center gap-2">
-                    <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${providerBadge.classes}`}>{providerBadge.label}</span>
-                  </div>
-                  <p className="mt-2 text-sm text-[var(--on-surface-variant)]">{providerStatusMessage}</p>
-                </div>
-              </div>
-            </Card>
-
-            <Card title="Connected Providers" description="View status and manage each provider integration.">
+            <div className="rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
+              <div className="mb-3 text-sm font-medium text-[var(--on-surface)]">Installed API keys by provider</div>
               <div className="overflow-hidden rounded-xl border border-[color:var(--outline-variant)]">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]">
                       <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Provider</th>
-                      <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Token</th>
+                      <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">API Key</th>
                       <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Status</th>
-                      <th className="px-4 py-3 text-right font-medium text-[var(--on-surface-variant)]">Management</th>
+                      <th className="px-4 py-3 text-right font-medium text-[var(--on-surface-variant)]">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {providers.map((provider) => {
-                      const hasToken = provider.slug === "docker" ? dockerFauxTokenConfigured : !!provider.token_ref;
+                    {providerRows.map(({ provider, tokenConfigured, tokenReference }) => {
                       const statusBadge = providerStatusBadge(provider);
                       return (
                         <tr key={provider.id} className="border-b border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.01)] last:border-b-0">
@@ -210,30 +177,25 @@ export function SettingsView({
                             <div className="mt-1 font-mono text-[12px] text-[var(--on-surface-variant)]">{provider.slug}</div>
                           </td>
                           <td className="px-4 py-3">
-                            <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${hasToken ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>{hasToken ? "Configured" : "Missing"}</span>
-                            <div className="mt-1 text-xs text-[var(--on-surface-variant)]">{maskTokenReference(provider.token_ref)}</div>
+                            <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${tokenConfigured ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>{tokenConfigured ? "Installed" : "Missing"}</span>
+                            <div className="mt-1 text-xs text-[var(--on-surface-variant)]">{maskTokenReference(tokenReference)}</div>
                           </td>
                           <td className="px-4 py-3">
                             <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${statusBadge.classes}`}>{statusBadge.label}</span>
                           </td>
                           <td className="px-4 py-3 text-right">
                             <div className="inline-flex flex-wrap items-center justify-end gap-2">
-                              <Button tone="secondary" onClick={() => openTokenModal(provider)} disabled={busyAction !== null}>Change Token</Button>
-                              {provider.status === "suspended" ? (
-                                <Button tone="secondary" onClick={() => void onResumeProvider(provider)} disabled={busyAction !== null}>Resume</Button>
-                              ) : (
-                                <Button
-                                  tone="secondary"
-                                  onClick={() => {
-                                    if (window.confirm(`Suspend ${provider.name}? Provisioning operations for this provider will be blocked until resumed.`)) {
-                                      void onSuspendProvider(provider);
-                                    }
-                                  }}
-                                  disabled={busyAction !== null}
-                                >
-                                  Suspend
-                                </Button>
-                              )}
+                              <Button
+                                tone="secondary"
+                                onClick={() => {
+                                  if (window.confirm(`Suspend ${provider.name}? Provisioning operations for this provider will be blocked until resumed.`)) {
+                                    void onSuspendProvider(provider);
+                                  }
+                                }}
+                                disabled={busyAction !== null || provider.status === "suspended"}
+                              >
+                                {provider.status === "suspended" ? "Suspended" : "Suspend"}
+                              </Button>
                               <Button
                                 tone="danger"
                                 onClick={() => {
@@ -258,103 +220,44 @@ export function SettingsView({
                   ? "Suspending blocks provider operations. Deleting removes provider metadata and any stored token reference."
                   : "At least one provider record must remain configured on this device."}
               </p>
-            </Card>
-
-            {dockerDevEnabled ? (
-              <Card title="Docker Service (Development)" description="Development-only mirror checks and faux access validation.">
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-                    <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Faux Token</div>
-                    <div className="mt-2 flex items-center gap-2">
-                      <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${dockerFauxTokenConfigured ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>{dockerFauxTokenConfigured ? "Configured" : "Missing"}</span>
-                    </div>
-                    <p className="mt-2 text-sm text-[var(--on-surface-variant)]">{dockerFauxTokenConfiguredAt ? `Saved at ${new Date(dockerFauxTokenConfiguredAt).toLocaleString()}` : "No faux token saved yet."}</p>
-                  </div>
-                  <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-                    <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Docker Readiness</div>
-                    <div className="mt-2 flex items-center gap-2">
-                      <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${dockerBadge.classes}`}>{dockerBadge.label}</span>
-                    </div>
-                    <p className="mt-2 text-sm text-[var(--on-surface-variant)]">{dockerReadinessMessage}</p>
-                    <p className="mt-2 text-xs text-[var(--on-surface-variant)]">CLI: {dockerReadiness?.cli_version ?? "n/a"} · Daemon: {dockerReadiness?.daemon_version ?? "n/a"}</p>
-                    <p className="mt-2 text-xs text-[var(--on-surface-variant)]">{dockerReadiness?.action_guidance ?? "Save faux token and validate readiness to emulate provider access."}</p>
-                  </div>
-                </div>
-              </Card>
-            ) : null}
+            </div>
           </div>
+          <div className="flex items-center justify-end">
+            <Button tone="secondary" onClick={() => onNavigateToView("dashboard")}>Back to Dashboard</Button>
+          </div>
+        </Card>
 
-          <Card title="Selected Provider" description="Current provider context used by token validation and provisioning checks.">
-            <div className="space-y-4">
-              <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-                <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Selected Provider</div>
-                <div className="mt-2 flex items-center gap-2 text-[var(--on-surface)]">
-                  <AppIcon name={selectedProvider ? providerIconName(selectedProvider) : "cloud"} className="h-4 w-4" />
-                  <span className="font-medium">{selectedProvider?.name ?? "Not selected"}</span>
-                </div>
-                <div className="mt-2 font-mono text-[12px] text-[var(--on-surface-variant)]">{selectedProvider?.id ?? "n/a"}</div>
-                <div className="mt-3">
-                  <Button tone="secondary" onClick={() => selectedProvider ? openTokenModal(selectedProvider) : undefined} disabled={!selectedProvider || busyAction !== null}>
-                    Open Token Prompt
-                  </Button>
-                </div>
-              </div>
-              <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-xs text-[var(--on-surface-variant)]">
-                {providerFeedback}
-              </div>
-            </div>
-          </Card>
-
-          <Card title="Provider Action Feedback" description="Validation and readiness updates are surfaced here.">
-            <div className="space-y-5">
-              <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface)]">
-                {providerStatusMessage}
-              </div>
-              <div className="flex items-center justify-end">
-                <Button tone="secondary" onClick={() => onNavigateToView("dashboard")}>Back to Dashboard</Button>
-              </div>
-            </div>
-          </Card>
-
-          {dockerDevEnabled ? (
-            <Card title="Docker Faux Token" description="Development-only access emulation for Docker workflows.">
-              <div className="space-y-5">
-                <Field label="Faux Token">
-                  <div className="relative">
-                    <input value={dockerFauxToken} onChange={(event) => setDockerFauxToken(event.target.value)} placeholder="dev-docker-token" className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 pr-10 text-[var(--on-surface)] outline-none ring-0 placeholder:text-[var(--on-surface-variant)]/50 focus:border-[color:rgba(171,199,255,0.45)]" />
-                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[var(--on-surface-variant)]"><AppIcon name="lock" className="h-4 w-4" /></span>
-                  </div>
-                </Field>
-                <div className="text-xs text-[var(--on-surface-variant)]">This token is local-only emulation state and does not authenticate to remote infrastructure.</div>
-                <div className="flex items-center justify-end gap-2">
-                  <Button tone="secondary" onClick={() => void onSaveDockerFauxToken()} disabled={busyAction !== null || !dockerFauxToken.trim()}>
-                    {busyAction === "save-docker-token" ? "Saving" : "Save Faux Token"}
-                  </Button>
-                  <Button onClick={() => void onValidateDockerReadiness()} disabled={busyAction !== null || !dockerFauxTokenConfigured}>
-                    {busyAction === "validate-docker" ? "Validating" : "Validate Docker"} <span aria-hidden="true">→</span>
-                  </Button>
-                </div>
-              </div>
-            </Card>
-          ) : null}
-        </div>
         <div className="text-center text-xs text-[var(--on-surface-variant)]">Tokens are encrypted at rest, used only for provider API calls from this device, and never transmitted to GoatStare services.</div>
       </div>
 
-      {isTokenModalOpen && tokenModalProvider ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
-          <div className="w-full max-w-2xl rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(10,12,18,0.96)] p-6 shadow-2xl">
+      {isTokenModalOpen && selectedProvider ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px]">
+          <div className="w-full max-w-4xl rounded-3xl border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(22,25,34,0.98),rgba(11,14,22,0.98))] p-7 shadow-2xl">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-xs uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Connect Provider</p>
-                <h2 className="mt-2 text-xl font-semibold text-[var(--on-surface)]">{tokenModalProvider.name}</h2>
-                <p className="mt-1 text-sm text-[var(--on-surface-variant)]">Paste or update credentials for {tokenModalProvider.slug}.</p>
+                <p className="text-xs uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">API Key Entry</p>
+                <h2 className="mt-2 text-3xl font-semibold tracking-tight text-[var(--on-surface)]">Provider Credential</h2>
+                <p className="mt-2 text-sm text-[var(--on-surface-variant)]">Pick a provider, paste key, save, and validate.</p>
               </div>
               <Button tone="secondary" onClick={closeTokenModal} disabled={busyAction !== null}>Close</Button>
             </div>
 
-            <div className="mt-6 space-y-5">
-              <Field label={isDockerProviderModal ? "Docker Faux Token" : "Provider API Token"} hint={modalHint}>
+            <div className="mt-7 space-y-6">
+              <Field label="Provider">
+                <select
+                  value={selectedProvider.id}
+                  onChange={(event) => changeModalProvider(event.target.value)}
+                  className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.95)] px-3 py-3 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]"
+                >
+                  {providers.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.name} ({provider.slug})
+                    </option>
+                  ))}
+                </select>
+              </Field>
+
+              <Field label={isDockerProviderModal ? "Docker Key" : "API Key"} hint={modalHint}>
                 <textarea
                   value={modalTokenValue}
                   onChange={(event) => {
@@ -365,8 +268,8 @@ export function SettingsView({
                     }
                   }}
                   placeholder={modalPlaceholder}
-                  rows={5}
-                  className="w-full resize-y rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-3 text-[var(--on-surface)] outline-none ring-0 placeholder:text-[var(--on-surface-variant)]/50 focus:border-[color:rgba(171,199,255,0.45)]"
+                  rows={8}
+                  className="w-full resize-y rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.95)] px-4 py-4 font-mono text-base text-[var(--on-surface)] outline-none ring-0 placeholder:text-[var(--on-surface-variant)]/50 focus:border-[color:rgba(171,199,255,0.55)]"
                 />
               </Field>
 
@@ -385,11 +288,17 @@ export function SettingsView({
                 </Button>
                 <Button
                   onClick={() => void handleValidateFromModal()}
-                  disabled={busyAction !== null || (isDockerProviderModal ? !dockerFauxTokenConfigured : !(tokenModalProvider.token_ref || modalTokenValue.trim()))}
+                  disabled={busyAction !== null || (isDockerProviderModal ? !dockerFauxTokenConfigured : !(selectedProvider.token_ref || modalTokenValue.trim()))}
                 >
-                  {busyAction === "validate-token" || busyAction === "validate-docker" ? "Validating" : "Validate Token"} <span aria-hidden="true">→</span>
+                  {busyAction === "validate-token" || busyAction === "validate-docker" ? "Validating" : "Validate Key"} <span aria-hidden="true">→</span>
                 </Button>
               </div>
+
+              {dockerDevEnabled && isDockerProviderModal ? (
+                <p className="text-xs text-[var(--on-surface-variant)]">
+                  Docker provider uses a local development key path and can be validated with the same modal flow.
+                </p>
+              ) : null}
             </div>
           </div>
         </div>
