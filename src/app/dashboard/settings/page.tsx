@@ -22,6 +22,7 @@ export default function DashboardSettingsPage() {
     saveDockerFauxToken,
     saveToken,
     suspendProvider,
+    resumeProvider,
     validateDockerReadiness,
     validateToken,
   } = useDashboard();
@@ -53,6 +54,7 @@ export default function DashboardSettingsPage() {
       onValidateToken={validateToken}
       onValidateDockerReadiness={validateDockerReadiness}
       onSuspendProvider={suspendProvider}
+      onResumeProvider={resumeProvider}
       onDeleteProvider={deleteProvider}
       busyAction={busyAction}
       onNavigateToView={(view) => router.push(VIEW_ROUTE[view])}

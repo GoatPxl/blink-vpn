@@ -134,29 +134,25 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       : "Docker development mode is disabled.",
   );
   const [dockerReadiness, setDockerReadiness] = useState<DockerReadiness | null>(null);
-  const [dockerFauxTokenConfigured, setDockerFauxTokenConfigured] = useState(false);
-  const [dockerFauxTokenConfiguredAt, setDockerFauxTokenConfiguredAt] = useState<string | null>(
-    null,
-  );
+  const [dockerFauxTokenConfigured, setDockerFauxTokenConfigured] = useState(() => {
+    if (!dockerDevEnabled || typeof window === "undefined") {
+      return false;
+    }
+
+    return !!window.localStorage.getItem(DOCKER_FAUX_TOKEN_STORAGE_KEY);
+  });
+  const [dockerFauxTokenConfiguredAt, setDockerFauxTokenConfiguredAt] = useState<string | null>(() => {
+    if (!dockerDevEnabled || typeof window === "undefined") {
+      return null;
+    }
+
+    return window.localStorage.getItem(DOCKER_FAUX_TOKEN_STORAGE_KEY);
+  });
   const providerIdRef = useRef(providerId);
   const selectedNodeIdRef = useRef(selectedNodeId);
   const selectedTunnelIdRef = useRef(selectedTunnelId);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
-
-  useEffect(() => {
-    if (!dockerDevEnabled) {
-      return;
-    }
-
-    const persisted = window.localStorage.getItem(DOCKER_FAUX_TOKEN_STORAGE_KEY);
-    if (!persisted) {
-      return;
-    }
-
-    setDockerFauxTokenConfigured(true);
-    setDockerFauxTokenConfiguredAt(persisted);
-  }, [dockerDevEnabled]);
 
   useEffect(() => {
     providerIdRef.current = providerId;
@@ -189,6 +185,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     if (!provider?.token_ref) {
       setProviderAccessState("missing");
       setProviderStatusMessage(`No ${providerLabel} token is stored yet. Save and validate a token in Settings to provision nodes.`);
+      return;
+    }
+
+    if (provider.status === "suspended") {
+      setProviderAccessState("invalid");
+      setProviderStatusMessage(`Provider ${providerLabel} is suspended. Resume it in Settings before running this operation.`);
       return;
     }
 

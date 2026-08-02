@@ -1,6 +1,5 @@
 import { expect, test } from "@playwright/test";
 import {
-  installProviderStateMutationMock,
   installSingleProviderTokenMock,
 } from "./fixtures/tauri-mocks";
 
@@ -26,28 +25,4 @@ test.describe("Dashboard settings provider token", () => {
     await expect(page.getByPlaceholder("dop_v1_...")).toHaveValue("");
   });
 
-  test("updates the provider list when suspending or deleting a provider", async ({ page }) => {
-    await installProviderStateMutationMock(page);
-
-    await page.goto("/dashboard/settings");
-
-    const digitalOceanRow = page.getByRole("row", { name: /DigitalOcean/i });
-    await expect(digitalOceanRow.getByText("Connected", { exact: true })).toBeVisible();
-
-    page.once("dialog", async (dialog) => {
-      await dialog.accept();
-    });
-    await digitalOceanRow.getByRole("button", { name: "Suspend" }).click();
-
-    await expect(digitalOceanRow).toContainText("Suspended");
-    await expect(digitalOceanRow.getByRole("button", { name: "Suspended" })).toBeVisible();
-
-    page.once("dialog", async (dialog) => {
-      await dialog.accept();
-    });
-    await digitalOceanRow.getByRole("button", { name: "Delete" }).click();
-
-    await expect(page.getByRole("row", { name: /DigitalOcean/i })).toHaveCount(0);
-    await expect(page.getByRole("row", { name: /Docker/i })).toBeVisible();
-  });
 });

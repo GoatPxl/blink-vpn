@@ -159,6 +159,17 @@ export async function installProviderStateMutationMock(page: Page): Promise<void
           return;
         }
 
+        if (command === "resume_provider") {
+          const provider = providers.find((item) => item.id === String(args?.providerId ?? ""));
+          if (!provider) {
+            throw new Error("Provider not found.");
+          }
+
+          provider.status = "active";
+          provider.updated_at = "2026-08-01T00:11:00Z";
+          return;
+        }
+
         if (command === "delete_provider") {
           const index = providers.findIndex((item) => item.id === String(args?.providerId ?? ""));
           if (index === -1) {
@@ -167,6 +178,257 @@ export async function installProviderStateMutationMock(page: Page): Promise<void
 
           providers.splice(index, 1);
           return;
+        }
+
+        throw new Error(`Unhandled mocked command: ${command}`);
+      },
+    };
+
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = internals;
+  });
+}
+
+export async function installProviderLifecycleMock(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    type TauriArgs = Record<string, unknown> | undefined;
+    type ProviderRecord = {
+      id: string;
+      name: string;
+      slug: string;
+      status: "active" | "suspended";
+      token_ref: string | null;
+      created_at: string;
+      updated_at: string;
+    };
+    type VpnNodeRecord = {
+      id: string;
+      provider_id: string;
+      name: string;
+      region: string;
+      plan_key: string | null;
+      size_slug: string | null;
+      price_monthly_usd: number | null;
+      price_hourly_usd: number | null;
+      price_source_timestamp: string | null;
+      lifecycle_status: string;
+      external_ref: string | null;
+      public_ipv4: string | null;
+      server_public_key: string | null;
+      error_reason: string | null;
+      created_at: string;
+      updated_at: string;
+    };
+
+    const providerLifecycleStorageKey = "goatstare.e2e.providerLifecycleState";
+
+    function loadProviders(): ProviderRecord[] {
+      const persisted = window.localStorage.getItem(providerLifecycleStorageKey);
+      if (!persisted) {
+        return [
+          {
+            id: "provider-1",
+            name: "DigitalOcean",
+            slug: "digitalocean",
+            status: "active",
+            token_ref: "do-token:provider-1:REDACTED_LEAKED_DO_TOKEN",
+            created_at: "2026-08-01T00:00:00Z",
+            updated_at: "2026-08-01T00:00:00Z",
+          },
+          {
+            id: "provider-2",
+            name: "Docker",
+            slug: "docker",
+            status: "active",
+            token_ref: "dev-token:provider-2:local",
+            created_at: "2026-08-01T00:01:00Z",
+            updated_at: "2026-08-01T00:01:00Z",
+          },
+        ];
+      }
+
+      try {
+        const parsed = JSON.parse(persisted) as ProviderRecord[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      } catch {
+        // Fall through to the seeded defaults.
+      }
+
+      return [
+        {
+          id: "provider-1",
+          name: "DigitalOcean",
+          slug: "digitalocean",
+          status: "active",
+          token_ref: "do-token:provider-1:REDACTED_LEAKED_DO_TOKEN",
+          created_at: "2026-08-01T00:00:00Z",
+          updated_at: "2026-08-01T00:00:00Z",
+        },
+        {
+          id: "provider-2",
+          name: "Docker",
+          slug: "docker",
+          status: "active",
+          token_ref: "dev-token:provider-2:local",
+          created_at: "2026-08-01T00:01:00Z",
+          updated_at: "2026-08-01T00:01:00Z",
+        },
+      ];
+    }
+
+    function persistProviders(providers: ProviderRecord[]): void {
+      window.localStorage.setItem(providerLifecycleStorageKey, JSON.stringify(providers));
+    }
+
+    const providers = loadProviders();
+
+    const nodes: VpnNodeRecord[] = [
+      {
+        id: "node-1",
+        provider_id: "provider-1",
+        name: "Primary Node",
+        region: "nyc1",
+        plan_key: "s-1vcpu-1gb",
+        size_slug: "s-1vcpu-1gb",
+        price_monthly_usd: 6,
+        price_hourly_usd: 0.00893,
+        price_source_timestamp: "2026-08-01T00:00:00Z",
+        lifecycle_status: "ready",
+        external_ref: "42",
+        public_ipv4: "203.0.113.10",
+        server_public_key: "server-key-1",
+        error_reason: null,
+        created_at: "2026-08-01T00:00:00Z",
+        updated_at: "2026-08-01T00:00:00Z",
+      },
+    ];
+
+    const tunnels = [
+      {
+        id: "tunnel-1",
+        node_id: "node-1",
+        name: "wg-primary",
+        status: "connected",
+        interface_name: "wg-primary",
+        assigned_ipv4: "10.44.0.2",
+        last_handshake_age_seconds: 12,
+        rx_bytes: 1024,
+        tx_bytes: 2048,
+        stats_updated_at: "2026-08-01T00:00:00Z",
+        last_error: null,
+        created_at: "2026-08-01T00:00:00Z",
+        updated_at: "2026-08-01T00:00:00Z",
+      },
+    ];
+
+    const pricingByRegion = {
+      nyc1: [
+        {
+          plan_key: "s-1vcpu-1gb",
+          plan_label: "Basic",
+          size_slug: "s-1vcpu-1gb",
+          region: "nyc1",
+          memory_mb: 1024,
+          vcpus: 1,
+          disk_gb: 25,
+          transfer_tb: 1,
+          transfer_note: "Includes up to 1.00 TB transfer before provider overage policies apply.",
+          monthly_usd: 6,
+          hourly_usd: 0.00893,
+          estimated: false,
+          source_timestamp: "2026-08-01T00:00:00Z",
+        },
+      ],
+    } as Record<string, unknown>;
+
+    const internals = {
+      invoke: async (command: string, args?: TauriArgs) => {
+        if (command === "list_vpn_nodes") {
+          return nodes;
+        }
+
+        if (command === "get_diagnostics_bundle") {
+          return {
+            generated_at: "2026-08-01T00:00:00Z",
+            providers: providers.map((provider) => ({ ...provider })),
+            nodes,
+            tunnels,
+            redacted_notes: [],
+          };
+        }
+
+        if (command === "list_providers") {
+          return providers.map((provider) => ({ ...provider }));
+        }
+
+        if (command === "list_provider_regions") {
+          return ["nyc1"];
+        }
+
+        if (command === "list_provider_pricing") {
+          const region = String(args?.region ?? "nyc1");
+          return {
+            provider_id: String(args?.providerId ?? "provider-1"),
+            region,
+            plans: (pricingByRegion[region] as Array<Record<string, unknown>> | undefined) ?? [],
+          };
+        }
+
+        if (command === "validate_provider_token") {
+          return "Provider token valid for account acct-1 (active)";
+        }
+
+        if (command === "suspend_provider") {
+          const provider = providers.find((item) => item.id === String(args?.providerId ?? ""));
+          if (!provider) {
+            throw new Error("Provider not found.");
+          }
+
+          provider.status = "suspended";
+          provider.updated_at = "2026-08-01T00:10:00Z";
+          persistProviders(providers);
+          return;
+        }
+
+        if (command === "resume_provider") {
+          const provider = providers.find((item) => item.id === String(args?.providerId ?? ""));
+          if (!provider) {
+            throw new Error("Provider not found.");
+          }
+
+          provider.status = "active";
+          provider.updated_at = "2026-08-01T00:11:00Z";
+          persistProviders(providers);
+          return;
+        }
+
+        if (command === "delete_provider") {
+          const index = providers.findIndex((item) => item.id === String(args?.providerId ?? ""));
+          if (index === -1) {
+            throw new Error("Provider not found.");
+          }
+
+          providers.splice(index, 1);
+          persistProviders(providers);
+          return;
+        }
+
+        if (command === "list_tunnels_for_node") {
+          return tunnels.filter((tunnel) => tunnel.node_id === String(args?.nodeId ?? ""));
+        }
+
+        if (command === "get_health_panel_data") {
+          return {
+            node_id: String(args?.nodeId ?? "node-1"),
+            tunnel_id: "tunnel-1",
+            endpoint_ip: "203.0.113.10",
+            handshake_age_seconds: 12,
+            rx_bytes: 1024,
+            tx_bytes: 2048,
+            external_ipv4: "203.0.113.10",
+            tunnel_status: "connected",
+          };
         }
 
         throw new Error(`Unhandled mocked command: ${command}`);

@@ -29,6 +29,7 @@ export function SettingsView({
   onValidateToken,
   onValidateDockerReadiness,
   onSuspendProvider,
+  onResumeProvider,
   onDeleteProvider,
   busyAction,
   onNavigateToView,
@@ -48,6 +49,7 @@ export function SettingsView({
   onValidateToken: () => Promise<void>;
   onValidateDockerReadiness: () => Promise<void>;
   onSuspendProvider: (provider: ProviderRecord) => Promise<void>;
+  onResumeProvider: (provider: ProviderRecord) => Promise<void>;
   onDeleteProvider: (provider: ProviderRecord) => Promise<void>;
   busyAction: DashboardBusyAction;
   onNavigateToView: (view: AppView) => void;
@@ -176,17 +178,26 @@ export function SettingsView({
                               <Button
                                 tone="secondary"
                                 onClick={() => {
+                                  if (provider.status === "suspended") {
+                                    if (window.confirm(`Resume ${provider.name}? Provisioning operations for this provider will be allowed again.`)) {
+                                      void onResumeProvider(provider);
+                                    }
+                                    return;
+                                  }
+
                                   if (window.confirm(`Suspend ${provider.name}? Provisioning operations for this provider will be blocked until resumed.`)) {
                                     void onSuspendProvider(provider);
                                   }
                                 }}
-                                disabled={busyAction !== null || provider.status === "suspended"}
+                                disabled={busyAction !== null}
                               >
                                 {busyAction === "suspend-provider"
                                   ? "Suspending"
-                                  : provider.status === "suspended"
-                                    ? "Suspended"
-                                    : "Suspend"}
+                                  : busyAction === "resume-provider"
+                                    ? "Resuming"
+                                    : provider.status === "suspended"
+                                      ? "Resume"
+                                      : "Suspend"}
                               </Button>
                               <Button
                                 tone="danger"
