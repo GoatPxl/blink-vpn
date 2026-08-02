@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  checkDockerReadiness,
   connectTunnel as connectTunnelCommand,
   createVpnNode,
   destroyVpnNode,
@@ -14,6 +15,7 @@ import {
   listVpnNodes,
   registerProviderToken,
   validateProviderToken,
+  type DockerReadiness,
   type ProviderRecord,
   type TunnelRecord,
   type VpnNodeRecord,
@@ -66,6 +68,12 @@ type DashboardContextValue = {
   providerAccessState: ProviderAccessState;
   providerStatusMessage: string;
   providerFeedback: string;
+  dockerDevEnabled: boolean;
+  dockerReadinessState: ProviderAccessState;
+  dockerReadinessMessage: string;
+  dockerReadiness: DockerReadiness | null;
+  dockerFauxTokenConfigured: boolean;
+  dockerFauxTokenConfiguredAt: string | null;
   configuredProvider: ProviderRecord | null;
   providerHasStoredToken: boolean;
   selectedNode: VpnNodeRecord | null;
@@ -77,6 +85,8 @@ type DashboardContextValue = {
   refreshHealth: () => Promise<void>;
   saveToken: (apiToken: string) => Promise<void>;
   validateToken: () => Promise<void>;
+  saveDockerFauxToken: (value: string) => Promise<void>;
+  validateDockerReadiness: (options?: { silent?: boolean }) => Promise<void>;
   createNode: (input: CreateNodeInput) => Promise<void>;
   connectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   disconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
@@ -88,7 +98,10 @@ type DashboardContextValue = {
 
 const DashboardContext = createContext<DashboardContextValue | null>(null);
 
+const DOCKER_FAUX_TOKEN_STORAGE_KEY = "goatstare.docker.fauxTokenConfiguredAt";
+
 export function DashboardProvider({ children }: { children: ReactNode }) {
+  const dockerDevEnabled = process.env.NEXT_PUBLIC_DEV_DOCKER === "1";
   const [busyAction, setBusyAction] = useState<DashboardBusyAction>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
@@ -105,10 +118,37 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [providerAccessState, setProviderAccessState] = useState<ProviderAccessState>("unknown");
   const [providerStatusMessage, setProviderStatusMessage] = useState("Provider status has not been checked yet.");
   const [providerFeedback, setProviderFeedback] = useState("No provider action yet.");
+  const [dockerReadinessState, setDockerReadinessState] = useState<ProviderAccessState>(
+    dockerDevEnabled ? "checking" : "unknown",
+  );
+  const [dockerReadinessMessage, setDockerReadinessMessage] = useState(
+    dockerDevEnabled
+      ? "Docker readiness has not been checked yet."
+      : "Docker development mode is disabled.",
+  );
+  const [dockerReadiness, setDockerReadiness] = useState<DockerReadiness | null>(null);
+  const [dockerFauxTokenConfigured, setDockerFauxTokenConfigured] = useState(false);
+  const [dockerFauxTokenConfiguredAt, setDockerFauxTokenConfiguredAt] = useState<string | null>(
+    null,
+  );
   const selectedNodeIdRef = useRef(selectedNodeId);
   const selectedTunnelIdRef = useRef(selectedTunnelId);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
+
+  useEffect(() => {
+    if (!dockerDevEnabled) {
+      return;
+    }
+
+    const persisted = window.localStorage.getItem(DOCKER_FAUX_TOKEN_STORAGE_KEY);
+    if (!persisted) {
+      return;
+    }
+
+    setDockerFauxTokenConfigured(true);
+    setDockerFauxTokenConfiguredAt(persisted);
+  }, [dockerDevEnabled]);
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
@@ -275,6 +315,77 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, providerId, pushToast]);
 
+  const saveDockerFauxToken = useCallback(async (value: string) => {
+    if (!dockerDevEnabled) {
+      return;
+    }
+
+    setBusyAction("save-docker-token");
+    try {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        throw new Error("Docker faux token cannot be empty in development mode.");
+      }
+
+      const configuredAt = new Date().toISOString();
+      window.localStorage.setItem(DOCKER_FAUX_TOKEN_STORAGE_KEY, configuredAt);
+      setDockerFauxTokenConfigured(true);
+      setDockerFauxTokenConfiguredAt(configuredAt);
+      setDockerReadinessState("checking");
+      setDockerReadinessMessage("Faux token stored for development emulation. Validate Docker readiness next.");
+      pushToast("success", "Docker faux token saved", "Development emulation token is configured locally.");
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [dockerDevEnabled, handleError, pushToast]);
+
+  const validateDockerReadiness = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+
+    if (!dockerDevEnabled) {
+      return;
+    }
+
+    setBusyAction("validate-docker");
+    setDockerReadinessState("checking");
+    try {
+      if (!dockerFauxTokenConfigured) {
+        setDockerReadinessState("missing");
+        setDockerReadinessMessage("Save the Docker faux token first to emulate provider access validation.");
+        if (!silent) {
+          pushToast("warning", "Docker faux token missing", "Save a development faux token before validating Docker readiness.");
+        }
+        return;
+      }
+
+      const readiness = await checkDockerReadiness();
+      setDockerReadiness(readiness);
+
+      if (readiness.installed && readiness.daemon_reachable) {
+        setDockerReadinessState("ready");
+      } else {
+        setDockerReadinessState("invalid");
+      }
+
+      setDockerReadinessMessage(readiness.message);
+      if (!silent) {
+        pushToast("info", "Docker readiness checked", readiness.message);
+      }
+    } catch (error) {
+      setDockerReadinessState("invalid");
+      if (silent) {
+        const message = error instanceof Error ? error.message : String(error);
+        setDockerReadinessMessage(message);
+      } else {
+        setDockerReadinessMessage(handleError(error));
+      }
+    } finally {
+      setBusyAction(null);
+    }
+  }, [dockerDevEnabled, dockerFauxTokenConfigured, handleError, pushToast]);
+
   const createNode = useCallback(async (input: CreateNodeInput) => {
     setBusyAction("create-node");
     try {
@@ -426,6 +537,18 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(timeoutId);
   }, [refreshHealth, selectedNodeId, selectedTunnelId]);
 
+  useEffect(() => {
+    if (!dockerDevEnabled) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void validateDockerReadiness({ silent: true });
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [dockerDevEnabled, validateDockerReadiness]);
+
   const configuredProvider = providers.find((provider) => provider.id === providerId) ?? providers[0] ?? null;
   const providerHasStoredToken = !!configuredProvider?.token_ref && providerAccessState !== "invalid";
   const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
@@ -452,6 +575,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     providerAccessState,
     providerStatusMessage,
     providerFeedback,
+    dockerDevEnabled,
+    dockerReadinessState,
+    dockerReadinessMessage,
+    dockerReadiness,
+    dockerFauxTokenConfigured,
+    dockerFauxTokenConfiguredAt,
     configuredProvider,
     providerHasStoredToken,
     selectedNode,
@@ -463,6 +592,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     refreshHealth,
     saveToken,
     validateToken,
+    saveDockerFauxToken,
+    validateDockerReadiness,
     createNode,
     connectTunnel,
     disconnectTunnel,

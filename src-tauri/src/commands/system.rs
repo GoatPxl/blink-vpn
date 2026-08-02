@@ -57,6 +57,16 @@ pub struct WireGuardInstallResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DockerReadinessResponse {
+  pub installed: bool,
+  pub daemon_reachable: bool,
+  pub cli_version: Option<String>,
+  pub daemon_version: Option<String>,
+  pub message: String,
+  pub action_guidance: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ProviderPricingResponse {
   pub provider_id: String,
   pub region: String,
@@ -464,6 +474,94 @@ pub fn check_wireguard_readiness(backend: State<'_, Backend>) -> WireGuardReadin
     version: readiness.version,
     message: readiness.message,
     action_guidance: readiness.action_guidance,
+  }
+}
+
+#[tauri::command]
+pub fn check_docker_readiness(
+  backend: State<'_, Backend>,
+) -> Result<DockerReadinessResponse, String> {
+  if !backend.feature_flags.docker_dev {
+    return Err(
+      "Docker development mode is disabled. Set GOATSTARE_DEV_DOCKER=1 and restart the app."
+        .to_string(),
+    );
+  }
+
+  let cli_result = Command::new("docker").args(["--version"]).output();
+  let (installed, cli_version, cli_error) = match cli_result {
+    Ok(output) if output.status.success() => {
+      let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+      (true, Some(version), None)
+    }
+    Ok(output) => {
+      let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+      (false, None, Some(stderr))
+    }
+    Err(error) => (false, None, Some(error.to_string())),
+  };
+
+  if !installed {
+    return Ok(DockerReadinessResponse {
+      installed: false,
+      daemon_reachable: false,
+      cli_version: None,
+      daemon_version: None,
+      message: "Docker CLI is not available on this machine.".to_string(),
+      action_guidance: format!(
+        "Install Docker Desktop for Windows, start Docker, and retry. {}",
+        cli_error.unwrap_or_default()
+      )
+      .trim()
+      .to_string(),
+    });
+  }
+
+  let daemon_result = Command::new("docker")
+    .args(["info", "--format", "{{.ServerVersion}}"])
+    .output();
+
+  match daemon_result {
+    Ok(output) if output.status.success() => {
+      let daemon_version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+      Ok(DockerReadinessResponse {
+        installed: true,
+        daemon_reachable: true,
+        cli_version,
+        daemon_version: Some(daemon_version),
+        message: "Docker CLI and daemon are available for development emulation.".to_string(),
+        action_guidance: "You can use Docker development mode workflows from Settings and Node planning surfaces.".to_string(),
+      })
+    }
+    Ok(output) => {
+      let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+      Ok(DockerReadinessResponse {
+        installed: true,
+        daemon_reachable: false,
+        cli_version,
+        daemon_version: None,
+        message: "Docker CLI is installed, but daemon is not reachable.".to_string(),
+        action_guidance: format!(
+          "Start Docker Desktop and retry readiness validation. {}",
+          stderr
+        )
+        .trim()
+        .to_string(),
+      })
+    }
+    Err(error) => Ok(DockerReadinessResponse {
+      installed: true,
+      daemon_reachable: false,
+      cli_version,
+      daemon_version: None,
+      message: "Docker CLI is installed, but daemon check failed.".to_string(),
+      action_guidance: format!(
+        "Start Docker Desktop and retry readiness validation. {}",
+        error
+      )
+      .trim()
+      .to_string(),
+    }),
   }
 }
 

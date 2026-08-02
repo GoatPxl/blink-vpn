@@ -101,6 +101,15 @@ export interface WireGuardInstallResult {
   next_action: string;
 }
 
+export interface DockerReadiness {
+  installed: boolean;
+  daemon_reachable: boolean;
+  cli_version: string | null;
+  daemon_version: string | null;
+  message: string;
+  action_guidance: string;
+}
+
 export interface ProviderPlanPricing {
   plan_key: string;
   plan_label: string;
@@ -142,6 +151,10 @@ export async function invokeHello(name: string): Promise<string> {
 
 export async function checkWireGuardReadiness(): Promise<WireGuardReadiness> {
   return invokeCommand<WireGuardReadiness>("check_wireguard_readiness");
+}
+
+export async function checkDockerReadiness(): Promise<DockerReadiness> {
+  return invokeCommand<DockerReadiness>("check_docker_readiness");
 }
 
 export async function openWireGuardInstallPage(): Promise<void> {

@@ -15,7 +15,9 @@ export type AppView = "dashboard" | "nodes" | "health" | "diagnostics" | "settin
 export type DashboardBusyAction =
   | "refresh"
   | "save-token"
+  | "save-docker-token"
   | "validate-token"
+  | "validate-docker"
   | "create-node"
   | "create-tunnel"
   | "connect-tunnel"
