@@ -217,6 +217,10 @@ export async function listVpnNodes(): Promise<VpnNodeRecord[]> {
   return invokeCommand<VpnNodeRecord[]>("list_vpn_nodes");
 }
 
+export async function listProviders(): Promise<ProviderRecord[]> {
+  return invokeCommand<ProviderRecord[]>("list_providers");
+}
+
 export async function listTunnelsForNode(nodeId: string): Promise<TunnelRecord[]> {
   return invokeCommand<TunnelRecord[]>("list_tunnels_for_node", { nodeId });
 }

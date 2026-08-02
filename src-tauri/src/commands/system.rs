@@ -6,6 +6,7 @@ use tauri::State;
 use tauri::{AppHandle, Manager};
 
 use crate::backend::Backend;
+use crate::backend::db::ProviderRecord;
 use crate::backend::logging;
 use crate::backend::provider::ProviderPlanPricing;
 use crate::backend::orchestrator::{
@@ -181,6 +182,11 @@ pub fn list_vpn_nodes(backend: State<'_, Backend>) -> Result<Vec<VpnNodeRecord>,
     .orchestrator
     .list_nodes(&backend.db)
     .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn list_providers(backend: State<'_, Backend>) -> Result<Vec<ProviderRecord>, String> {
+  backend.db.list_providers().map_err(|err| err.to_string())
 }
 
 #[tauri::command]

@@ -77,6 +77,7 @@ pub fn run() {
       commands::system::check_wireguard_readiness,
       commands::system::register_digitalocean_provider_token,
       commands::system::list_provider_pricing,
+      commands::system::list_providers,
       commands::system::list_vpn_nodes,
       commands::system::list_tunnels_for_node,
       commands::system::destroy_vpn_node,

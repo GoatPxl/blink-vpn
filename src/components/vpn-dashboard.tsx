@@ -12,10 +12,12 @@ import {
   forceCleanupVpnNode,
   getDiagnosticsBundle,
   getHealthPanelData,
+  listProviders,
   listTunnelsForNode,
   listVpnNodes,
   registerProviderToken,
   validateProviderToken,
+  type ProviderRecord,
   type TunnelRecord,
   type VpnNodeRecord,
 } from "@/lib/tauri";
@@ -227,6 +229,7 @@ export function VpnDashboard({ view }: { view: AppView }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [nodes, setNodes] = useState<VpnNodeRecord[]>([]);
+  const [providers, setProviders] = useState<ProviderRecord[]>([]);
   const [tunnels, setTunnels] = useState<TunnelRecord[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [selectedTunnelId, setSelectedTunnelId] = useState("");
@@ -265,10 +268,15 @@ export function VpnDashboard({ view }: { view: AppView }) {
   async function loadDashboard() {
     setBusyAction("refresh");
     try {
-      const [loadedNodes, loadedDiagnostics] = await Promise.all([listVpnNodes(), getDiagnosticsBundle()]);
+      const [loadedNodes, loadedDiagnostics, loadedProviders] = await Promise.all([
+        listVpnNodes(),
+        getDiagnosticsBundle(),
+        listProviders(),
+      ]);
       setNodes(loadedNodes);
       setDiagnostics(loadedDiagnostics);
-      const configuredProvider = loadedDiagnostics.providers[0] ?? null;
+      setProviders(loadedProviders);
+      const configuredProvider = loadedProviders[0] ?? null;
       if (configuredProvider) {
         setProviderId(configuredProvider.id);
         setProviderName(configuredProvider.name);
@@ -540,7 +548,7 @@ export function VpnDashboard({ view }: { view: AppView }) {
   const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
   const canConnect = !!connectedTunnel && connectedTunnel.status.toLowerCase() !== "connected";
   const noServerConfigured = nodes.length === 0;
-  const configuredProvider = diagnostics?.providers.find((provider) => provider.id === providerId) ?? diagnostics?.providers[0] ?? null;
+  const configuredProvider = providers.find((provider) => provider.id === providerId) ?? providers[0] ?? null;
 
   const diagnosticsLogs: LogEntry[] = diagnostics
     ? [
