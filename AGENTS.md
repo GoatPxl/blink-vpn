@@ -4,19 +4,20 @@ You are implementing **Phase 1 MVP only** of a desktop VPN manager.
 
 ### In Scope (allowed)
 - **Platform:** Windows desktop only
-- **Provider:** DigitalOcean only
+- **Provider baseline:** DigitalOcean first (default implementation path)
+- **Provider architecture:** Multi-provider framing allowed (interfaces, adapters, stubs, config models), with incremental provider implementation when explicitly requested
+- **Incremental provider rule:** additional providers may be implemented only in small, explicitly approved slices (no full cross-cloud parity target in Phase 1)
 - **VPN protocol:** WireGuard only
-- **Stack:** Rust backend + Tauri + Next.js frontend
+- **Stack:** Rust backend + Tauri + Next.js frontend + Docker (local dev/test orchestration)
 - Local secure secret storage on Windows
 - SQLite local metadata/state
 - Provision, connect, disconnect, destroy workflows
 
 ### Out of Scope (forbidden in this phase)
 - macOS, Linux, iOS, Android
-- AWS, GCP, Azure, or any provider besides DigitalOcean
 - OpenVPN, IKEv2, or any protocol besides WireGuard
 - Browser extension implementation
-- Multi-provider abstractions beyond what is minimally necessary
+- Full provider-parity requirements across multiple clouds in Phase 1
 - Multi-hop, mesh VPN, obfuscation, advanced routing features
 - Remote telemetry/analytics pipelines
 - Team/org multi-user features
@@ -96,7 +97,8 @@ If a requested change risks secret exposure, stop and propose a safer alternativ
 
 ## 5) Testing Requirements
 
-Every change must include tests appropriate to scope.
+Every behavior-changing code change must include tests appropriate to scope.
+Docs-only, copy-only, and process-instruction edits do not require new tests.
 
 ### Required test types
 - **Unit tests** for pure logic (state machine transitions, parsers, config generation).
@@ -141,7 +143,7 @@ When finished, report:
 
 ## 8) Output Format Requirements (Strict)
 
-For every response, use this structure:
+For substantial implementation responses, use this structure:
 
 1. `Plan`
 2. `Changes Made`
@@ -166,11 +168,13 @@ For every response, use this structure:
 ## 10) Definition of Done (for each task)
 
 A task is done only if:
-- Code compiles,
-- tests pass,
+- Code compiles (when code was changed),
+- tests pass (when tests were added/updated or behavior changed),
 - no scope violations,
 - no secret-handling violations,
 - clear verification steps are documented.
+
+For docs-only or instruction-only edits, completion requires accurate content updates and a quick manual verification check.
 
 If not fully complete, explicitly state what remains and why.
 
@@ -189,8 +193,8 @@ Do not expand scope without explicit approval.
 
 ## 12) Canonical Phase 1 Boundaries Reminder (repeat mentally before coding)
 
-Windows + DigitalOcean + WireGuard + Rust + Tauri + Next.js.  
-Nothing else.
+Windows + DigitalOcean-first baseline + multi-provider framing + WireGuard + Rust + Tauri + Next.js + Docker (local dev/test).  
+Expand to additional providers only when explicitly requested, in small scoped increments.
 
 ---
 
@@ -199,4 +203,5 @@ Nothing else.
 # This is NOT the Next.js you know
 
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
+This requirement applies when changing Next.js app/frontend code.
 <!-- END:nextjs-agent-rules -->
