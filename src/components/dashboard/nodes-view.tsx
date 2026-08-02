@@ -1,6 +1,6 @@
 "use client";
 
-import { AppIcon, Button, Card, Field, MetricCard, PageChrome, type AppView, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type RecoveryState, type TunnelRecord, type VpnNodeRecord, type NodeSort, type PlanDisplayModel } from "./shared";
+import { AppIcon, Button, Card, Field, MetricCard, PageChrome, type AppView, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type RecoveryState, type TunnelRecord, type VpnNodeRecord, type NodeSort, type PlanDisplayModel, type HealthPanelData } from "./shared";
 import { formatCreatedTime, formatCurrency, formatMemory, formatRegionLabel, getNodePricingDisplay, planDisplayFromPricing, providerAccessBadge, statusBadge, DEFAULT_PLAN_KEY, REGION_OPTIONS, FALLBACK_PLAN_CATALOG } from "./shared";
 
 export function NodesView({
@@ -72,7 +72,7 @@ export function NodesView({
   selectedNodeId: string;
   setSelectedNodeId: (value: string) => void;
   selectedNode: VpnNodeRecord | null;
-  health: any;
+  health: HealthPanelData | null;
   selectedNodePricing: PlanDisplayModel | null;
   selectedNodeActionMessage: string;
   selectedNodeTunnel: TunnelRecord | null;

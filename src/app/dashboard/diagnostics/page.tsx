@@ -1,5 +1,19 @@
-import { VpnDashboard } from "@/components/vpn-dashboard";
+"use client";
+
+import { DiagnosticsView } from "@/components/dashboard/diagnostics-view";
+import { useDashboard } from "@/components/dashboard/dashboard-provider";
 
 export default function DashboardDiagnosticsPage() {
-  return <VpnDashboard view="diagnostics" />;
+  const { busyAction, copyDiagnostics, diagnostics, diagnosticsExportPath, exportDiagnostics, recovery } = useDashboard();
+
+  return (
+    <DiagnosticsView
+      diagnostics={diagnostics}
+      diagnosticsExportPath={diagnosticsExportPath}
+      recovery={recovery}
+      busyAction={busyAction}
+      onCopyDiagnostics={copyDiagnostics}
+      onExportDiagnostics={exportDiagnostics}
+    />
+  );
 }
