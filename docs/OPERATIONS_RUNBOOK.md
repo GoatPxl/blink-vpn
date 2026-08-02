@@ -5,7 +5,7 @@
 ### Morning checks
 
 - Open the dashboard and confirm the selected node health is loading.
-- Validate the DigitalOcean token if the dashboard shows provider errors.
+- Validate the selected provider token if the dashboard shows provider errors.
 - Confirm the selected node is in a sane state: `ready` or `connected` for active use.
 - Check diagnostics only for redacted output; do not rely on logs for secrets.
 
@@ -16,6 +16,7 @@
 - Use connect/disconnect rather than destroy when the node should remain available.
 - Use destroy when the node and its tunnels are no longer needed.
 - Use force cleanup after interrupted provisioning, app restart mid-provision, or stale local WireGuard artifacts.
+- In Docker dev mode, confirm Docker readiness before create/destroy operations.
 
 ## Troubleshooting Flow
 
@@ -33,18 +34,19 @@
 | Situation | Action | Expected Result |
 | --- | --- | --- |
 | Token invalid / missing | Re-save and validate token | Provider becomes usable again |
-| Droplet creation timed out | Wait briefly, then reconcile or force cleanup | Local node state matches remote reality |
+| Provider node creation timed out | Wait briefly, then reconcile or force cleanup | Local node state matches remote reality |
 | App restart mid-provision | Force cleanup the partially created node | Local tunnels removed, remote delete attempted |
 | WireGuard service missing | Repair/reinstall WireGuard for Windows | Local tunnel operations become available |
 | Tunnel status stale | Refresh health | Status snapshot updates from runtime |
 | Node stuck in error state | Force cleanup, then retry provisioning if needed | Partial state is removed |
+| Docker readiness fails in dev mode | Start Docker Desktop and re-run readiness check | Dev adapter operations become available |
 
 ## Force Cleanup Behavior
 
 Force cleanup is the preferred recovery path for interrupted provisioning in Phase 1.
 
 - Removes local tunnel artifacts.
-- Attempts best-effort remote droplet deletion.
+- Attempts best-effort remote provider resource deletion.
 - Deletes local node/tunnel rows when possible.
 - Treats missing local state as success, not as a hard failure.
 
@@ -53,7 +55,7 @@ Force cleanup is the preferred recovery path for interrupted provisioning in Pha
 Escalate to manual intervention if:
 
 - The provider token cannot be recovered.
-- The droplet is unreachable and cannot be deleted through the provider API.
+- The remote node is unreachable and cannot be deleted through the provider API.
 - Local WireGuard tools are missing after reinstall attempts.
 - The SQLite database is unreadable or corrupted.
 

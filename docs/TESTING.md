@@ -8,7 +8,8 @@ Phase 1 tests are organized around deterministic behavior and failure handling.
 
 - SQLite repository behavior
 - provider token upsert and cleanup
-- DigitalOcean retry policy behavior
+- provider adapter retry policy behavior
+- provider region/pricing catalog normalization
 - WireGuard config generation and runtime parsing
 - startup reconciliation and force cleanup paths
 - log redaction helpers
@@ -17,13 +18,14 @@ Phase 1 tests are organized around deterministic behavior and failure handling.
 ### What is Mocked
 
 - DigitalOcean HTTP interactions use `mockito` or local test doubles.
+- Docker provider behavior uses local adapter-level mocks/stubs and synthetic data contracts.
 - WireGuard command execution uses a mock `CommandRunner` in unit tests.
 - Secure storage uses the in-memory mock store outside Windows.
 
 ### What is Not Mocked
 
 - The UI itself is not fully end-to-end automated in this repo.
-- Live DigitalOcean accounts are not required for the normal test suite.
+- Live cloud provider accounts are not required for the normal test suite.
 - Real WireGuard services are not required for unit tests.
 
 ## How to Run Tests
@@ -50,7 +52,7 @@ npm run lint
 
 - token storage does not write plaintext into SQLite
 - token validation retries transient provider failures
-- node create rolls back a partially created droplet on failure
+- node create rolls back a partially created provider node on failure
 - force cleanup removes local tunnel artifacts after an interrupted provisioning path
 - startup reconciliation repairs stale tunnel state
 - redaction removes token/private-key material from logs and diagnostics

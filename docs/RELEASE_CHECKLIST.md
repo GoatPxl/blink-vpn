@@ -20,14 +20,14 @@
 - WireGuard for Windows must be installed on the target machine.
 - The WireGuard service/control tooling must be available to the app.
 - The user may need permission to install or manage services.
-- DigitalOcean network access must be allowed from the machine.
+- Production provider network access must be allowed from the machine (DigitalOcean in current phase).
 
 ## Rollback / Uninstall Plan
 
 - Uninstall should remove local app data if the deployment process requires a full reset.
 - Force cleanup should be run before uninstall if a node may still exist remotely.
 - Delete any diagnostics exports or temporary artifacts if they are no longer needed.
-- Rotate or revoke the DigitalOcean token if the machine is being decommissioned.
+- Rotate or revoke provider tokens if the machine is being decommissioned.
 
 ## Go / No-Go Criteria
 

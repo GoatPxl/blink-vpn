@@ -2,7 +2,9 @@
 
 ## Coding Standards
 
-- Keep changes Phase 1 scoped: Windows, DigitalOcean, WireGuard only.
+- Keep changes Phase 1 scoped: Windows, WireGuard, provider-adapter architecture.
+- Preserve provider-neutral behavior in orchestration paths; keep provider-specific logic inside adapters.
+- Treat Docker provider as development-only behavior unless scope is explicitly expanded.
 - Prefer small, compile-ready changes over broad rewrites.
 - Keep functions and command handlers narrowly focused.
 - Use explicit error mapping and actionable user-facing messages.

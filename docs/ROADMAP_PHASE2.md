@@ -1,5 +1,13 @@
 # Phase 2 Roadmap
 
+## Baseline Carried Into Phase 2
+
+Already in current Phase 1 iteration:
+
+- Provider adapter architecture with a generalized node lifecycle path.
+- Production adapter for DigitalOcean.
+- Development-only Docker adapter for local emulation using synthetic provider responses.
+
 ## Priority 1: Release Hardening
 
 Goal: make Phase 1 safer to distribute without changing scope.
@@ -27,7 +35,21 @@ Dependency risks:
 - Long-running retries must remain idempotent.
 - WireGuard service availability remains an external dependency.
 
-## Priority 3: Observability and Supportability
+## Priority 3: Generalized Node API Completion
+
+Goal: complete provider-neutral node management semantics and close contract gaps.
+
+- Promote node-level `edit` semantics across adapters where capability exists.
+- Add explicit node-level `suspend` / `resume` lifecycle operations.
+- Keep `create`, `delete`, and `get_system_info` behavior consistent across provider adapters.
+- Improve capability signaling so UI can clearly indicate provider-specific feature availability.
+
+Dependency risks:
+
+- Providers differ in mutable fields and suspend semantics.
+- Contract must stay backward-compatible for existing DigitalOcean and Docker flows.
+
+## Priority 4: Observability and Supportability
 
 Goal: make troubleshooting easier without adding telemetry.
 
@@ -39,11 +61,11 @@ Dependency risks:
 
 - Must keep all outputs redacted and local-only.
 
-## Priority 4: Scope Expansion
+## Priority 5: Provider Expansion
 
 Deferred until Phase 1 is stable.
 
-- Multi-provider support.
+- Additional production provider adapters beyond DigitalOcean.
 - Additional operating systems.
 - Advanced routing and VPN features.
 - Collaborative/team workflows.
@@ -52,9 +74,10 @@ Deferred until Phase 1 is stable.
 
 1. Security and release hardening.
 2. Cleanup/recovery UX improvements.
-3. Reconciliation and timeout refinement.
-4. Any scope expansion only after Phase 1 is externally stable.
+3. Node API contract completion (`edit` + node suspend/resume).
+4. Reconciliation and timeout refinement.
+5. Additional provider adapters only after external stability.
 
 ## Assumptions
 
-- TODO: project-specific fill for the exact Phase 2 release target and ownership model.
+- TODO: project-specific fill for the first non-DigitalOcean production provider target.

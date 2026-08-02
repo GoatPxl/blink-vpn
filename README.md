@@ -1,30 +1,46 @@
 # GoatStare VPN
 
-GoatStare VPN is a Phase 1 Windows desktop VPN manager built with a Rust backend, Tauri, and a Next.js frontend. It provisions and manages a single-provider WireGuard workflow on DigitalOcean, stores secrets locally, and keeps observability intentionally local-only.
+GoatStare VPN is a Windows desktop VPN control plane built with a Rust backend, Tauri, and a Next.js frontend.
+
+High-level goal:
+
+- Let an end user create and operate their own WireGuard VPN server on a VPS provider with minimal infrastructure knowledge.
+- User flow should be: add provider API key -> choose location/plan -> app provisions server -> app configures WireGuard -> user connects securely.
+
+Project inspiration:
+
+- https://www.digitalocean.com/solutions/vpn
 
 ## Phase 1 Scope
 
 - Windows desktop only
-- DigitalOcean only
 - WireGuard only
 - Rust backend + Tauri + Next.js frontend
+- Multi-provider architecture with provider adapters
+- Production provider path: DigitalOcean adapter
+- Development-only provider path: Docker adapter that emulates droplet workflows with synthetic API-style responses
 - Local secure storage for provider tokens and client keys
-- SQLite for metadata, node state, tunnel state, and runtime snapshots
+- SQLite for provider, node, tunnel, and runtime metadata
 
-## What It Does
+## What It Does Today
 
-- Store and validate a DigitalOcean API token in Windows Credential Manager.
-- Provision a droplet and bootstrap WireGuard on the remote host.
-- Create, connect, disconnect, and inspect local client tunnels.
-- Surface node health, tunnel status, and recovery guidance in the UI.
-- Destroy nodes and perform explicit force cleanup when provisioning is interrupted.
+- Stores and validates provider credentials in Windows Credential Manager (no plaintext secrets in SQLite).
+- Uses a generalized provider orchestration path for node lifecycle operations.
+- Provisions a VPS-like node, waits for readiness, and applies WireGuard bootstrap flows.
+- Creates and manages local WireGuard client tunnels.
+- Shows health, diagnostics, and recovery guidance in the dashboard.
+- Supports conservative destroy and force cleanup for interrupted operations.
 
-## Architecture Snapshot
+## Dev Docker Provider
 
-- [Rust backend](docs/ARCHITECTURE.md) owns orchestration, persistence, secret handling, WireGuard integration, and provider access.
-- [Tauri commands](docs/API_COMMANDS.md) expose a small typed command surface to the UI.
-- [Next.js dashboard](src/components/vpn-dashboard.tsx) is a state-driven control plane for provisioning, tunnel control, health, diagnostics, and recovery.
-- [SQLite schema](docs/DB_SCHEMA.md) stores providers, nodes, tunnels, and runtime snapshots.
+The Docker provider is for development and test only.
+
+- Enabled by backend flag: `GOATSTARE_DEV_DOCKER=1`.
+- Exposed in frontend development UX when `NEXT_PUBLIC_DEV_DOCKER=1`.
+- Uses local Docker containers to emulate provider node provisioning behavior.
+- Returns deterministic dummy/synthetic provider plan and account data for local workflows.
+
+This allows testing the provider abstraction path without requiring a live cloud account.
 
 ## Quickstart
 
@@ -34,7 +50,8 @@ Prerequisites:
 - Node.js and npm
 - Rust toolchain
 - WireGuard for Windows installed locally
-- DigitalOcean API token with permission to manage droplets
+- Provider API key for production-style testing (DigitalOcean)
+- Docker Desktop (only when testing dev Docker provider)
 
 Run locally:
 
@@ -42,8 +59,6 @@ Run locally:
 npm install
 npm run tauri:dev
 ```
-
-The UI starts at `http://localhost:3000` in development, with the Rust backend launched by Tauri.
 
 ## Documentation
 
@@ -58,13 +73,3 @@ The UI starts at `http://localhost:3000` in development, with the Rust backend l
 - [Known limitations](docs/KNOWN_LIMITATIONS.md)
 - [Phase 2 roadmap](docs/ROADMAP_PHASE2.md)
 - [Contributing](docs/CONTRIBUTING.md)
-
-## Current Release Posture
-
-- Implemented now: local secrets, provision/connect/disconnect/destroy, health, diagnostics, force cleanup, and redacted logs.
-- Deferred to later phases: multi-provider support, non-Windows targets, telemetry, and advanced VPN features.
-
-## Assumptions
-
-- TODO: project-specific fill for CI/CD signing and distribution policy.
-- TODO: project-specific fill for installer packaging automation if it differs from the current NSIS bundle.
