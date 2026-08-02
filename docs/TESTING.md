@@ -28,6 +28,51 @@ Phase 1 tests are organized around deterministic behavior and failure handling.
 - Live cloud provider accounts are not required for the normal test suite.
 - Real WireGuard services are not required for unit tests.
 
+## Docker E2E Real-Daemon Lane
+
+This lane is the contributor gate for Docker dashboard flows in Prompts 3-7.
+
+### Prerequisites
+
+- Windows host (PowerShell or cmd)
+- Docker Desktop installed and running
+- Docker CLI available on `PATH`
+- Dependencies installed with `npm install`
+
+### Preflight
+
+Run preflight first. It must print both client and server version details.
+
+```bash
+npm run e2e:docker:preflight
+```
+
+### Required Run Order
+
+Use the ordered lane command so dependencies between prompts are exercised consistently:
+
+```bash
+npm run e2e:docker:lane
+```
+
+The lane runs specs in this exact order:
+
+1. `tests/e2e/dashboard-docker-provider.spec.ts` (feature flag/readiness/token flow)
+2. `tests/e2e/dashboard-docker-nodes.spec.ts` (create-to-ready)
+3. `tests/e2e/dashboard-docker-tunnel.spec.ts` (connect/disconnect + health transition)
+4. `tests/e2e/dashboard-docker-destroy-cleanup.spec.ts` (destroy + force-cleanup idempotency)
+
+For interactive debugging:
+
+```bash
+npm run e2e:docker:lane:headed
+```
+
+### Failure Handling
+
+- If preflight fails, do not run the lane; start Docker Desktop and rerun preflight.
+- If lane fails, fix in prompt order (provider -> nodes -> tunnel -> destroy/cleanup) and rerun the full lane.
+
 ## How to Run Tests
 
 Backend:
@@ -46,6 +91,12 @@ Frontend lint:
 
 ```bash
 npm run lint
+```
+
+General Playwright (all E2E specs):
+
+```bash
+npm run e2e
 ```
 
 ## Critical Test Cases

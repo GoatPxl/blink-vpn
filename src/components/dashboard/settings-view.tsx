@@ -116,12 +116,14 @@ export function SettingsView({
 
   const providerRows = useMemo(() => {
     return providers.map((provider) => {
-      const tokenConfigured = provider.slug === "docker" ? dockerFauxTokenConfigured : !!provider.token_ref;
+      const tokenConfigured = provider.slug === "docker"
+        ? (dockerFauxTokenConfigured || !!provider.token_ref)
+        : !!provider.token_ref;
       return {
         provider,
         tokenConfigured,
         tokenReference: provider.slug === "docker"
-          ? (dockerFauxTokenConfigured ? "dev-token-configured" : null)
+          ? (provider.token_ref ?? (dockerFauxTokenConfigured ? "dev-token-configured" : null))
           : provider.token_ref,
       };
     });

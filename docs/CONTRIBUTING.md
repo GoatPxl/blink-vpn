@@ -35,6 +35,19 @@ Reviewers should check:
 - UI recovery guidance for each error class
 - tests covering the changed path
 
+## Docker Dashboard Change Gate
+
+When a PR changes Docker dashboard/provider behavior (settings, nodes, tunnel lifecycle, or cleanup), run the Docker contributor lane before requesting review.
+
+Required commands:
+
+```bash
+npm run e2e:docker:preflight
+npm run e2e:docker:lane
+```
+
+If failures occur, fix in lane order (provider -> nodes -> tunnel -> destroy/cleanup) and rerun the full lane.
+
 ## When to Ask for Help
 
 - If a change would expand beyond Phase 1 scope.

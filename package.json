@@ -10,6 +10,9 @@
     "typecheck": "tsc --noEmit",
     "e2e": "playwright test",
     "e2e:headed": "playwright test --headed",
+    "e2e:docker:preflight": "docker version",
+    "e2e:docker:lane": "set NEXT_PUBLIC_DEV_DOCKER=1&& npm run e2e:docker:preflight && playwright test tests/e2e/dashboard-docker-provider.spec.ts tests/e2e/dashboard-docker-nodes.spec.ts tests/e2e/dashboard-docker-tunnel.spec.ts tests/e2e/dashboard-docker-destroy-cleanup.spec.ts",
+    "e2e:docker:lane:headed": "set NEXT_PUBLIC_DEV_DOCKER=1&& npm run e2e:docker:preflight && playwright test --headed tests/e2e/dashboard-docker-provider.spec.ts tests/e2e/dashboard-docker-nodes.spec.ts tests/e2e/dashboard-docker-tunnel.spec.ts tests/e2e/dashboard-docker-destroy-cleanup.spec.ts",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
   },

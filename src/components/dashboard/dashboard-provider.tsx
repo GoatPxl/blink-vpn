@@ -345,19 +345,33 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         throw new Error("Docker faux token cannot be empty in development mode.");
       }
 
+      if (!(trimmed.startsWith("dkr_v1_") || trimmed.startsWith("docker_"))) {
+        throw new Error("Docker faux token must start with 'dkr_v1_' or 'docker_'.");
+      }
+
+      const activeProvider = providers.find((provider) => provider.id === providerId) ?? null;
+      const result = await registerProviderToken(
+        providerId,
+        providerName,
+        trimmed,
+        activeProvider?.slug ?? "docker",
+      );
+
       const configuredAt = new Date().toISOString();
       window.localStorage.setItem(DOCKER_FAUX_TOKEN_STORAGE_KEY, configuredAt);
       setDockerFauxTokenConfigured(true);
       setDockerFauxTokenConfiguredAt(configuredAt);
+      setProviderFeedback(result);
       setDockerReadinessState("checking");
       setDockerReadinessMessage("Faux token stored for development emulation. Validate Docker readiness next.");
-      pushToast("success", "Docker faux token saved", "Development emulation token is configured locally.");
+      pushToast("success", "Docker faux token saved", result);
+      await loadDashboard();
     } catch (error) {
       handleError(error);
     } finally {
       setBusyAction(null);
     }
-  }, [dockerDevEnabled, handleError, pushToast]);
+  }, [dockerDevEnabled, handleError, loadDashboard, providerId, providerName, providers, pushToast]);
 
   const validateDockerReadiness = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent ?? false;

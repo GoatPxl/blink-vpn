@@ -48,6 +48,31 @@ set NEXT_PUBLIC_DEV_DOCKER=1
 6. Run Docker readiness check.
 7. Create a node normally; Docker provider will emulate VPS provisioning with local containers and synthetic API-style data.
 
+## Docker E2E Contributor Gate
+
+Use this when validating dashboard Docker flows for Prompts 3-7.
+
+1. Confirm Docker Desktop is running.
+2. Verify CLI and daemon are reachable.
+
+```bash
+npm run e2e:docker:preflight
+```
+
+3. Run the ordered Docker lane.
+
+```bash
+npm run e2e:docker:lane
+```
+
+4. Optional headed mode for troubleshooting.
+
+```bash
+npm run e2e:docker:lane:headed
+```
+
+Run order is fixed in the lane command and should not be changed ad hoc during contributor validation.
+
 ## Environment / Config
 
 The current Phase 1 app keeps runtime configuration intentionally small:
