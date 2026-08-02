@@ -16,6 +16,7 @@ import {
   type WireGuardReadiness,
 } from "@/lib/tauri";
 import {
+  DEFAULT_ONBOARDING_STATE,
   loadOnboardingState,
   saveOnboardingState,
   type OnboardingState,
@@ -44,11 +45,9 @@ function stepTitle(step: number): string {
 
 export function OnboardingWizard() {
   const router = useRouter();
-  const [state, setState] = useState<OnboardingState>(() => loadOnboardingState());
-  const [step, setStep] = useState(() => {
-    const loaded = loadOnboardingState();
-    return Math.min(Math.max(loaded.currentStep, 1), 5);
-  });
+  const [state, setState] = useState<OnboardingState>(DEFAULT_ONBOARDING_STATE);
+  const [step, setStep] = useState(1);
+  const [isHydrated, setIsHydrated] = useState(false);
 
   const [wireGuardReadiness, setWireGuardReadiness] = useState<WireGuardReadiness | null>(null);
   const [wireGuardBusy, setWireGuardBusy] = useState(false);
@@ -72,17 +71,27 @@ export function OnboardingWizard() {
   const [finalCheckBusy, setFinalCheckBusy] = useState(false);
 
   useEffect(() => {
-    saveOnboardingState({ ...state, currentStep: step, status: step >= 5 ? state.status : "in_progress" });
-  }, [state, step]);
+    const loaded = loadOnboardingState();
+    setState(loaded);
+    setStep(Math.min(Math.max(loaded.currentStep, 1), 5));
+    setIsHydrated(true);
+  }, []);
 
   useEffect(() => {
+    if (!isHydrated) return;
+    saveOnboardingState({ ...state, currentStep: step, status: step >= 5 ? state.status : "in_progress" });
+  }, [isHydrated, state, step]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
     if (step === 1 && wireGuardReadiness === null) {
       void checkWireGuard();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
+  }, [isHydrated, step]);
 
   useEffect(() => {
+    if (!isHydrated) return;
     if (step < 2) return;
 
     const timeoutId = window.setTimeout(() => {
@@ -91,9 +100,10 @@ export function OnboardingWizard() {
 
     return () => window.clearTimeout(timeoutId);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.providerId, step]);
+  }, [isHydrated, state.providerId, step]);
 
   useEffect(() => {
+    if (!isHydrated) return;
     if (step !== 3) return;
     if (!state.tokenSaved && !state.tokenValidated) return;
     const timeoutId = window.setTimeout(() => {
@@ -101,7 +111,7 @@ export function OnboardingWizard() {
     }, 0);
     return () => window.clearTimeout(timeoutId);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, state.region, state.providerId, state.tokenSaved, state.tokenValidated]);
+  }, [isHydrated, step, state.region, state.providerId, state.tokenSaved, state.tokenValidated]);
 
   const selectedPlanPricing = useMemo(() => {
     return livePricing.find((entry) => entry.plan_key === state.plan) ?? null;
