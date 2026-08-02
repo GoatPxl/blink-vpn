@@ -14,8 +14,6 @@ import {
 import { maskTokenReference } from "./shared";
 
 export function SettingsView({
-  providerStatusMessage,
-  providerFeedback,
   dockerDevEnabled,
   dockerFauxToken,
   setDockerFauxToken,
@@ -35,8 +33,6 @@ export function SettingsView({
   busyAction,
   onNavigateToView,
 }: {
-  providerStatusMessage: string;
-  providerFeedback: string;
   dockerDevEnabled: boolean;
   dockerFauxToken: string;
   setDockerFauxToken: (value: string) => void;
@@ -144,17 +140,7 @@ export function SettingsView({
           description="This page exists to collect API keys. Choose provider, paste key, save, then validate."
           action={<Button onClick={openTokenModal} disabled={busyAction !== null || providers.length === 0}>Open Key Entry Modal</Button>}
         >
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
-            <div className="rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] p-4">
-              <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Current Provider Context</div>
-              <div className="mt-3 text-lg font-semibold text-[var(--on-surface)]">{selectedProvider?.name ?? "No provider"}</div>
-              <div className="mt-1 font-mono text-[12px] text-[var(--on-surface-variant)]">{selectedProvider?.slug ?? "n/a"}</div>
-              <div className="mt-4 text-sm text-[var(--on-surface-variant)]">{providerStatusMessage}</div>
-              <div className="mt-3 rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-3 py-2 text-xs text-[var(--on-surface-variant)]">
-                {providerFeedback}
-              </div>
-            </div>
-
+          <div className="space-y-4">
             <div className="rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
               <div className="mb-3 text-sm font-medium text-[var(--on-surface)]">Installed API keys by provider</div>
               <div className="overflow-hidden rounded-xl border border-[color:var(--outline-variant)]">
@@ -272,10 +258,6 @@ export function SettingsView({
                   className="w-full resize-y rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.95)] px-4 py-4 font-mono text-base text-[var(--on-surface)] outline-none ring-0 placeholder:text-[var(--on-surface-variant)]/50 focus:border-[color:rgba(171,199,255,0.55)]"
                 />
               </Field>
-
-              <div className="rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-3 py-2 text-xs text-[var(--on-surface-variant)]">
-                {providerFeedback}
-              </div>
 
               <div className="flex flex-wrap items-center justify-end gap-2">
                 <Button tone="secondary" onClick={closeTokenModal} disabled={busyAction !== null}>Cancel</Button>

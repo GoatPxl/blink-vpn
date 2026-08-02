@@ -16,11 +16,9 @@ export default function DashboardSettingsPage() {
     deleteProvider,
     dockerDevEnabled,
     dockerFauxTokenConfigured,
-    providerFeedback,
     providerId,
     providers,
     selectProviderId,
-    providerStatusMessage,
     saveDockerFauxToken,
     saveToken,
     suspendProvider,
@@ -40,8 +38,6 @@ export default function DashboardSettingsPage() {
 
   return (
     <SettingsView
-      providerStatusMessage={providerStatusMessage}
-      providerFeedback={providerFeedback}
       dockerDevEnabled={dockerDevEnabled}
       dockerFauxToken={dockerFauxToken}
       setDockerFauxToken={setDockerFauxToken}

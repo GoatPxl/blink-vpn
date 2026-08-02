@@ -575,7 +575,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
     setProviderId(nextProvider.id);
     setProviderName(nextProvider.name);
-    setProviderFeedback(`${nextProvider.name} selected for provider actions.`);
     void refreshProviderAccessStatus(nextProvider);
   }, [providers, refreshProviderAccessStatus]);
 
