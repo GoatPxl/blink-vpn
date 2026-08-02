@@ -30,6 +30,7 @@ export default function DashboardNodesPage() {
     providerName,
     providerStatusMessage,
     providers,
+    selectProviderId,
     selectedNode,
     selectedNodeId,
     setSelectedNodeId,
@@ -185,9 +186,11 @@ export default function DashboardNodesPage() {
       providerAccessState={providerAccessState}
       providerBadge={providerBadge}
       providerStatusMessage={providerStatusMessage}
+      providerId={providerId}
       providerName={providerName}
       configuredProvider={configuredProvider}
       providers={providers}
+      onSelectProvider={selectProviderId}
       nodes={filteredNodes}
       diagnostics={diagnostics}
       pricingByRegion={pricingByRegion}

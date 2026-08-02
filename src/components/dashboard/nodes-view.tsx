@@ -9,9 +9,11 @@ export function NodesView({
   providerAccessState,
   providerBadge,
   providerStatusMessage,
+  providerId,
   providerName,
   configuredProvider,
   providers,
+  onSelectProvider,
   nodes,
   diagnostics,
   pricingByRegion,
@@ -56,9 +58,11 @@ export function NodesView({
   providerAccessState: ProviderAccessState;
   providerBadge: { label: string; classes: string };
   providerStatusMessage: string;
+  providerId: string;
   providerName: string;
   configuredProvider: ProviderRecord | null;
   providers: ProviderRecord[];
+  onSelectProvider: (providerId: string) => void;
   nodes: VpnNodeRecord[];
   diagnostics: { tunnels?: TunnelRecord[] } | null;
   pricingByRegion: Record<string, ProviderPlanPricing[]>;
@@ -259,11 +263,22 @@ export function NodesView({
             <div className="space-y-5">
               <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm">
                 <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Provider</div>
-                <div className="mt-2 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-medium text-[var(--on-surface)]">{configuredProvider?.name ?? providerName}</div>
-                    <div className="mt-1 text-[var(--on-surface-variant)]">Provider and size catalog are loaded dynamically from the selected integration.</div>
-                  </div>
+                <div className="mt-2 space-y-2">
+                  <select
+                    value={providerId}
+                    onChange={(event) => onSelectProvider(event.target.value)}
+                    className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0"
+                  >
+                    {providers.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.name} ({provider.slug})
+                      </option>
+                    ))}
+                  </select>
+                  <div className="font-medium text-[var(--on-surface)]">{configuredProvider?.name ?? providerName}</div>
+                  <div className="text-[var(--on-surface-variant)]">Provider and size catalog are loaded dynamically from the selected integration.</div>
+                </div>
+                <div className="mt-3 flex items-center justify-end">
                   <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${providerBadge.classes}`}>{providerBadge.label}</span>
                 </div>
               </div>
