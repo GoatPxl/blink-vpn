@@ -111,6 +111,14 @@ impl SecureStorage {
     Ok(token_ref)
   }
 
+  pub fn store_provider_api_token(
+    &self,
+    provider_id: &str,
+    token: &str,
+  ) -> Result<String, SecretStoreError> {
+    self.store_digitalocean_api_token(provider_id, token)
+  }
+
   pub fn get_digitalocean_api_token(
     &self,
     token_ref: &str,
@@ -130,12 +138,20 @@ impl SecureStorage {
     Ok(None)
   }
 
+  pub fn get_provider_api_token(&self, token_ref: &str) -> Result<Option<String>, SecretStoreError> {
+    self.get_digitalocean_api_token(token_ref)
+  }
+
   pub fn delete_digitalocean_api_token(&self, token_ref: &str) -> Result<(), SecretStoreError> {
     self.inner.delete_secret(token_ref)?;
     if let Ok(mut guard) = self.session_cache.lock() {
       guard.remove(token_ref);
     }
     Ok(())
+  }
+
+  pub fn delete_provider_api_token(&self, token_ref: &str) -> Result<(), SecretStoreError> {
+    self.delete_digitalocean_api_token(token_ref)
   }
 
   pub fn store_client_private_key(

@@ -24,10 +24,10 @@ const titleMap: Record<AppView, string> = {
 
 const subtitleMap: Record<AppView, string> = {
   dashboard: "Monitor the active tunnel, throughput, and local node state.",
-  nodes: "Provision and manage DigitalOcean nodes and client tunnels.",
+  nodes: "Provision and manage provider-backed nodes and client tunnels.",
   health: "Inspect runtime handshake, endpoint, and tunnel health.",
   diagnostics: "Review redacted logs, recovery suggestions, and exportable bundles.",
-  settings: "Register and validate the DigitalOcean token used for orchestration.",
+  settings: "Register and validate the active provider token used for orchestration.",
 };
 
 function getActiveView(pathname: string | null): AppView {
@@ -165,7 +165,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
                   <div className="flex flex-wrap items-center gap-2 text-sm text-[var(--on-surface-variant)]">
                     <span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">Phase 1 Control Plane</span>
                     <span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">Windows</span>
-                    <span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">DigitalOcean</span>
+                    <span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">Dynamic Provider</span>
                     <span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">WireGuard</span>
                   </div>
                   <div>

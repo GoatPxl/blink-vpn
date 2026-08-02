@@ -24,6 +24,8 @@ export default function DashboardSettingsPage() {
     providerHasStoredToken,
     providerId,
     providerName,
+    providers,
+    setActiveProviderId,
     providerStatusMessage,
     saveDockerFauxToken,
     saveToken,
@@ -61,6 +63,8 @@ export default function DashboardSettingsPage() {
       configuredProvider={configuredProvider}
       providerId={providerId}
       providerName={providerName}
+      providers={providers}
+      onSetActiveProvider={setActiveProviderId}
       apiToken={apiToken}
       setApiToken={setApiToken}
       onSaveToken={handleSaveToken}

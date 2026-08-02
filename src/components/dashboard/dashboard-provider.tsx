@@ -65,6 +65,7 @@ type DashboardContextValue = {
   diagnosticsExportPath: string;
   providerId: string;
   providerName: string;
+  setActiveProviderId: (providerId: string) => void;
   providerAccessState: ProviderAccessState;
   providerStatusMessage: string;
   providerFeedback: string;
@@ -131,6 +132,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [dockerFauxTokenConfiguredAt, setDockerFauxTokenConfiguredAt] = useState<string | null>(
     null,
   );
+  const providerIdRef = useRef(providerId);
   const selectedNodeIdRef = useRef(selectedNodeId);
   const selectedTunnelIdRef = useRef(selectedTunnelId);
 
@@ -151,9 +153,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [dockerDevEnabled]);
 
   useEffect(() => {
+    providerIdRef.current = providerId;
     selectedNodeIdRef.current = selectedNodeId;
     selectedTunnelIdRef.current = selectedTunnelId;
-  }, [selectedNodeId, selectedTunnelId]);
+  }, [providerId, selectedNodeId, selectedTunnelId]);
 
   const pushToast = useCallback((kind: ToastKind, title: string, message: string) => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -176,14 +179,15 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [pushToast]);
 
   const refreshProviderAccessStatus = useCallback(async (provider: ProviderRecord | null) => {
+    const providerLabel = provider?.name ?? "provider";
     if (!provider?.token_ref) {
       setProviderAccessState("missing");
-      setProviderStatusMessage("No provider token is stored yet. Save and validate a DigitalOcean token in Settings to provision nodes.");
+      setProviderStatusMessage(`No ${providerLabel} token is stored yet. Save and validate a token in Settings to provision nodes.`);
       return;
     }
 
     setProviderAccessState("checking");
-    setProviderStatusMessage("Checking stored provider access against DigitalOcean...");
+    setProviderStatusMessage(`Checking stored provider access for ${providerLabel}...`);
 
     try {
       const result = await validateProviderToken(provider.id);
@@ -209,7 +213,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setDiagnostics(loadedDiagnostics);
       setProviders(loadedProviders);
 
-      const configuredProvider = loadedProviders[0] ?? null;
+      const configuredProvider = loadedProviders.find((provider) => provider.id === providerIdRef.current)
+        ?? loadedProviders[0]
+        ?? null;
       if (configuredProvider) {
         setProviderId(configuredProvider.id);
         setProviderName(configuredProvider.name);
@@ -285,8 +291,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const saveToken = useCallback(async (apiToken: string) => {
     setBusyAction("save-token");
     try {
+      const activeProvider = providers.find((provider) => provider.id === providerId) ?? null;
       setProviderFeedback("Saving token reference locally...");
-      const result = await registerProviderToken(providerId, providerName, apiToken);
+      const result = await registerProviderToken(
+        providerId,
+        providerName,
+        apiToken,
+        activeProvider?.slug ?? "digitalocean",
+      );
       setProviderFeedback(result);
       setRecovery(null);
       pushToast("success", "Token saved", result);
@@ -296,7 +308,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     } finally {
       setBusyAction(null);
     }
-  }, [loadDashboard, providerId, providerName, pushToast, handleError]);
+  }, [loadDashboard, providerId, providerName, providers, pushToast, handleError]);
 
   const validateToken = useCallback(async () => {
     setBusyAction("validate-token");
@@ -549,6 +561,18 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(timeoutId);
   }, [dockerDevEnabled, validateDockerReadiness]);
 
+  const setActiveProviderId = useCallback((nextProviderId: string) => {
+    const nextProvider = providers.find((provider) => provider.id === nextProviderId) ?? null;
+    if (!nextProvider) {
+      return;
+    }
+
+    setProviderId(nextProvider.id);
+    setProviderName(nextProvider.name);
+    setProviderFeedback(`Active provider switched to ${nextProvider.name}.`);
+    void refreshProviderAccessStatus(nextProvider);
+  }, [providers, refreshProviderAccessStatus]);
+
   const configuredProvider = providers.find((provider) => provider.id === providerId) ?? providers[0] ?? null;
   const providerHasStoredToken = !!configuredProvider?.token_ref && providerAccessState !== "invalid";
   const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
@@ -572,6 +596,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     diagnosticsExportPath,
     providerId,
     providerName,
+    setActiveProviderId,
     providerAccessState,
     providerStatusMessage,
     providerFeedback,

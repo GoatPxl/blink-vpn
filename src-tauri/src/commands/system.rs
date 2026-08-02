@@ -169,6 +169,34 @@ pub fn register_digitalocean_provider_token(
 }
 
 #[tauri::command]
+pub fn register_docker_provider_token(
+  provider_id: String,
+  provider_name: String,
+  api_token: String,
+  backend: State<'_, Backend>,
+) -> Result<String, String> {
+  let provider = backend
+    .provider
+    .upsert_docker_provider_with_token(
+      &backend.db,
+      &backend.secure_storage,
+      &provider_id,
+      &provider_name,
+      &api_token,
+    )
+    .map_err(|err| err.to_string())?;
+
+  let token_ref = provider
+    .token_ref
+    .unwrap_or_else(|| "<missing-token-ref>".to_string());
+
+  Ok(format!(
+    "Provider registered with token_ref: {}",
+    token_ref
+  ))
+}
+
+#[tauri::command]
 pub fn list_provider_pricing(
   provider_id: String,
   region: String,

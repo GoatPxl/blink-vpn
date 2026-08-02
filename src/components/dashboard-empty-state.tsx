@@ -8,7 +8,7 @@ export function DashboardEmptyState() {
       <div className="w-full max-w-xl rounded-[24px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(28,32,39,0.96),rgba(16,19,27,0.96))] p-8 text-center shadow-[var(--shadow-elevated)]">
         <h2 className="text-2xl font-semibold tracking-tight text-[var(--on-surface)]">No VPN server configured yet</h2>
         <p className="mt-3 text-sm leading-6 text-[var(--on-surface-variant)]">
-          Complete the guided setup to verify WireGuard readiness, save your DigitalOcean token, and provision your first VPN node.
+          Complete the guided setup to verify WireGuard readiness, save your provider token, and provision your first VPN node.
         </p>
         <div className="mt-7">
           <Link

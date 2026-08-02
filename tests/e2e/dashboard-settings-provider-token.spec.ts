@@ -80,14 +80,14 @@ test.describe("Dashboard settings provider token", () => {
     await page.goto("/dashboard/settings");
 
     await expect(page.getByRole("heading", { name: "Current Provider" })).toBeVisible();
-    await expect(page.getByText("Missing", { exact: true })).toBeVisible();
-    await expect(page.getByText("Not configured", { exact: true })).toBeVisible();
+    await expect(page.getByRole("row", { name: /Token Status/i }).getByText("Missing", { exact: true })).toBeVisible();
+    await expect(page.getByRole("row", { name: /Stored Token Ref/i }).getByText("Not configured", { exact: true })).toBeVisible();
 
     await page.getByPlaceholder("dop_v1_...").fill(apiToken);
     await page.getByRole("button", { name: "Save Token", exact: true }).click();
 
-    await expect(page.getByText("Configured", { exact: true })).toBeVisible();
-    await expect(page.getByText("do-token...f6bf", { exact: true })).toBeVisible();
+    await expect(page.getByRole("row", { name: /Token Status/i }).getByText("Configured", { exact: true })).toBeVisible();
+    await expect(page.getByRole("row", { name: /Stored Token Ref/i }).getByText("do-token...f6bf", { exact: true })).toBeVisible();
     await expect(page.getByText(/Provider registered with token_ref:/).first()).toBeVisible();
     await expect(page.getByPlaceholder("dop_v1_...")).toHaveValue("");
   });

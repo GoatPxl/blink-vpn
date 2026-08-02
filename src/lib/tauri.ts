@@ -165,8 +165,17 @@ export async function installWireGuardWithPrerequisites(): Promise<WireGuardInst
   return invokeCommand<WireGuardInstallResult>("install_wireguard_with_prerequisites");
 }
 
-export async function registerProviderToken(providerId: string, providerName: string, apiToken: string): Promise<string> {
-  return invokeCommand<string>("register_digitalocean_provider_token", {
+export async function registerProviderToken(
+  providerId: string,
+  providerName: string,
+  apiToken: string,
+  providerSlug: string = "digitalocean",
+): Promise<string> {
+  const command = providerSlug === "docker"
+    ? "register_docker_provider_token"
+    : "register_digitalocean_provider_token";
+
+  return invokeCommand<string>(command, {
     providerId,
     providerName,
     apiToken,

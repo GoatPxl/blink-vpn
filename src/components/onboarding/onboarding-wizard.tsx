@@ -25,7 +25,7 @@ import { runWireGuardReadinessCheck } from "@/lib/wireguard-readiness";
 
 function stepTitle(step: number): string {
   if (step === 1) return "WireGuard Readiness";
-  if (step === 2) return "DigitalOcean Token";
+  if (step === 2) return "Provider Token";
   if (step === 3) return "Server Configuration";
   if (step === 4) return "Provision Server";
   return "Ready";
@@ -111,6 +111,9 @@ export function OnboardingWizard() {
 
   const hasUnsavedTokenInput = apiToken.trim().length > 0;
   const hasStoredProviderToken = !!storedProviderTokenRef;
+  const currentProviderName = state.providerName || "Provider";
+  const currentProviderSlug = state.providerName.toLowerCase() === "docker" ? "docker" : "digitalocean";
+  const tokenPlaceholder = currentProviderSlug === "docker" ? "dkr_v1_..." : "dop_v1_...";
 
   async function syncStoredProviderTokenState(validateStoredToken = false) {
     try {
@@ -218,7 +221,7 @@ export function OnboardingWizard() {
       }
       setPricingError(
         isTokenRecoveryNeeded
-          ? `Provider token is not currently registered. Return to Step 2, save your DigitalOcean token again, then validate it.`
+          ? `Provider token is not currently registered. Return to Step 2, save your ${currentProviderName} token again, then validate it.`
           : message,
       );
     } finally {
@@ -253,13 +256,18 @@ export function OnboardingWizard() {
 
   async function onSaveToken() {
     if (!apiToken.trim()) {
-      setTokenMessage("Enter a DigitalOcean token to continue.");
+      setTokenMessage(`Enter a ${currentProviderName} token to continue.`);
       return;
     }
 
     setTokenBusy(true);
     try {
-      const saveResult = await registerProviderToken(state.providerId, state.providerName, apiToken.trim());
+      const saveResult = await registerProviderToken(
+        state.providerId,
+        state.providerName,
+        apiToken.trim(),
+        currentProviderSlug,
+      );
       setState((current) => ({ ...current, tokenSaved: true, tokenValidated: false }));
 
       // Validate immediately after save so Step 2 has a single clear outcome.
@@ -298,7 +306,7 @@ export function OnboardingWizard() {
     }
 
     if (!state.tokenSaved && !hasStoredProviderToken) {
-      setTokenMessage("Save your DigitalOcean token first, then validate it.");
+      setTokenMessage(`Save your ${currentProviderName} token first, then validate it.`);
       return;
     }
 
@@ -505,7 +513,7 @@ export function OnboardingWizard() {
 
           {step === 2 ? (
             <div className="space-y-4">
-              <p className="text-sm text-[var(--on-surface-variant)]">Add your DigitalOcean API token to provision and manage the VPN node.</p>
+              <p className="text-sm text-[var(--on-surface-variant)]">Add your {currentProviderName} API token to provision and manage the VPN node.</p>
               <label className="block space-y-2 text-sm text-[var(--on-surface-variant)]">
                 <span>API Token</span>
                 <input
@@ -523,7 +531,7 @@ export function OnboardingWizard() {
                     }
                   }}
                   className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none"
-                  placeholder="dop_v1_..."
+                  placeholder={tokenPlaceholder}
                 />
               </label>
               <div className="flex flex-wrap gap-3">

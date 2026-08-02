@@ -101,7 +101,7 @@ export function statusBadge(status: string) {
 
 export function categorizeError(errorMessage: string): { kind: ErrorCategory; title: string; nextAction: string } {
   if (errorMessage.includes("Provider orchestration failed") || errorMessage.includes("Provider provider")) {
-    return { kind: "provider", title: "Provider issue", nextAction: "Verify the DigitalOcean token, then validate or re-save it before retrying." };
+    return { kind: "provider", title: "Provider issue", nextAction: "Verify the active provider token, then validate or re-save it before retrying." };
   }
   if (errorMessage.includes("Database operation failed") || errorMessage.includes("was not found")) {
     return { kind: "database", title: "Local state issue", nextAction: "Refresh the dashboard. If state is still stale, use Force Cleanup on the affected node." };

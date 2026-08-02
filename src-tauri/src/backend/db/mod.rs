@@ -12,6 +12,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (4, include_str!("../../../migrations/0004_vpn_node_server_key.sql")),
   (5, include_str!("../../../migrations/0005_tunnel_stats_snapshot.sql")),
   (6, include_str!("../../../migrations/0006_vpn_node_pricing_snapshot.sql")),
+  (7, include_str!("../../../migrations/0007_seed_docker_provider.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

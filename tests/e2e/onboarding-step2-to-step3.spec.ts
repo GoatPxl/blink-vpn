@@ -242,7 +242,7 @@ test.describe("Onboarding Step 2", () => {
 
     await expect(page.getByRole("heading", { name: "WireGuard Readiness" })).toBeVisible();
     await page.getByRole("button", { name: "Next", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "DigitalOcean Token" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Provider Token" })).toBeVisible();
   });
 
   test("requires save before validation", async ({ page }) => {
@@ -299,7 +299,7 @@ test.describe("Onboarding Step 2", () => {
 
     await page.getByRole("button", { name: "Next", exact: true }).click();
 
-    await expect(page.getByRole("heading", { name: "DigitalOcean Token" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Provider Token" })).toBeVisible();
     await expect(page.getByText("Provider token is no longer valid in secure storage. Save Token, then Validate Token to continue.")).toBeVisible();
   });
 

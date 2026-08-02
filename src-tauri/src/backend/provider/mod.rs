@@ -1,6 +1,8 @@
 pub mod digitalocean;
+pub mod docker;
 pub mod retry;
 
+use std::collections::HashMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -17,6 +19,7 @@ pub use digitalocean::{
 };
 
 use digitalocean::{DigitalOceanApiClient, DigitalOceanError};
+use docker::DockerProviderAdapter;
 use retry::RetryPolicy;
 
 pub trait ProviderAdapter: Send + Sync {
@@ -293,7 +296,8 @@ pub struct ProviderPlanPricing {
 
 #[derive(Clone)]
 pub struct ProviderRegistry {
-  digitalocean: Arc<dyn ProviderAdapter>,
+  adapters_by_slug: HashMap<String, Arc<dyn ProviderAdapter>>,
+  default_provider_slug: String,
 }
 
 #[derive(Debug, Error)]
@@ -334,25 +338,42 @@ pub enum ProviderFlowError {
   MissingTokenReference { provider_id: String, detail: String },
   #[error("Provider token_ref '{token_ref}' has no stored secret. {detail}")]
   MissingSecret { token_ref: String, detail: String },
+  #[error("Provider with slug '{slug}' is not supported by this app build. {detail}")]
+  UnsupportedProviderSlug { slug: String, detail: String },
 }
 
 impl ProviderRegistry {
   pub fn new() -> Self {
-    let adapter = DigitalOceanProviderAdapter::new().unwrap_or_else(|err| {
+    let digitalocean = DigitalOceanProviderAdapter::new().unwrap_or_else(|err| {
       panic!("failed to initialize DigitalOcean adapter: {err}")
     });
 
+    let mut adapters_by_slug: HashMap<String, Arc<dyn ProviderAdapter>> = HashMap::new();
+    adapters_by_slug.insert("digitalocean".to_string(), Arc::new(digitalocean));
+    adapters_by_slug.insert("docker".to_string(), Arc::new(DockerProviderAdapter::new()));
+
     Self {
-      digitalocean: Arc::new(adapter),
+      adapters_by_slug,
+      default_provider_slug: "digitalocean".to_string(),
     }
   }
 
   pub fn from_adapter(adapter: Arc<dyn ProviderAdapter>) -> Self {
-    Self { digitalocean: adapter }
+    let slug = adapter.provider_name().to_string();
+    let mut adapters_by_slug = HashMap::new();
+    adapters_by_slug.insert(slug.clone(), adapter);
+    Self {
+      adapters_by_slug,
+      default_provider_slug: slug,
+    }
   }
 
   pub fn active(&self) -> &dyn ProviderAdapter {
-    self.digitalocean.as_ref()
+    self
+      .adapters_by_slug
+      .get(&self.default_provider_slug)
+      .map(|adapter| adapter.as_ref())
+      .unwrap_or_else(|| panic!("default provider adapter missing: {}", self.default_provider_slug))
   }
 
   pub fn create_digitalocean_provider_with_token(
@@ -374,6 +395,49 @@ impl ProviderRegistry {
     provider_name: &str,
     api_token: &str,
   ) -> Result<ProviderRecord, ProviderFlowError> {
+    self.upsert_provider_with_token(
+      db,
+      secure_storage,
+      provider_id,
+      provider_name,
+      "digitalocean",
+      api_token,
+    )
+  }
+
+  pub fn create_docker_provider_with_token(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    provider_name: &str,
+    api_token: &str,
+  ) -> Result<ProviderRecord, ProviderFlowError> {
+    self.upsert_docker_provider_with_token(db, secure_storage, provider_id, provider_name, api_token)
+  }
+
+  pub fn upsert_docker_provider_with_token(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    provider_name: &str,
+    api_token: &str,
+  ) -> Result<ProviderRecord, ProviderFlowError> {
+    self.upsert_provider_with_token(db, secure_storage, provider_id, provider_name, "docker", api_token)
+  }
+
+  fn upsert_provider_with_token(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    provider_name: &str,
+    provider_slug: &str,
+    api_token: &str,
+  ) -> Result<ProviderRecord, ProviderFlowError> {
+    self.adapter_for_slug(provider_slug)?;
+
     let existing = db
       .get_provider(provider_id)
       .map_err(|source| ProviderFlowError::Database {
@@ -383,9 +447,9 @@ impl ProviderRegistry {
     let previous_token_ref = existing.as_ref().and_then(|record| record.token_ref.clone());
 
     let token_ref = secure_storage
-      .store_digitalocean_api_token(provider_id, api_token)
+      .store_provider_api_token(provider_id, api_token)
       .map_err(|source| ProviderFlowError::SecretStore {
-        detail: "Unable to save DigitalOcean API token in protected storage."
+        detail: "Unable to save provider token in protected storage."
           .to_string(),
         source,
       })?;
@@ -394,19 +458,19 @@ impl ProviderRegistry {
       Some(_) => db.update_provider(
         provider_id,
         provider_name,
-        self.active().provider_name(),
+        provider_slug,
         Some(&token_ref),
       ),
       None => db.create_provider(
         provider_id,
         provider_name,
-        self.active().provider_name(),
+        provider_slug,
         Some(&token_ref),
       ),
     };
 
     if let Err(source) = update_result {
-      let _ = secure_storage.delete_digitalocean_api_token(&token_ref);
+      let _ = secure_storage.delete_provider_api_token(&token_ref);
       return Err(ProviderFlowError::Database {
         detail: "Failed to persist provider row with updated token reference.".to_string(),
         source,
@@ -414,7 +478,7 @@ impl ProviderRegistry {
     }
 
     if let Some(previous_token_ref) = previous_token_ref {
-      let _ = secure_storage.delete_digitalocean_api_token(&previous_token_ref);
+      let _ = secure_storage.delete_provider_api_token(&previous_token_ref);
     }
 
     db
@@ -436,9 +500,9 @@ impl ProviderRegistry {
     secure_storage: &SecureStorage,
     provider_id: &str,
   ) -> Result<Account, ProviderFlowError> {
-    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
-    self
-      .active()
+    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
+    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
+    adapter
       .validate_token(&token)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Token validation through provider adapter failed.".to_string(),
@@ -456,9 +520,9 @@ impl ProviderRegistry {
     size_slug: &str,
     cloud_init_user_data: &str,
   ) -> Result<ProvisionedDroplet, ProviderFlowError> {
-    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
-    self
-      .active()
+    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
+    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
+    adapter
       .create_droplet(&token, droplet_name, region, size_slug, cloud_init_user_data)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Droplet provisioning through provider adapter failed.".to_string(),
@@ -473,9 +537,9 @@ impl ProviderRegistry {
     provider_id: &str,
     region: &str,
   ) -> Result<Vec<ProviderPlanPricing>, ProviderFlowError> {
-    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
-    self
-      .active()
+    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
+    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
+    adapter
       .list_plan_pricing(&token, region)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Provider pricing lookup failed through adapter.".to_string(),
@@ -489,9 +553,9 @@ impl ProviderRegistry {
     secure_storage: &SecureStorage,
     provider_id: &str,
   ) -> Result<Vec<String>, ProviderFlowError> {
-    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
-    self
-      .active()
+    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
+    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
+    adapter
       .list_regions(&token)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Provider region lookup failed through adapter.".to_string(),
@@ -508,9 +572,9 @@ impl ProviderRegistry {
     endpoint_ip: &str,
     readiness_marker_path: &str,
   ) -> Result<BootstrapOutputContract, ProviderFlowError> {
-    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
-    self
-      .active()
+    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
+    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
+    adapter
       .wait_for_bootstrap_ready(&token, droplet_id, endpoint_ip, readiness_marker_path)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Bootstrap readiness wait failed in provider adapter.".to_string(),
@@ -525,9 +589,9 @@ impl ProviderRegistry {
     provider_id: &str,
     droplet_id: u64,
   ) -> Result<(), ProviderFlowError> {
-    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
-    self
-      .active()
+    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
+    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
+    adapter
       .delete_droplet(&token, droplet_id)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Droplet deletion through provider adapter failed.".to_string(),
@@ -542,13 +606,44 @@ impl ProviderRegistry {
     provider_id: &str,
     droplet_id: u64,
   ) -> Result<bool, ProviderFlowError> {
-    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
-    self
-      .active()
+    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
+    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
+    adapter
       .droplet_exists(&token, droplet_id)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Droplet existence check through provider adapter failed.".to_string(),
         source,
+      })
+  }
+
+  fn load_provider_and_adapter(
+    &self,
+    db: &Database,
+    provider_id: &str,
+  ) -> Result<(ProviderRecord, &dyn ProviderAdapter), ProviderFlowError> {
+    let provider = db
+      .get_provider(provider_id)
+      .map_err(|source| ProviderFlowError::Database {
+        detail: "Failed loading provider row for adapter dispatch.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| ProviderFlowError::MissingPersistedProvider {
+        provider_id: provider_id.to_string(),
+        detail: "Cannot use provider because no DB row exists for this id.".to_string(),
+      })?;
+
+    let adapter = self.adapter_for_slug(&provider.slug)?;
+    Ok((provider, adapter))
+  }
+
+  fn adapter_for_slug(&self, slug: &str) -> Result<&dyn ProviderAdapter, ProviderFlowError> {
+    self
+      .adapters_by_slug
+      .get(slug)
+      .map(|adapter| adapter.as_ref())
+      .ok_or_else(|| ProviderFlowError::UnsupportedProviderSlug {
+        slug: slug.to_string(),
+        detail: "Add provider adapter support or update provider configuration.".to_string(),
       })
   }
 
@@ -558,27 +653,27 @@ impl ProviderRegistry {
     secure_storage: &SecureStorage,
     provider_id: &str,
   ) -> Result<String, ProviderFlowError> {
-    let provider = db
-      .get_provider(provider_id)
-      .map_err(|source| ProviderFlowError::Database {
-        detail: "Failed loading provider row for token resolution.".to_string(),
-        source,
-      })?
-      .ok_or_else(|| ProviderFlowError::MissingPersistedProvider {
-        provider_id: provider_id.to_string(),
-        detail: "Cannot use provider because no DB row exists for this id.".to_string(),
-      })?;
+    let (provider, _adapter) = self.load_provider_and_adapter(db, provider_id)?;
+    self.resolve_provider_token_for_record(db, secure_storage, &provider)
+  }
 
+  fn resolve_provider_token_for_record(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider: &ProviderRecord,
+  ) -> Result<String, ProviderFlowError> {
     let token_ref = provider
       .token_ref
+      .clone()
       .ok_or_else(|| ProviderFlowError::MissingTokenReference {
-        provider_id: provider_id.to_string(),
+        provider_id: provider.id.clone(),
         detail: "Provider must be initialized with a token before adapter operations."
           .to_string(),
       })?;
 
     let resolved = secure_storage
-      .get_digitalocean_api_token(&token_ref)
+      .get_provider_api_token(&token_ref)
       .map_err(|source| ProviderFlowError::SecretStore {
         detail: "Failed retrieving provider token from secure storage.".to_string(),
         source,
@@ -589,11 +684,11 @@ impl ProviderRegistry {
     }
 
     // Self-heal stale DB pointer so UI can re-register token cleanly.
-    let _ = db.update_provider_token_ref(provider_id, None);
+  let _ = db.update_provider_token_ref(&provider.id, None);
 
     Err(ProviderFlowError::MissingSecret {
         token_ref,
-        detail: "Stored token reference is stale: secure storage entry is missing. Re-save your DigitalOcean token in onboarding Step 2."
+    detail: "Stored token reference is stale: secure storage entry is missing. Re-save your provider token in onboarding Step 2."
           .to_string(),
       })
   }

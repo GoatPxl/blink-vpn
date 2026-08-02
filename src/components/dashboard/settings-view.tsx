@@ -20,6 +20,8 @@ export function SettingsView({
   configuredProvider,
   providerId,
   providerName,
+  providers,
+  onSetActiveProvider,
   apiToken,
   setApiToken,
   onSaveToken,
@@ -45,6 +47,8 @@ export function SettingsView({
   configuredProvider: ProviderRecord | null;
   providerId: string;
   providerName: string;
+  providers: ProviderRecord[];
+  onSetActiveProvider: (providerId: string) => void;
   apiToken: string;
   setApiToken: (value: string) => void;
   onSaveToken: () => Promise<void>;
@@ -55,6 +59,10 @@ export function SettingsView({
   onNavigateToView: (view: AppView) => void;
 }) {
   const dockerBadge = providerAccessBadge(dockerReadinessState);
+  const activeProviderName = configuredProvider?.name ?? providerName;
+  const activeProviderSlug = configuredProvider?.slug ?? "digitalocean";
+  const tokenPlaceholder = activeProviderSlug === "docker" ? "dkr_v1_..." : "dop_v1_...";
+  const tokenLinkLabel = activeProviderSlug === "docker" ? "Docker token format" : "How to create a DO token";
 
   return (
     <PageChrome>
@@ -122,6 +130,46 @@ export function SettingsView({
               <p className="mt-3 text-xs text-[var(--on-surface-variant)]">For security, raw API tokens are never retrievable after save.</p>
             </Card>
 
+            <Card title="Provider Accounts" description="Manage DigitalOcean and Docker provider entries from one place.">
+              <div className="overflow-hidden rounded-xl border border-[color:var(--outline-variant)]">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]">
+                      <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Provider</th>
+                      <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Token</th>
+                      <th className="px-4 py-3 text-right font-medium text-[var(--on-surface-variant)]">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {providers.map((provider) => {
+                      const isActive = provider.id === providerId;
+                      const hasToken = !!provider.token_ref;
+                      return (
+                        <tr key={provider.id} className="border-b border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.01)] last:border-b-0">
+                          <td className="px-4 py-3">
+                            <div className="font-medium text-[var(--on-surface)]">{provider.name}</div>
+                            <div className="mt-1 font-mono text-[12px] text-[var(--on-surface-variant)]">{provider.slug}</div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${hasToken ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>{hasToken ? "Configured" : "Missing"}</span>
+                            <div className="mt-1 text-xs text-[var(--on-surface-variant)]">{maskTokenReference(provider.token_ref)}</div>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {isActive ? (
+                              <span className="inline-flex rounded-full border border-[color:rgba(171,199,255,0.25)] bg-[color:rgba(171,199,255,0.1)] px-2.5 py-1 text-xs text-[var(--primary)]">Active</span>
+                            ) : (
+                              <Button tone="secondary" onClick={() => onSetActiveProvider(provider.id)} disabled={busyAction !== null}>Set Active</Button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="mt-3 text-xs text-[var(--on-surface-variant)]">Token save and validation controls apply to the active provider above.</p>
+            </Card>
+
             {dockerDevEnabled ? (
               <Card title="Docker Service (Development)" description="Development-only mirror checks and faux access validation.">
                 <div className="grid gap-3 md:grid-cols-2">
@@ -146,16 +194,16 @@ export function SettingsView({
             ) : null}
           </div>
 
-          <Card title="Update API Token" description="Paste a new DigitalOcean Personal Access Token.">
+          <Card title="Update Provider Token" description={`Paste a token for ${activeProviderName}.`}>
             <div className="space-y-5">
               <Field label="Personal Access Token">
                 <div className="relative">
-                  <input value={apiToken} onChange={(event) => setApiToken(event.target.value)} placeholder="dop_v1_..." className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 pr-10 text-[var(--on-surface)] outline-none ring-0 placeholder:text-[var(--on-surface-variant)]/50 focus:border-[color:rgba(171,199,255,0.45)]" />
+                  <input value={apiToken} onChange={(event) => setApiToken(event.target.value)} placeholder={tokenPlaceholder} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 pr-10 text-[var(--on-surface)] outline-none ring-0 placeholder:text-[var(--on-surface-variant)]/50 focus:border-[color:rgba(171,199,255,0.45)]" />
                   <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[var(--on-surface-variant)]"><AppIcon name="search" className="h-4 w-4" /></span>
                 </div>
               </Field>
               <div className="flex items-center justify-between text-xs text-[var(--on-surface-variant)]">
-                <a href="#" className="text-[var(--primary)]">How to create a DO token</a>
+                <a href="#" className="text-[var(--primary)]">{tokenLinkLabel}</a>
                 <span>{providerFeedback}</span>
               </div>
               <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
@@ -194,7 +242,7 @@ export function SettingsView({
             </Card>
           ) : null}
         </div>
-        <div className="text-center text-xs text-[var(--on-surface-variant)]">Tokens are encrypted at rest, used only for DigitalOcean API calls from this device, and never transmitted to GoatStare services.</div>
+        <div className="text-center text-xs text-[var(--on-surface-variant)]">Tokens are encrypted at rest, used only for provider API calls from this device, and never transmitted to GoatStare services.</div>
       </div>
     </PageChrome>
   );
