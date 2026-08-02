@@ -1419,6 +1419,10 @@ mod tests {
       })
     }
 
+    fn list_regions(&self, _token: &str) -> Result<Vec<String>, ProviderAdapterError> {
+      Ok(vec!["nyc1".to_string(), "sfo3".to_string()])
+    }
+
     fn list_plan_pricing(
       &self,
       _token: &str,
@@ -1426,8 +1430,8 @@ mod tests {
     ) -> Result<Vec<crate::backend::provider::ProviderPlanPricing>, ProviderAdapterError> {
       Ok(vec![
         crate::backend::provider::ProviderPlanPricing {
-          plan_key: "starter".to_string(),
-          plan_label: "Starter".to_string(),
+          plan_key: "s-1vcpu-1gb".to_string(),
+          plan_label: "Basic".to_string(),
           size_slug: "s-1vcpu-1gb".to_string(),
           region: region.to_string(),
           memory_mb: 1024,
@@ -1441,8 +1445,8 @@ mod tests {
           source_timestamp: "0".to_string(),
         },
         crate::backend::provider::ProviderPlanPricing {
-          plan_key: "balanced".to_string(),
-          plan_label: "Balanced".to_string(),
+          plan_key: "s-2vcpu-2gb".to_string(),
+          plan_label: "Basic".to_string(),
           size_slug: "s-2vcpu-2gb".to_string(),
           region: region.to_string(),
           memory_mb: 2048,
@@ -1559,21 +1563,26 @@ mod tests {
       args: &[&str],
       _stdin: Option<&str>,
     ) -> Result<CommandOutput, CommandExecError> {
-      if program == "wg" && args == ["--version"] {
+      let program_name = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+
+      if program_name == "wg" && args == ["--version"] {
         return Ok(CommandOutput {
           stdout: "wireguard-tools v1".to_string(),
           stderr: String::new(),
         });
       }
 
-      if program == "wireguard" && args == ["/help"] {
+      if program_name == "wireguard" && args == ["/help"] {
         return Ok(CommandOutput {
           stdout: "WireGuard for Windows".to_string(),
           stderr: String::new(),
         });
       }
 
-      if program == "sc" && args.len() >= 2 {
+      if program_name == "sc" && args.len() >= 2 {
         let mut state = self.state.lock().expect("lock must succeed");
         match args[0] {
           "query" => {
@@ -1629,7 +1638,7 @@ mod tests {
         }
       }
 
-      if program == "wireguard" && args.len() == 2 && args[0] == "/uninstalltunnelservice" {
+      if program_name == "wireguard" && args.len() == 2 && args[0] == "/uninstalltunnelservice" {
         let mut state = self.state.lock().expect("lock must succeed");
         state.unregister_calls += 1;
         state.service_exists = false;
@@ -1640,7 +1649,7 @@ mod tests {
         });
       }
 
-      if program == "wg" && args.len() == 3 && args[0] == "show" && args[2] == "dump" {
+      if program_name == "wg" && args.len() == 3 && args[0] == "show" && args[2] == "dump" {
         let state = self.state.lock().expect("lock must succeed");
         if !state.service_exists {
           return Err(CommandExecError::NonZeroExit {
@@ -1661,7 +1670,7 @@ mod tests {
         });
       }
 
-      if program == "wireguard" && args == ["/uninstalltunnelservice", "wg-node-partial"] {
+      if program_name == "wireguard" && args == ["/uninstalltunnelservice", "wg-node-partial"] {
         let mut state = self.state.lock().expect("lock must succeed");
         state.unregister_calls += 1;
         state.service_exists = false;
@@ -1756,7 +1765,7 @@ mod tests {
           provider_id: "provider-1".to_string(),
           node_name: "node-main".to_string(),
           region: "nyc1".to_string(),
-          plan_key: "starter".to_string(),
+          plan_key: "s-1vcpu-1gb".to_string(),
         },
       )
       .expect("create flow should succeed");
@@ -1798,7 +1807,7 @@ mod tests {
         provider_id: "provider-1".to_string(),
         node_name: "node-main".to_string(),
         region: "nyc1".to_string(),
-        plan_key: "starter".to_string(),
+        plan_key: "s-1vcpu-1gb".to_string(),
       },
     );
 
@@ -2040,11 +2049,7 @@ fn select_plan_pricing<'a>(
   pricing: &'a [ProviderPlanPricing],
   plan_key: &str,
 ) -> Option<&'a ProviderPlanPricing> {
-  if let Some(found) = pricing.iter().find(|entry| entry.plan_key == plan_key) {
-    return Some(found);
-  }
-
-  pricing.iter().find(|entry| entry.plan_key == "starter")
+  pricing.iter().find(|entry| entry.plan_key == plan_key)
 }
 
 impl OrchestratorError {

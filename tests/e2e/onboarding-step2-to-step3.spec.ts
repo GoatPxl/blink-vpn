@@ -11,8 +11,14 @@ test.describe("Onboarding Step 2", () => {
         plan_label: string;
         size_slug: string;
         region: string;
+        memory_mb: number;
+        vcpus: number;
+        disk_gb: number;
+        transfer_tb: number;
+        transfer_note: string;
         monthly_usd: number;
         hourly_usd: number;
+        estimated: boolean;
         source_timestamp: string;
       };
 
@@ -24,30 +30,48 @@ test.describe("Onboarding Step 2", () => {
 
       const successPricing: Plan[] = [
         {
-          plan_key: "starter",
-          plan_label: "Starter",
+          plan_key: "s-1vcpu-1gb",
+          plan_label: "Basic",
           size_slug: "s-1vcpu-1gb",
           region: "nyc1",
+          memory_mb: 1024,
+          vcpus: 1,
+          disk_gb: 25,
+          transfer_tb: 1,
+          transfer_note: "Includes up to 1.00 TB transfer before provider overage policies apply.",
           monthly_usd: 6,
           hourly_usd: 0.00893,
+          estimated: false,
           source_timestamp: "2026-08-01T00:00:00Z",
         },
         {
-          plan_key: "balanced",
-          plan_label: "Balanced",
-          size_slug: "s-1vcpu-2gb",
+          plan_key: "s-2vcpu-2gb",
+          plan_label: "Basic",
+          size_slug: "s-2vcpu-2gb",
           region: "nyc1",
+          memory_mb: 2048,
+          vcpus: 2,
+          disk_gb: 60,
+          transfer_tb: 3,
+          transfer_note: "Includes up to 3.00 TB transfer before provider overage policies apply.",
           monthly_usd: 12,
           hourly_usd: 0.01786,
+          estimated: false,
           source_timestamp: "2026-08-01T00:00:00Z",
         },
         {
-          plan_key: "performance",
-          plan_label: "Performance",
-          size_slug: "s-2vcpu-4gb",
+          plan_key: "s-4vcpu-8gb",
+          plan_label: "General Purpose",
+          size_slug: "s-4vcpu-8gb",
           region: "nyc1",
+          memory_mb: 8192,
+          vcpus: 4,
+          disk_gb: 160,
+          transfer_tb: 5,
+          transfer_note: "Includes up to 5.00 TB transfer before provider overage policies apply.",
           monthly_usd: 24,
           hourly_usd: 0.03571,
+          estimated: false,
           source_timestamp: "2026-08-01T00:00:00Z",
         },
       ];
@@ -118,6 +142,10 @@ test.describe("Onboarding Step 2", () => {
               region,
               plans: successPricing.map((plan) => ({ ...plan, region })),
             };
+          }
+
+          if (command === "list_provider_regions") {
+            return ["nyc1", "sfo3", "fra1"];
           }
 
           throw new Error(`Unhandled mocked command: ${command}`);

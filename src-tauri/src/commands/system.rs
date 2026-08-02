@@ -177,6 +177,17 @@ pub fn list_provider_pricing(
 }
 
 #[tauri::command]
+pub fn list_provider_regions(
+  provider_id: String,
+  backend: State<'_, Backend>,
+) -> Result<Vec<String>, String> {
+  backend
+    .provider
+    .list_provider_regions(&backend.db, &backend.secure_storage, &provider_id)
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 pub fn list_vpn_nodes(backend: State<'_, Backend>) -> Result<Vec<VpnNodeRecord>, String> {
   backend
     .orchestrator

@@ -66,11 +66,9 @@ export type LogEntry = {
   tone?: "neutral" | "info" | "warning" | "error" | "success";
 };
 
-export const REGION_OPTIONS = ["nyc1", "sfo3", "fra1"];
 export const DEFAULT_PROVIDER_ID = "provider-1";
 export const DEFAULT_PROVIDER_NAME = "DigitalOcean";
 export const DEFAULT_NODE_REGION = "nyc1";
-export const DEFAULT_PLAN_KEY = "starter";
 export const VIEW_ROUTE: Record<AppView, string> = {
   dashboard: "/dashboard",
   nodes: "/dashboard/nodes",
@@ -83,48 +81,6 @@ export const REGION_LABELS: Record<string, string> = {
   nyc1: "New York",
   sfo3: "San Francisco",
   fra1: "Frankfurt",
-};
-
-export const FALLBACK_PLAN_CATALOG: Record<string, PlanDisplayModel> = {
-  starter: {
-    planLabel: "Starter",
-    sizeSlug: "s-1vcpu-1gb",
-    vcpus: 1,
-    memoryMb: 1024,
-    diskGb: 25,
-    transferNote: "Estimated transfer allowance: about 1.00 TB before provider overage policies apply.",
-    transferTb: 1,
-    hourlyUsd: 0.00893,
-    monthlyUsd: 6,
-    estimated: true,
-    sourceTimestamp: null,
-  },
-  balanced: {
-    planLabel: "Balanced",
-    sizeSlug: "s-2vcpu-2gb",
-    vcpus: 2,
-    memoryMb: 2048,
-    diskGb: 60,
-    transferNote: "Estimated transfer allowance: about 3.00 TB before provider overage policies apply.",
-    transferTb: 3,
-    hourlyUsd: 0.01786,
-    monthlyUsd: 12,
-    estimated: true,
-    sourceTimestamp: null,
-  },
-  performance: {
-    planLabel: "Performance",
-    sizeSlug: "s-4vcpu-8gb",
-    vcpus: 4,
-    memoryMb: 8192,
-    diskGb: 160,
-    transferNote: "Estimated transfer allowance: about 5.00 TB before provider overage policies apply.",
-    transferTb: 5,
-    hourlyUsd: 0.03571,
-    monthlyUsd: 24,
-    estimated: true,
-    sourceTimestamp: null,
-  },
 };
 
 export function statusBadge(status: string) {
@@ -211,19 +167,6 @@ export function planDisplayFromPricing(plan: ProviderPlanPricing): PlanDisplayMo
     estimated: plan.estimated,
     sourceTimestamp: plan.source_timestamp,
   };
-}
-
-export function findFallbackPlan(planKey: string | null | undefined, sizeSlug: string | null | undefined): PlanDisplayModel | null {
-  if (planKey && FALLBACK_PLAN_CATALOG[planKey]) {
-    return FALLBACK_PLAN_CATALOG[planKey];
-  }
-
-  if (sizeSlug) {
-    const matched = Object.values(FALLBACK_PLAN_CATALOG).find((entry) => entry.sizeSlug === sizeSlug);
-    return matched ?? null;
-  }
-
-  return null;
 }
 
 export function providerAccessBadge(state: ProviderAccessState): { label: string; classes: string } {
@@ -346,13 +289,23 @@ export function getNodePricingDisplay(node: VpnNodeRecord, pricingByRegion: Reco
   const regionPlans = pricingByRegion[node.region] ?? [];
   const matched = regionPlans.find((plan) => plan.plan_key === node.plan_key || plan.size_slug === node.size_slug);
   if (matched) return planDisplayFromPricing(matched);
-  const fallback = findFallbackPlan(node.plan_key, node.size_slug);
-  if (!fallback) return null;
+
+  if (!node.plan_key && !node.size_slug && node.price_hourly_usd === null && node.price_monthly_usd === null) {
+    return null;
+  }
+
   return {
-    ...fallback,
-    hourlyUsd: node.price_hourly_usd ?? fallback.hourlyUsd,
-    monthlyUsd: node.price_monthly_usd ?? fallback.monthlyUsd,
-    sourceTimestamp: node.price_source_timestamp ?? fallback.sourceTimestamp,
+    planLabel: node.plan_key ?? node.size_slug ?? "Unknown plan",
+    sizeSlug: node.size_slug ?? node.plan_key ?? "n/a",
+    vcpus: null,
+    memoryMb: null,
+    diskGb: null,
+    transferNote: "Transfer estimate unavailable for this node snapshot.",
+    transferTb: null,
+    hourlyUsd: node.price_hourly_usd,
+    monthlyUsd: node.price_monthly_usd,
+    estimated: true,
+    sourceTimestamp: node.price_source_timestamp,
   };
 }
 

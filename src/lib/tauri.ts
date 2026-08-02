@@ -168,6 +168,10 @@ export async function listProviderPricing(providerId: string, region: string): P
   return invokeCommand<ProviderPricingResponse>("list_provider_pricing", { providerId, region });
 }
 
+export async function listProviderRegions(providerId: string): Promise<string[]> {
+  return invokeCommand<string[]>("list_provider_regions", { providerId });
+}
+
 export async function createVpnNode(params: {
   nodeId: string;
   providerId: string;

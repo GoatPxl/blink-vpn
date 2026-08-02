@@ -76,6 +76,7 @@ pub fn run() {
       commands::system::install_wireguard_with_prerequisites,
       commands::system::check_wireguard_readiness,
       commands::system::register_digitalocean_provider_token,
+      commands::system::list_provider_regions,
       commands::system::list_provider_pricing,
       commands::system::list_providers,
       commands::system::list_vpn_nodes,

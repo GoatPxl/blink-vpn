@@ -9,7 +9,7 @@ test.describe("Dashboard Nodes", () => {
           provider_id: "provider-1",
           name: "Primary Node",
           region: "nyc1",
-          plan_key: "starter",
+          plan_key: "s-1vcpu-1gb",
           size_slug: "s-1vcpu-1gb",
           price_monthly_usd: 6,
           price_hourly_usd: 0.00893,
@@ -36,6 +36,7 @@ test.describe("Dashboard Nodes", () => {
           if (command === "validate_provider_token") {
             throw new Error("DigitalOcean token was rejected. Verify token scope and save a new token in Settings.");
           }
+          if (command === "list_provider_regions") return ["nyc1"];
           if (command === "list_tunnels_for_node") return [];
           if (command === "get_health_panel_data") {
             return { node_id: "node-1", tunnel_id: null, endpoint_ip: "203.0.113.10", handshake_age_seconds: null, rx_bytes: null, tx_bytes: null, external_ipv4: "203.0.113.10", tunnel_status: "ready" };
@@ -64,7 +65,7 @@ test.describe("Dashboard Nodes", () => {
           provider_id: "provider-1",
           name: "Primary Node",
           region: "nyc1",
-          plan_key: "starter",
+          plan_key: "s-1vcpu-1gb",
           size_slug: "s-1vcpu-1gb",
           price_monthly_usd: 6,
           price_hourly_usd: 0.00893,
@@ -82,7 +83,7 @@ test.describe("Dashboard Nodes", () => {
           provider_id: "provider-1",
           name: "Recovery Node",
           region: "sfo3",
-          plan_key: "balanced",
+          plan_key: "s-2vcpu-2gb",
           size_slug: "s-2vcpu-2gb",
           price_monthly_usd: 12,
           price_hourly_usd: 0.01786,
@@ -100,8 +101,8 @@ test.describe("Dashboard Nodes", () => {
       const pricingByRegion = {
         nyc1: [
           {
-            plan_key: "starter",
-            plan_label: "Starter",
+            plan_key: "s-1vcpu-1gb",
+            plan_label: "Basic",
             size_slug: "s-1vcpu-1gb",
             region: "nyc1",
             memory_mb: 1024,
@@ -115,8 +116,8 @@ test.describe("Dashboard Nodes", () => {
             source_timestamp: "2026-08-01T00:00:00Z",
           },
           {
-            plan_key: "balanced",
-            plan_label: "Balanced",
+            plan_key: "s-2vcpu-2gb",
+            plan_label: "Basic",
             size_slug: "s-2vcpu-2gb",
             region: "nyc1",
             memory_mb: 2048,
@@ -132,8 +133,8 @@ test.describe("Dashboard Nodes", () => {
         ],
         sfo3: [
           {
-            plan_key: "balanced",
-            plan_label: "Balanced",
+            plan_key: "s-2vcpu-2gb",
+            plan_label: "Basic",
             size_slug: "s-2vcpu-2gb",
             region: "sfo3",
             memory_mb: 2048,
@@ -161,6 +162,7 @@ test.describe("Dashboard Nodes", () => {
             return [{ id: "provider-1", name: "DigitalOcean", slug: "digitalocean", token_ref: "do-token:provider-1:seeded", created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z" }];
           }
           if (command === "validate_provider_token") return "Provider token valid for account acct-1 (active)";
+          if (command === "list_provider_regions") return Object.keys(pricingByRegion);
           if (command === "list_provider_pricing") return { provider_id: "provider-1", region: String(args?.region ?? "nyc1"), plans: pricingByRegion[String(args?.region ?? "nyc1")] ?? [] };
           if (command === "list_tunnels_for_node") return tunnels.filter((tunnel) => tunnel.node_id === args?.nodeId);
           if (command === "get_health_panel_data") {
@@ -175,7 +177,7 @@ test.describe("Dashboard Nodes", () => {
 
     await page.goto("/dashboard/nodes");
 
-    await expect(page.getByText("Provider access: Ready")).toBeVisible();
+    await expect(page.getByText("Provider access: Ready").first()).toBeVisible();
     await expect(page.getByRole("cell", { name: "1 vCPU · 1 GB · 25 GB" })).toBeVisible();
     await expect(page.getByText("Includes up to 1.00 TB transfer before provider overage policies apply.").first()).toBeVisible();
 

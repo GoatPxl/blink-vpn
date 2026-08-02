@@ -3,15 +3,13 @@
 import { NodesView } from "@/components/dashboard/nodes-view";
 import { useDashboard } from "@/components/dashboard/dashboard-provider";
 import {
-  DEFAULT_NODE_REGION,
-  DEFAULT_PLAN_KEY,
   getNodePricingDisplay,
   planDisplayFromPricing,
   providerAccessBadge,
   type NodeSort,
   VIEW_ROUTE,
 } from "@/components/dashboard/shared";
-import { listProviderPricing, type ProviderPlanPricing } from "@/lib/tauri";
+import { listProviderPricing, listProviderRegions, type ProviderPlanPricing } from "@/lib/tauri";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
@@ -39,11 +37,12 @@ export default function DashboardNodesPage() {
 
   const [nodeId, setNodeId] = useState("node-1");
   const [nodeName, setNodeName] = useState("Primary Node");
-  const [region, setRegion] = useState(DEFAULT_NODE_REGION);
-  const [planKey, setPlanKey] = useState(DEFAULT_PLAN_KEY);
+  const [region, setRegion] = useState("");
+  const [planKey, setPlanKey] = useState("");
   const [nodeStatusFilter, setNodeStatusFilter] = useState<string>("all");
   const [nodeRegionFilter, setNodeRegionFilter] = useState<string>("all");
   const [nodeSort, setNodeSort] = useState<NodeSort>("newest");
+  const [availableRegions, setAvailableRegions] = useState<string[]>([]);
   const [pricingByRegion, setPricingByRegion] = useState<Record<string, ProviderPlanPricing[]>>({});
   const [pricingBusy, setPricingBusy] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
@@ -54,28 +53,48 @@ export default function DashboardNodesPage() {
   useEffect(() => {
     async function loadPricingCatalog() {
       if (!providerId || providerAccessState !== "ready") {
+        setAvailableRegions([]);
         setPricingByRegion({});
-        return;
-      }
-
-      const regions = Array.from(new Set([region, ...nodes.map((node) => node.region)].filter(Boolean)));
-      if (regions.length === 0) {
-        setPricingByRegion({});
-        setPricingError(null);
+        setRegion("");
+        setPlanKey("");
         return;
       }
 
       setPricingBusy(true);
       try {
+        const regions = await listProviderRegions(providerId);
+        if (regions.length === 0) {
+          setAvailableRegions([]);
+          setPricingByRegion({});
+          setRegion("");
+          setPlanKey("");
+          setPricingError("Provider returned no available regions for pricing lookup.");
+          return;
+        }
+
         const pricingEntries = await Promise.all(
           regions.map(async (regionValue) => {
             const response = await listProviderPricing(providerId, regionValue);
             return [regionValue, response.plans] as const;
           }),
         );
-        setPricingByRegion(Object.fromEntries(pricingEntries));
+
+        const nextPricingByRegion = Object.fromEntries(pricingEntries);
+        const nextRegion = regions.includes(region) ? region : regions[0];
+        const nextRegionPlans = nextPricingByRegion[nextRegion] ?? [];
+        const hasCurrentPlan = nextRegionPlans.some((plan) => plan.plan_key === planKey);
+        const nextPlanKey = hasCurrentPlan ? planKey : (nextRegionPlans[0]?.plan_key ?? "");
+
+        setAvailableRegions(regions);
+        setPricingByRegion(nextPricingByRegion);
+        setRegion(nextRegion);
+        setPlanKey(nextPlanKey);
         setPricingError(null);
       } catch (error) {
+        setPricingByRegion({});
+        setAvailableRegions([]);
+        setRegion("");
+        setPlanKey("");
         const message = error instanceof Error ? error.message : String(error);
         setPricingError(message);
       } finally {
@@ -84,7 +103,7 @@ export default function DashboardNodesPage() {
     }
 
     void loadPricingCatalog();
-  }, [nodes, providerAccessState, providerId, region]);
+  }, [planKey, providerAccessState, providerId, region]);
 
   const filteredNodes = useMemo(() => {
     const filtered = nodes.filter((node) => {
@@ -120,11 +139,23 @@ export default function DashboardNodesPage() {
     : "Select a node to inspect health, pricing, and recovery options.";
 
   async function handleCreateNode() {
+    if (!region || !planKey) {
+      return;
+    }
     await createNode({ nodeId, nodeName, region, planKey });
   }
 
   function handleNavigateToView(view: keyof typeof VIEW_ROUTE) {
     router.push(VIEW_ROUTE[view]);
+  }
+
+  function handleRegionChange(nextRegion: string) {
+    setRegion(nextRegion);
+    const nextRegionPlans = pricingByRegion[nextRegion] ?? [];
+    const hasCurrentPlan = nextRegionPlans.some((plan) => plan.plan_key === planKey);
+    if (!hasCurrentPlan) {
+      setPlanKey(nextRegionPlans[0]?.plan_key ?? "");
+    }
   }
 
   return (
@@ -159,7 +190,7 @@ export default function DashboardNodesPage() {
       onDestroyNode={destroyNode}
       onForceCleanupSelectedNode={forceCleanupSelectedNode}
       onNavigateToView={handleNavigateToView}
-      setRegion={setRegion}
+      setRegion={handleRegionChange}
       region={region}
       setPlanKey={setPlanKey}
       planKey={planKey}
@@ -168,15 +199,12 @@ export default function DashboardNodesPage() {
       setNodeName={setNodeName}
       nodeName={nodeName}
       nodeFeedback={pricingError ?? "No node action yet."}
-      providerId={providerId}
       nodesProvisioningDisabled={nodesProvisioningDisabled}
       nodeRegions={nodeRegions}
       nodeStatuses={nodeStatuses}
+      availableRegions={availableRegions}
       pricingCatalog={selectedRegionPricing}
-      setPricingByRegion={setPricingByRegion}
       selectedCreatePlanDisplay={selectedCreatePlanDisplay}
-      selectedCreatePlan={selectedCreatePlan}
-      providerAccessStateValue={providerAccessState}
     />
   );
 }

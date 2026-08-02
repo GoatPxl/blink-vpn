@@ -1,6 +1,7 @@
 pub mod digitalocean;
 pub mod retry;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -22,6 +23,7 @@ pub trait ProviderAdapter: Send + Sync {
   fn provider_name(&self) -> &'static str;
   fn default_regions(&self) -> &'static [&'static str];
   fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError>;
+  fn list_regions(&self, token: &str) -> Result<Vec<String>, ProviderAdapterError>;
   fn list_plan_pricing(
     &self,
     token: &str,
@@ -96,7 +98,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     token: &str,
     region: &str,
   ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError> {
-    let sizes = self
+    let mut sizes = self
       .client
       .list_sizes(token)
       .map_err(|source| ProviderAdapterError::Api {
@@ -104,24 +106,32 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
         source,
       })?;
 
+    sizes.sort_by(|left, right| {
+      left
+        .price_monthly
+        .total_cmp(&right.price_monthly)
+        .then_with(|| left.slug.cmp(&right.slug))
+    });
+
     let fetched_at_epoch_seconds = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
       Ok(value) => value.as_secs().to_string(),
       Err(_) => "0".to_string(),
     };
 
-    let mut pricing = Vec::new();
-    for plan in phase1_plan_catalog() {
-      let maybe_size = sizes.iter().find(|size| {
-        size.slug == plan.size_slug
-          && size.available
-          && size.regions.iter().any(|candidate| candidate == region)
-      });
+    let pricing: Vec<ProviderPlanPricing> = sizes
+      .into_iter()
+      .filter(|size| size.available && size.regions.iter().any(|candidate| candidate == region))
+      .map(|size| {
+        let plan_label = if size.description.trim().is_empty() {
+          size.slug.to_uppercase()
+        } else {
+          size.description.trim().to_string()
+        };
 
-      if let Some(size) = maybe_size {
-        pricing.push(ProviderPlanPricing {
-          plan_key: plan.plan_key.to_string(),
-          plan_label: plan.plan_label.to_string(),
-          size_slug: size.slug.clone(),
+        ProviderPlanPricing {
+          plan_key: size.slug.clone(),
+          plan_label,
+          size_slug: size.slug,
           region: region.to_string(),
           memory_mb: size.memory,
           vcpus: size.vcpus,
@@ -132,11 +142,32 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
           hourly_usd: size.price_hourly,
           estimated: false,
           source_timestamp: fetched_at_epoch_seconds.clone(),
-        });
+        }
+      })
+      .collect();
+
+    Ok(pricing)
+  }
+
+  fn list_regions(&self, token: &str) -> Result<Vec<String>, ProviderAdapterError> {
+    let sizes = self
+      .client
+      .list_sizes(token)
+      .map_err(|source| ProviderAdapterError::Api {
+        detail: "DigitalOcean size catalog request failed.".to_string(),
+        source,
+      })?;
+
+    let mut regions = BTreeSet::new();
+    for size in sizes.into_iter().filter(|size| size.available) {
+      for region in size.regions {
+        if !region.trim().is_empty() {
+          regions.insert(region);
+        }
       }
     }
 
-    Ok(pricing)
+    Ok(regions.into_iter().collect())
   }
 
   fn create_droplet(
@@ -258,32 +289,6 @@ pub struct ProviderPlanPricing {
   pub hourly_usd: f64,
   pub estimated: bool,
   pub source_timestamp: String,
-}
-
-struct Phase1PlanSpec {
-  plan_key: &'static str,
-  plan_label: &'static str,
-  size_slug: &'static str,
-}
-
-fn phase1_plan_catalog() -> &'static [Phase1PlanSpec] {
-  &[
-    Phase1PlanSpec {
-      plan_key: "starter",
-      plan_label: "Starter",
-      size_slug: "s-1vcpu-1gb",
-    },
-    Phase1PlanSpec {
-      plan_key: "balanced",
-      plan_label: "Balanced",
-      size_slug: "s-2vcpu-2gb",
-    },
-    Phase1PlanSpec {
-      plan_key: "performance",
-      plan_label: "Performance",
-      size_slug: "s-4vcpu-8gb",
-    },
-  ]
 }
 
 #[derive(Clone)]
@@ -474,6 +479,22 @@ impl ProviderRegistry {
       .list_plan_pricing(&token, region)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Provider pricing lookup failed through adapter.".to_string(),
+        source,
+      })
+  }
+
+  pub fn list_provider_regions(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+  ) -> Result<Vec<String>, ProviderFlowError> {
+    let token = self.resolve_provider_token(db, secure_storage, provider_id)?;
+    self
+      .active()
+      .list_regions(&token)
+      .map_err(|source| ProviderFlowError::Adapter {
+        detail: "Provider region lookup failed through adapter.".to_string(),
         source,
       })
   }

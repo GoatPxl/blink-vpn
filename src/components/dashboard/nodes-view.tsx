@@ -1,7 +1,7 @@
 "use client";
 
 import { AppIcon, Button, Card, Field, MetricCard, PageChrome, type AppView, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type RecoveryState, type TunnelRecord, type VpnNodeRecord, type NodeSort, type PlanDisplayModel, type HealthPanelData } from "./shared";
-import { formatCreatedTime, formatCurrency, formatMemory, formatRegionLabel, getNodePricingDisplay, planDisplayFromPricing, providerAccessBadge, statusBadge, DEFAULT_PLAN_KEY, REGION_OPTIONS, FALLBACK_PLAN_CATALOG } from "./shared";
+import { formatCreatedTime, formatCurrency, formatMemory, formatRegionLabel, getNodePricingDisplay, statusBadge } from "./shared";
 
 export function NodesView({
   providerAccessState,
@@ -43,15 +43,12 @@ export function NodesView({
   setNodeName,
   nodeName,
   nodeFeedback,
-  providerId,
   nodesProvisioningDisabled,
   nodeRegions,
   nodeStatuses,
+  availableRegions,
   pricingCatalog,
-  setPricingByRegion,
   selectedCreatePlanDisplay,
-  selectedCreatePlan,
-  providerAccessStateValue,
 }: {
   providerAccessState: ProviderAccessState;
   providerBadge: { label: string; classes: string };
@@ -92,15 +89,12 @@ export function NodesView({
   setNodeName: (value: string) => void;
   nodeName: string;
   nodeFeedback: string;
-  providerId: string;
   nodesProvisioningDisabled: boolean;
   nodeRegions: string[];
   nodeStatuses: string[];
+  availableRegions: string[];
   pricingCatalog: ProviderPlanPricing[];
-  setPricingByRegion: (value: Record<string, ProviderPlanPricing[]>) => void;
   selectedCreatePlanDisplay: PlanDisplayModel | null;
-  selectedCreatePlan: ProviderPlanPricing | null;
-  providerAccessStateValue: ProviderAccessState;
 }) {
   return (
     <PageChrome>
@@ -272,28 +266,15 @@ export function NodesView({
 
               <Field label="Region" hint="Pricing can vary by region and provider updates.">
                 <select value={region} onChange={(event) => setRegion(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0">
-                  {REGION_OPTIONS.map((option) => <option key={option} value={option}>{formatRegionLabel(option)}</option>)}
+                  {availableRegions.length === 0 ? <option value="">No regions available</option> : null}
+                  {availableRegions.map((option) => <option key={option} value={option}>{formatRegionLabel(option)}</option>)}
                 </select>
               </Field>
 
               <div className="space-y-3">
                 <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Size / Plan</div>
                 <div className="grid gap-3">
-                  {(pricingCatalog.length > 0 ? pricingCatalog : Object.entries(FALLBACK_PLAN_CATALOG).map(([planSlug, plan]) => ({
-                    plan_key: planSlug,
-                    plan_label: plan.planLabel,
-                    size_slug: plan.sizeSlug,
-                    region,
-                    memory_mb: plan.memoryMb ?? 0,
-                    vcpus: plan.vcpus ?? 0,
-                    disk_gb: plan.diskGb ?? 0,
-                    transfer_tb: plan.transferTb ?? 0,
-                    transfer_note: plan.transferNote,
-                    monthly_usd: plan.monthlyUsd ?? 0,
-                    hourly_usd: plan.hourlyUsd ?? 0,
-                    estimated: true,
-                    source_timestamp: plan.sourceTimestamp ?? "",
-                  }))).map((plan) => {
+                  {pricingCatalog.map((plan) => {
                     const isSelected = plan.plan_key === planKey;
                     return (
                       <button key={`${plan.region}-${plan.plan_key}`} type="button" onClick={() => setPlanKey(plan.plan_key)} className={`rounded-[18px] border px-4 py-4 text-left transition-colors ${isSelected ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] hover:bg-[color:rgba(255,255,255,0.04)]"}`}>
@@ -312,6 +293,11 @@ export function NodesView({
                       </button>
                     );
                   })}
+                  {pricingCatalog.length === 0 ? (
+                    <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">
+                      No live plans are available for this region yet. Refresh pricing or choose another region.
+                    </div>
+                  ) : null}
                 </div>
               </div>
 
@@ -333,7 +319,7 @@ export function NodesView({
 
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <Button tone="secondary" onClick={() => onNavigateToView("settings")}>Settings</Button>
-                <Button onClick={() => void onCreateNode()} disabled={busyAction !== null || nodesProvisioningDisabled || !nodeId.trim() || !nodeName.trim()}>{busyAction === "create-node" ? "Provisioning..." : "Create Node"}</Button>
+                <Button onClick={() => void onCreateNode()} disabled={busyAction !== null || nodesProvisioningDisabled || !nodeId.trim() || !nodeName.trim() || !region || !planKey || pricingCatalog.length === 0}>{busyAction === "create-node" ? "Provisioning..." : "Create Node"}</Button>
               </div>
             </div>
           </Card>

@@ -7,6 +7,7 @@ import {
   installWireGuardWithPrerequisites,
   listProviders,
   listProviderPricing,
+  listProviderRegions,
   listVpnNodes,
   registerProviderToken,
   validateProviderToken,
@@ -22,18 +23,6 @@ import {
   type OnboardingState,
 } from "@/lib/onboarding-state";
 import { runWireGuardReadinessCheck } from "@/lib/wireguard-readiness";
-
-const REGION_OPTIONS = [
-  { value: "nyc1", label: "New York (nyc1)", note: "Balanced latency for US East." },
-  { value: "sfo3", label: "San Francisco (sfo3)", note: "Good for US West traffic." },
-  { value: "fra1", label: "Frankfurt (fra1)", note: "Best for central EU." },
-];
-
-const PLAN_OPTIONS = [
-  { value: "starter", label: "Starter", helper: "Lowest monthly cost, moderate performance." },
-  { value: "balanced", label: "Balanced", helper: "Recommended default for most use cases." },
-  { value: "performance", label: "Performance", helper: "Higher throughput, higher cost." },
-];
 
 function stepTitle(step: number): string {
   if (step === 1) return "WireGuard Readiness";
@@ -61,6 +50,7 @@ export function OnboardingWizard() {
 
   const [pricingBusy, setPricingBusy] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
+  const [availableRegions, setAvailableRegions] = useState<string[]>([]);
   const [livePricing, setLivePricing] = useState<ProviderPlanPricing[]>([]);
 
   const [provisionBusy, setProvisionBusy] = useState(false);
@@ -72,6 +62,7 @@ export function OnboardingWizard() {
 
   useEffect(() => {
     const loaded = loadOnboardingState();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setState(loaded);
     setStep(Math.min(Math.max(loaded.currentStep, 1), 5));
     setIsHydrated(true);
@@ -188,12 +179,30 @@ export function OnboardingWizard() {
     setPricingBusy(true);
     setPricingError(null);
     try {
-      const response = await listProviderPricing(state.providerId, state.region);
+      const regions = await listProviderRegions(state.providerId);
+      setAvailableRegions(regions);
+      if (regions.length === 0) {
+        setLivePricing([]);
+        setState((current) => ({ ...current, region: "", plan: "" }));
+        setPricingError("No available regions were returned by the provider API.");
+        return;
+      }
+
+      const selectedRegion = regions.includes(state.region) ? state.region : regions[0];
+      const response = await listProviderPricing(state.providerId, selectedRegion);
       setLivePricing(response.plans);
+      const hasSelectedPlan = response.plans.some((entry) => entry.plan_key === state.plan);
+      const nextPlan = hasSelectedPlan ? state.plan : (response.plans[0]?.plan_key ?? "");
+      setState((current) => ({
+        ...current,
+        region: selectedRegion,
+        plan: nextPlan,
+      }));
       if (response.plans.length === 0) {
         setPricingError("No supported plan pricing is currently available for the selected region.");
       }
     } catch (error) {
+      setAvailableRegions([]);
       setLivePricing([]);
       const message = error instanceof Error ? error.message : String(error);
       const isTokenRecoveryNeeded = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
@@ -534,43 +543,37 @@ export function OnboardingWizard() {
               <div>
                 <h2 className="text-sm font-medium text-[var(--on-surface)]">Region</h2>
                 <div className="mt-3 grid gap-3 md:grid-cols-3">
-                  {REGION_OPTIONS.map((option) => (
+                  {availableRegions.map((regionValue) => (
                     <button
-                      key={option.value}
+                      key={regionValue}
                       type="button"
-                      onClick={() => setState((current) => ({ ...current, region: option.value }))}
-                      className={`rounded-xl border px-4 py-3 text-left ${state.region === option.value ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}
+                      onClick={() => setState((current) => ({ ...current, region: regionValue, plan: "" }))}
+                      className={`rounded-xl border px-4 py-3 text-left ${state.region === regionValue ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}
                     >
-                      <div className="font-medium text-[var(--on-surface)]">{option.label}</div>
-                      <div className="mt-1 text-xs text-[var(--on-surface-variant)]">{option.note}</div>
+                      <div className="font-medium text-[var(--on-surface)]">{regionValue}</div>
+                      <div className="mt-1 text-xs text-[var(--on-surface-variant)]">Live region option from provider API.</div>
                     </button>
                   ))}
+                  {availableRegions.length === 0 ? <div className="rounded-xl border border-dashed border-[color:var(--outline-variant)] px-4 py-3 text-xs text-[var(--on-surface-variant)]">No regions available yet.</div> : null}
                 </div>
               </div>
               <div>
                 <h2 className="text-sm font-medium text-[var(--on-surface)]">Plan</h2>
                 <div className="mt-3 grid gap-3 md:grid-cols-3">
-                  {PLAN_OPTIONS.map((plan) => (
-                    (() => {
-                      const planPricing = livePricing.find((entry) => entry.plan_key === plan.value);
-                      return (
-                        <button
-                          key={plan.value}
-                          type="button"
-                          onClick={() => setState((current) => ({ ...current, plan: plan.value }))}
-                          className={`rounded-xl border px-4 py-3 text-left ${state.plan === plan.value ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}
-                        >
-                          <div className="font-medium text-[var(--on-surface)]">{plan.label}</div>
-                          <div className="mt-1 text-xs text-[var(--on-surface-variant)]">{plan.helper}</div>
-                          {planPricing ? (
-                            <div className="mt-2 text-xs text-[var(--secondary)]">
-                              ${planPricing.monthly_usd.toFixed(2)}/mo
-                            </div>
-                          ) : null}
-                        </button>
-                      );
-                    })()
+                  {livePricing.map((plan) => (
+                    <button
+                      key={plan.plan_key}
+                      type="button"
+                      onClick={() => setState((current) => ({ ...current, plan: plan.plan_key }))}
+                      className={`rounded-xl border px-4 py-3 text-left ${state.plan === plan.plan_key ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}
+                    >
+                      <div className="font-medium text-[var(--on-surface)]">{plan.plan_label}</div>
+                      <div className="mt-1 font-mono text-xs text-[var(--on-surface-variant)]">{plan.size_slug}</div>
+                      <div className="mt-2 text-xs text-[var(--on-surface-variant)]">{plan.vcpus} vCPU · {plan.memory_mb} MB · {plan.disk_gb} GB disk</div>
+                      <div className="mt-2 text-xs text-[var(--secondary)]">${plan.monthly_usd.toFixed(2)}/mo</div>
+                    </button>
                   ))}
+                  {livePricing.length === 0 ? <div className="rounded-xl border border-dashed border-[color:var(--outline-variant)] px-4 py-3 text-xs text-[var(--on-surface-variant)]">No plans available for this region.</div> : null}
                 </div>
               </div>
               <div className="rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3 text-sm text-[var(--on-surface-variant)]">
