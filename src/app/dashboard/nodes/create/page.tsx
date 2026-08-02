@@ -9,7 +9,7 @@ import {
 } from "@/components/dashboard/shared";
 import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 export default function DashboardNodesCreatePage() {
   const router = useRouter();
@@ -40,12 +40,20 @@ export default function DashboardNodesCreatePage() {
     let active = true;
 
     async function loadPricingCatalog() {
-      if (!providerId || providerAccessState !== "ready") {
+      const canLoadDockerPlanningCatalog = configuredProvider?.slug === "docker" && !!configuredProvider.token_ref;
+      const canLoadPricingCatalog = !!providerId && (providerAccessState === "ready" || canLoadDockerPlanningCatalog);
+
+      if (!canLoadPricingCatalog) {
         if (active) {
           setAvailableRegions([]);
           setPricingByRegion({});
           setRegion("");
           setPlanKey("");
+          setPricingError(
+            providerAccessState === "missing" || providerAccessState === "invalid"
+              ? providerStatusMessage
+              : null,
+          );
         }
         return;
       }
@@ -79,7 +87,7 @@ export default function DashboardNodesCreatePage() {
         setPricingByRegion(nextPricingByRegion);
         setRegion(nextRegion);
         setPlanKey(nextPlanKey);
-        setPricingError(null);
+        setPricingError(providerAccessState === "ready" ? null : providerStatusMessage);
       } catch (error) {
         if (!active) {
           return;
@@ -101,7 +109,7 @@ export default function DashboardNodesCreatePage() {
     return () => {
       active = false;
     };
-  }, [providerAccessState, providerId]);
+  }, [configuredProvider, providerAccessState, providerId, providerStatusMessage, region, planKey]);
 
   const selectedRegionPricing = pricingByRegion[region] ?? [];
   const selectedCreatePlan = selectedRegionPricing.find((plan) => plan.plan_key === planKey) ?? null;
@@ -144,7 +152,7 @@ export default function DashboardNodesCreatePage() {
       setNodeId={setNodeId}
       setNodeName={setNodeName}
       nodeName={nodeName}
-      nodeFeedback={pricingError ?? "No node action yet."}
+      nodeFeedback={pricingError ?? (providerAccessState !== "ready" ? providerStatusMessage : "No node action yet.")}
       nodesProvisioningDisabled={providerAccessState !== "ready"}
       availableRegions={availableRegions}
       pricingCatalog={selectedRegionPricing}

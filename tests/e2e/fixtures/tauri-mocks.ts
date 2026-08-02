@@ -825,6 +825,159 @@ export async function installDockerNodesCreateMock(page: Page): Promise<void> {
   });
 }
 
+export async function installDockerNodesCatalogBlockedProvisioningMock(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    type TauriArgs = Record<string, unknown> | undefined;
+    type ProviderRecord = {
+      id: string;
+      name: string;
+      slug: string;
+      status: "active" | "suspended";
+      token_ref: string | null;
+      created_at: string;
+      updated_at: string;
+    };
+
+    const providers: ProviderRecord[] = [
+      {
+        id: "provider-1",
+        name: "DigitalOcean",
+        slug: "digitalocean",
+        status: "active",
+        token_ref: "do-token:provider-1:seeded",
+        created_at: "2026-08-01T00:00:00Z",
+        updated_at: "2026-08-01T00:00:00Z",
+      },
+      {
+        id: "provider-docker",
+        name: "Docker",
+        slug: "docker",
+        status: "active",
+        token_ref: "do-token:provider-docker:seeded",
+        created_at: "2026-08-01T00:01:00Z",
+        updated_at: "2026-08-01T00:01:00Z",
+      },
+    ];
+
+    const pricingByProviderRegion: Record<string, Record<string, Array<Record<string, unknown>>>> = {
+      "provider-docker": {
+        "docker-local": [
+          {
+            plan_key: "docker-small",
+            plan_label: "Docker Small",
+            size_slug: "docker-small",
+            region: "docker-local",
+            memory_mb: 1024,
+            vcpus: 1,
+            disk_gb: 25,
+            transfer_tb: 1,
+            transfer_note: "Synthetic plan estimate for local Docker runtime: up to 1.00 TB transfer equivalent.",
+            monthly_usd: 6,
+            hourly_usd: 0.009,
+            estimated: true,
+            source_timestamp: "2026-08-01T00:00:00Z",
+          },
+          {
+            plan_key: "docker-medium",
+            plan_label: "Docker Medium",
+            size_slug: "docker-medium",
+            region: "docker-local",
+            memory_mb: 4096,
+            vcpus: 2,
+            disk_gb: 80,
+            transfer_tb: 2,
+            transfer_note: "Synthetic plan estimate for local Docker runtime: up to 2.00 TB transfer equivalent.",
+            monthly_usd: 24,
+            hourly_usd: 0.036,
+            estimated: true,
+            source_timestamp: "2026-08-01T00:00:00Z",
+          },
+        ],
+      },
+    };
+
+    const commandCounts = {
+      list_provider_regions: 0,
+      list_provider_pricing: 0,
+      create_vpn_node_to_ready: 0,
+    };
+
+    const internals = {
+      invoke: async (command: string, args?: TauriArgs) => {
+        if (command === "list_vpn_nodes") {
+          return [];
+        }
+
+        if (command === "get_diagnostics_bundle") {
+          return {
+            generated_at: "2026-08-01T00:00:00Z",
+            providers: providers.map((provider) => ({ ...provider, token_ref: null })),
+            nodes: [],
+            tunnels: [],
+            redacted_notes: ["token_ref removed from diagnostics bundle"],
+          };
+        }
+
+        if (command === "list_providers") {
+          return providers.map((provider) => ({ ...provider }));
+        }
+
+        if (command === "validate_provider_token") {
+          const providerId = String(args?.providerId ?? "provider-1");
+          if (providerId === "provider-docker") {
+            throw new Error("Docker CLI is installed, but daemon is not reachable. Start Docker Desktop and retry readiness validation.");
+          }
+          return `Provider token valid for account ${providerId} (active)`;
+        }
+
+        if (command === "list_provider_regions") {
+          commandCounts.list_provider_regions += 1;
+          const providerId = String(args?.providerId ?? "provider-docker");
+          return Object.keys(pricingByProviderRegion[providerId] ?? {});
+        }
+
+        if (command === "list_provider_pricing") {
+          commandCounts.list_provider_pricing += 1;
+          const providerId = String(args?.providerId ?? "provider-docker");
+          const region = String(args?.region ?? "docker-local");
+          return {
+            provider_id: providerId,
+            region,
+            plans: (pricingByProviderRegion[providerId] ?? {})[region] ?? [],
+          };
+        }
+
+        if (command === "create_vpn_node_to_ready") {
+          commandCounts.create_vpn_node_to_ready += 1;
+          throw new Error("Provisioning should stay disabled while Docker readiness is invalid.");
+        }
+
+        if (command === "list_tunnels_for_node") {
+          return [];
+        }
+
+        if (command === "get_health_panel_data") {
+          return {
+            node_id: String(args?.nodeId ?? ""),
+            tunnel_id: null,
+            endpoint_ip: null,
+            handshake_age_seconds: null,
+            rx_bytes: null,
+            tx_bytes: null,
+            external_ipv4: null,
+            tunnel_status: null,
+          };
+        }
+
+        throw new Error(`Unhandled mocked command: ${command}`);
+      },
+    };
+
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = internals;
+    (window as unknown as { __TEST_DOCKER_CREATE_COUNTS__?: typeof commandCounts }).__TEST_DOCKER_CREATE_COUNTS__ = commandCounts;
+  });
+}
+
 export async function installDockerTunnelLifecycleMock(page: Page): Promise<void> {
   await page.addInitScript(() => {
     type TauriArgs = Record<string, unknown> | undefined;

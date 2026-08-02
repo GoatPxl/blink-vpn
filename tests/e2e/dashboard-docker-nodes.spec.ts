@@ -1,5 +1,8 @@
 import { expect, test } from "@playwright/test";
-import { installDockerNodesCreateMock } from "./fixtures/tauri-mocks";
+import {
+  installDockerNodesCatalogBlockedProvisioningMock,
+  installDockerNodesCreateMock,
+} from "./fixtures/tauri-mocks";
 
 test.describe("Dashboard Docker nodes create", () => {
   test.skip(
@@ -72,5 +75,38 @@ test.describe("Dashboard Docker nodes create", () => {
     expect(commandCounts?.create_vpn_node_to_ready).toBe(1);
     expect(commandCounts?.list_provider_regions).toBeGreaterThanOrEqual(1);
     expect(commandCounts?.list_provider_pricing).toBeGreaterThanOrEqual(1);
+  });
+
+  test("keeps Docker planning catalog visible when readiness blocks provisioning", async ({ page }) => {
+    await installDockerNodesCatalogBlockedProvisioningMock(page);
+
+    await page.goto("/dashboard/nodes/create");
+
+    const providerSelect = page.locator("select").first();
+    const regionSelect = page.locator("label:has-text('Region') select");
+
+    await providerSelect.selectOption("provider-docker");
+
+    await expect(page.getByText("Provisioning is disabled until provider access is healthy.")).toBeVisible();
+    await expect(page.getByText(/daemon is not reachable/i)).toBeVisible();
+    await expect(regionSelect).toHaveValue("docker-local");
+    await expect(page.getByRole("button", { name: /Docker Small/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Docker Medium/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create Node", exact: true })).toBeDisabled();
+
+    const commandCounts = await page.evaluate(() => {
+      return (window as unknown as {
+        __TEST_DOCKER_CREATE_COUNTS__?: {
+          list_provider_regions: number;
+          list_provider_pricing: number;
+          create_vpn_node_to_ready: number;
+        };
+      }).__TEST_DOCKER_CREATE_COUNTS__ ?? null;
+    });
+
+    expect(commandCounts).not.toBeNull();
+    expect(commandCounts?.list_provider_regions).toBeGreaterThanOrEqual(1);
+    expect(commandCounts?.list_provider_pricing).toBeGreaterThanOrEqual(1);
+    expect(commandCounts?.create_vpn_node_to_ready).toBe(0);
   });
 });

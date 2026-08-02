@@ -194,7 +194,6 @@ impl super::ProviderAdapter for DockerProviderAdapter {
 
   fn list_regions(&self, token: &str) -> Result<Vec<String>, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
-    let _ = Self::ensure_daemon_available()?;
     Ok(vec![DOCKER_REGION.to_string()])
   }
 
@@ -204,7 +203,6 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     region: &str,
   ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
-    let _ = Self::ensure_daemon_available()?;
 
     if region.trim() != DOCKER_REGION {
       return Ok(Vec::new());
@@ -347,5 +345,33 @@ impl super::ProviderAdapter for DockerProviderAdapter {
 
     let _ = Self::run_docker(&args, "remove Docker compute container")?;
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{DockerProviderAdapter, DOCKER_REGION};
+  use crate::backend::provider::ProviderAdapter;
+
+  #[test]
+  fn lists_static_region_without_docker_daemon() {
+    let adapter = DockerProviderAdapter::new();
+
+    let result = adapter.list_regions("docker_dev_token").expect("docker region catalog should be static");
+
+    assert_eq!(result, vec![DOCKER_REGION.to_string()]);
+  }
+
+  #[test]
+  fn lists_static_plan_pricing_without_docker_daemon() {
+    let adapter = DockerProviderAdapter::new();
+
+    let result = adapter
+      .list_plan_pricing("docker_dev_token", DOCKER_REGION)
+      .expect("docker plan catalog should be static");
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].region, DOCKER_REGION);
+    assert!(result.iter().all(|plan| plan.estimated));
   }
 }
