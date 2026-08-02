@@ -582,6 +582,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     setBusyAction("suspend-provider");
     try {
       await suspendProviderCommand(provider.id);
+      setProviders((current) => current.map((item) => (
+        item.id === provider.id
+          ? { ...item, status: "suspended" }
+          : item
+      )));
       setRecovery(null);
       pushToast("warning", "Provider suspended", `${provider.name} is now suspended.`);
       await loadDashboard();
@@ -610,6 +615,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     setBusyAction("delete-provider");
     try {
       await deleteProviderCommand(provider.id);
+      setProviders((current) => current.filter((item) => item.id !== provider.id));
       setRecovery(null);
       pushToast("warning", "Provider deleted", `${provider.name} has been removed.`);
       await loadDashboard();

@@ -180,7 +180,11 @@ export function SettingsView({
                                 }}
                                 disabled={busyAction !== null || provider.status === "suspended"}
                               >
-                                {provider.status === "suspended" ? "Suspended" : "Suspend"}
+                                {busyAction === "suspend-provider"
+                                  ? "Suspending"
+                                  : provider.status === "suspended"
+                                    ? "Suspended"
+                                    : "Suspend"}
                               </Button>
                               <Button
                                 tone="danger"
@@ -191,7 +195,7 @@ export function SettingsView({
                                 }}
                                 disabled={busyAction !== null || !canDeleteProviders}
                               >
-                                Delete
+                                {busyAction === "delete-provider" ? "Deleting" : "Delete"}
                               </Button>
                             </div>
                           </td>
