@@ -1,6 +1,8 @@
 use thiserror::Error;
 use uuid::Uuid;
 use serde::Serialize;
+use std::net::IpAddr;
+use std::time::Duration;
 
 use crate::backend::bootstrap::{
   Bootstrap, BootstrapError, BootstrapParams, DEFAULT_CLIENT_CIDR, DEFAULT_INTERFACE_NAME,
@@ -1059,6 +1061,18 @@ impl Orchestrator {
       None
     };
 
+    let runtime_status = runtime.as_ref().map(|value| match value.state {
+      crate::backend::wireguard::TunnelServiceState::Running => TunnelStatus::Connected,
+      crate::backend::wireguard::TunnelServiceState::Stopped => TunnelStatus::Disconnected,
+      crate::backend::wireguard::TunnelServiceState::Unknown => TunnelStatus::Error,
+    });
+
+    let external_ipv4 = if matches!(runtime_status, Some(TunnelStatus::Connected)) {
+      probe_external_ipv4().or_else(|| node.public_ipv4.clone())
+    } else {
+      node.public_ipv4.clone()
+    };
+
     Ok(HealthSummary {
       node_id: node.id,
       tunnel_id: selected_tunnel.as_ref().map(|tunnel| tunnel.id.clone()),
@@ -1066,8 +1080,8 @@ impl Orchestrator {
       handshake_age_seconds: runtime.as_ref().and_then(|value| value.last_handshake_age_seconds),
       rx_bytes: runtime.as_ref().and_then(|value| value.rx_bytes),
       tx_bytes: runtime.as_ref().and_then(|value| value.tx_bytes),
-      external_ipv4: node.public_ipv4,
-      tunnel_status: selected_tunnel.map(|tunnel| tunnel.status),
+      external_ipv4,
+      tunnel_status: runtime_status.or_else(|| selected_tunnel.map(|tunnel| tunnel.status)),
     })
   }
 
@@ -2098,4 +2112,43 @@ impl OrchestratorError {
       },
     }
   }
+}
+
+fn probe_external_ipv4() -> Option<String> {
+  let client = reqwest::blocking::Client::builder()
+    .timeout(Duration::from_secs(3))
+    .build()
+    .ok()?;
+
+  let endpoints = [
+    "https://api.ipify.org",
+    "https://ipv4.icanhazip.com",
+  ];
+
+  for endpoint in endpoints {
+    let response = match client.get(endpoint).send() {
+      Ok(value) => value,
+      Err(_) => continue,
+    };
+    if !response.status().is_success() {
+      continue;
+    }
+
+    let body = match response.text() {
+      Ok(value) => value,
+      Err(_) => continue,
+    };
+    let candidate = body.lines().next().unwrap_or_default().trim();
+    if candidate.is_empty() {
+      continue;
+    }
+
+    if let Ok(parsed) = candidate.parse::<IpAddr>() {
+      if parsed.is_ipv4() {
+        return Some(parsed.to_string());
+      }
+    }
+  }
+
+  None
 }

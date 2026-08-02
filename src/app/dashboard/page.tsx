@@ -9,12 +9,14 @@ export default function DashboardPage() {
     busyAction,
     canConnect,
     connectedTunnel,
+    connectPrimary,
     health,
     loadDashboard,
     noServerConfigured,
     recovery,
     connectTunnel,
     disconnectTunnel,
+    throughputSamples,
   } = useDashboard();
 
   return (
@@ -25,8 +27,10 @@ export default function DashboardPage() {
       connectedTunnel={connectedTunnel}
       health={health}
       canConnect={canConnect}
+      throughputSamples={throughputSamples}
       recovery={recovery}
       busyAction={busyAction}
+      onConnectPrimary={connectPrimary}
       onConnectTunnel={connectTunnel}
       onDisconnectTunnel={disconnectTunnel}
       onRefresh={loadDashboard}

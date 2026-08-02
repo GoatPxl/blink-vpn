@@ -3,6 +3,7 @@
 import {
   checkDockerReadiness,
   connectTunnel as connectTunnelCommand,
+  createAndActivateClientTunnel,
   deleteProvider as deleteProviderCommand,
   createVpnNode,
   destroyVpnNode,
@@ -52,6 +53,12 @@ type CreateNodeInput = {
   planKey: string;
 };
 
+type ThroughputSample = {
+  timestamp: number;
+  downloadBytesPerSecond: number;
+  uploadBytesPerSecond: number;
+};
+
 type DashboardContextValue = {
   busyAction: DashboardBusyAction;
   toasts: Toast[];
@@ -85,6 +92,7 @@ type DashboardContextValue = {
   connectedTunnel: TunnelRecord | null;
   noServerConfigured: boolean;
   canConnect: boolean;
+  throughputSamples: ThroughputSample[];
   loadDashboard: (preferredSelectedNodeId?: string) => Promise<void>;
   refreshHealth: () => Promise<void>;
   saveToken: (apiToken: string) => Promise<void>;
@@ -95,6 +103,7 @@ type DashboardContextValue = {
   saveDockerFauxToken: (value: string) => Promise<void>;
   validateDockerReadiness: (options?: { silent?: boolean }) => Promise<void>;
   createNode: (input: CreateNodeInput) => Promise<void>;
+  connectPrimary: () => Promise<void>;
   connectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   disconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   destroyNode: (node: VpnNodeRecord) => Promise<void>;
@@ -118,6 +127,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [selectedTunnelId, setSelectedTunnelId] = useState("");
   const [health, setHealth] = useState<HealthPanelData | null>(null);
+  const [throughputSamples, setThroughputSamples] = useState<ThroughputSample[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsBundle | null>(null);
   const [diagnosticsExportPath, setDiagnosticsExportPath] = useState("No export yet.");
   const [providerId, setProviderId] = useState(DEFAULT_PROVIDER_ID);
@@ -151,8 +161,19 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const providerIdRef = useRef(providerId);
   const selectedNodeIdRef = useRef(selectedNodeId);
   const selectedTunnelIdRef = useRef(selectedTunnelId);
+  const lastTrafficSampleRef = useRef<{
+    timestamp: number;
+    nodeId: string;
+    tunnelId: string;
+    rxBytes: number;
+    txBytes: number;
+  } | null>(null);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
+  const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
+  const noServerConfigured = nodes.length === 0;
+  const canConnect = !!activeNode && (!connectedTunnel || connectedTunnel.status.toLowerCase() !== "connected");
 
   useEffect(() => {
     providerIdRef.current = providerId;
@@ -179,6 +200,53 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     );
     return message;
   }, [pushToast]);
+
+  const clearThroughputSamples = useCallback(() => {
+    lastTrafficSampleRef.current = null;
+    setThroughputSamples([]);
+  }, []);
+
+  const recordThroughputSample = useCallback((snapshot: HealthPanelData) => {
+    const now = Date.now();
+    const nodeId = snapshot.node_id;
+    const tunnelId = snapshot.tunnel_id ?? "";
+    const rxBytes = snapshot.rx_bytes ?? 0;
+    const txBytes = snapshot.tx_bytes ?? 0;
+    const previous = lastTrafficSampleRef.current;
+
+    let downloadBytesPerSecond = 0;
+    let uploadBytesPerSecond = 0;
+
+    if (
+      previous
+      && previous.nodeId === nodeId
+      && previous.tunnelId === tunnelId
+      && now > previous.timestamp
+    ) {
+      const elapsedSeconds = (now - previous.timestamp) / 1000;
+      if (elapsedSeconds > 0) {
+        downloadBytesPerSecond = Math.max(0, (rxBytes - previous.rxBytes) / elapsedSeconds);
+        uploadBytesPerSecond = Math.max(0, (txBytes - previous.txBytes) / elapsedSeconds);
+      }
+    }
+
+    lastTrafficSampleRef.current = {
+      timestamp: now,
+      nodeId,
+      tunnelId,
+      rxBytes,
+      txBytes,
+    };
+
+    setThroughputSamples((current) => [
+      ...current,
+      {
+        timestamp: now,
+        downloadBytesPerSecond,
+        uploadBytesPerSecond,
+      },
+    ].slice(-12));
+  }, []);
 
   const refreshProviderAccessStatus = useCallback(async (provider: ProviderRecord | null) => {
     const providerLabel = provider?.name ?? "provider";
@@ -261,6 +329,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setTunnels([]);
       setSelectedTunnelId("");
       setHealth(null);
+      clearThroughputSamples();
       return;
     }
 
@@ -273,28 +342,50 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         setSelectedTunnelId(selectedExists ? selectedTunnelIdRef.current : loadedTunnels[0].id);
       } else {
         setSelectedTunnelId("");
+        clearThroughputSamples();
       }
 
-      setHealth(await getHealthPanelData(nodeIdValue, loadedTunnels[0]?.id ?? null));
+      const nextHealth = await getHealthPanelData(nodeIdValue, loadedTunnels[0]?.id ?? null);
+      setHealth(nextHealth);
+      if (nextHealth.tunnel_id) {
+        recordThroughputSample(nextHealth);
+      } else {
+        clearThroughputSamples();
+      }
     } catch (error) {
       handleError(error);
     }
-  }, [handleError]);
+  }, [clearThroughputSamples, handleError, recordThroughputSample]);
 
-  const refreshHealth = useCallback(async () => {
+  const refreshHealthSnapshot = useCallback(async (silent = false) => {
     if (!selectedNodeIdRef.current) {
       return;
     }
 
-    setBusyAction("refresh-health");
-    try {
-      setHealth(await getHealthPanelData(selectedNodeIdRef.current, selectedTunnelIdRef.current || null));
-    } catch (error) {
-      handleError(error);
-    } finally {
-      setBusyAction(null);
+    if (!silent) {
+      setBusyAction("refresh-health");
     }
-  }, [handleError]);
+
+    try {
+      const snapshot = await getHealthPanelData(selectedNodeIdRef.current, selectedTunnelIdRef.current || null);
+      setHealth(snapshot);
+      if (snapshot.tunnel_id) {
+        recordThroughputSample(snapshot);
+      }
+    } catch (error) {
+      if (!silent) {
+        handleError(error);
+      }
+    } finally {
+      if (!silent) {
+        setBusyAction(null);
+      }
+    }
+  }, [handleError, recordThroughputSample]);
+
+  const refreshHealth = useCallback(async () => {
+    await refreshHealthSnapshot(false);
+  }, [refreshHealthSnapshot]);
 
   const saveToken = useCallback(async (apiToken: string) => {
     setBusyAction("save-token");
@@ -440,6 +531,59 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, loadDashboard, providerId, pushToast]);
 
+  const connectPrimary = useCallback(async () => {
+    if (!activeNode) {
+      pushToast("warning", "No node selected", "Select a node before connecting.");
+      return;
+    }
+
+    setBusyAction("connect-tunnel");
+    try {
+      let tunnelForNode = tunnels.find((tunnel) => tunnel.node_id === activeNode.id) ?? null;
+
+      if (!tunnelForNode) {
+        setBusyAction("create-tunnel");
+        const tunnelId = `tunnel-${crypto.randomUUID()}`;
+        const sanitizedName = activeNode.name
+          .trim()
+          .replace(/[^A-Za-z0-9_-]+/g, "-")
+          .replace(/-{2,}/g, "-")
+          .replace(/^-|-$/g, "")
+          .slice(0, 28) || "primary";
+
+        await createAndActivateClientTunnel({
+          tunnelId,
+          nodeId: activeNode.id,
+          tunnelName: `${sanitizedName}-wg`,
+          clientAddressCidr: "10.66.0.2/32",
+          dnsServer: "1.1.1.1",
+          allowedIps: ["0.0.0.0/0", "::/0"],
+        });
+
+        const refreshedTunnels = await listTunnelsForNode(activeNode.id);
+        tunnelForNode = refreshedTunnels[0] ?? null;
+      }
+
+      if (!tunnelForNode) {
+        throw new Error("Primary tunnel could not be resolved after creation.");
+      }
+
+      if (tunnelForNode.status.toLowerCase() !== "connected") {
+        setBusyAction("connect-tunnel");
+        await connectTunnelCommand(activeNode.id, tunnelForNode.id);
+      }
+
+      setRecovery(null);
+      pushToast("success", "Tunnel connected", `${tunnelForNode.name} is now connected.`);
+      await loadDashboard(activeNode.id);
+      await refreshHealthSnapshot(true);
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [activeNode, handleError, loadDashboard, pushToast, refreshHealthSnapshot, tunnels]);
+
   const connectTunnel = useCallback(async (tunnel: TunnelRecord) => {
     setBusyAction("connect-tunnel");
     try {
@@ -565,11 +709,23 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
 
     const timeoutId = window.setTimeout(() => {
-      void refreshHealth();
+      void refreshHealthSnapshot(true);
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
-  }, [refreshHealth, selectedNodeId, selectedTunnelId]);
+  }, [refreshHealthSnapshot, selectedNodeId, selectedTunnelId]);
+
+  useEffect(() => {
+    if (!selectedNodeId) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshHealthSnapshot(true);
+    }, 5000);
+
+    return () => window.clearInterval(intervalId);
+  }, [refreshHealthSnapshot, selectedNodeId]);
 
   useEffect(() => {
     if (!dockerDevEnabled) {
@@ -652,10 +808,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const configuredProvider = providers.find((provider) => provider.id === providerId) ?? providers[0] ?? null;
   const providerHasStoredToken = !!configuredProvider?.token_ref && providerAccessState !== "invalid";
-  const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
-  const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
-  const noServerConfigured = nodes.length === 0;
-  const canConnect = !!connectedTunnel && connectedTunnel.status.toLowerCase() !== "connected";
 
   const value: DashboardContextValue = {
     busyAction,
@@ -690,6 +842,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     connectedTunnel,
     noServerConfigured,
     canConnect,
+    throughputSamples,
     loadDashboard,
     refreshHealth,
     saveToken,
@@ -700,6 +853,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     saveDockerFauxToken,
     validateDockerReadiness,
     createNode,
+    connectPrimary,
     connectTunnel,
     disconnectTunnel,
     destroyNode,
