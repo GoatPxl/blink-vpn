@@ -42,8 +42,8 @@ When a PR changes Docker dashboard/provider behavior (settings, nodes, tunnel li
 Required commands:
 
 ```bash
-npm run e2e:docker:preflight
-npm run e2e:docker:lane
+npm run frontend:e2e:docker:preflight
+npm run frontend:e2e:docker:lane
 ```
 
 If failures occur, fix in lane order (provider -> nodes -> tunnel -> destroy/cleanup) and rerun the full lane.

@@ -44,7 +44,7 @@ This lane is the contributor gate for Docker dashboard flows in Prompts 3-7.
 Run preflight first. It must print both client and server version details.
 
 ```bash
-npm run e2e:docker:preflight
+npm run frontend:e2e:docker:preflight
 ```
 
 ### Required Run Order
@@ -52,7 +52,7 @@ npm run e2e:docker:preflight
 Use the ordered lane command so dependencies between prompts are exercised consistently:
 
 ```bash
-npm run e2e:docker:lane
+npm run frontend:e2e:docker:lane
 ```
 
 The lane runs specs in this exact order:
@@ -65,7 +65,7 @@ The lane runs specs in this exact order:
 For interactive debugging:
 
 ```bash
-npm run e2e:docker:lane:headed
+npm run frontend:e2e:docker:lane:headed
 ```
 
 ### Failure Handling
@@ -96,7 +96,13 @@ npm run lint
 General Playwright (all E2E specs):
 
 ```bash
-npm run e2e
+npm run frontend:e2e
+```
+
+Native-webview Tauri E2E support (plugin enabled build):
+
+```bash
+npm run tauri:dev:e2e
 ```
 
 ## Critical Test Cases

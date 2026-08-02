@@ -56,19 +56,19 @@ Use this when validating dashboard Docker flows for Prompts 3-7.
 2. Verify CLI and daemon are reachable.
 
 ```bash
-npm run e2e:docker:preflight
+npm run frontend:e2e:docker:preflight
 ```
 
 3. Run the ordered Docker lane.
 
 ```bash
-npm run e2e:docker:lane
+npm run frontend:e2e:docker:lane
 ```
 
 4. Optional headed mode for troubleshooting.
 
 ```bash
-npm run e2e:docker:lane:headed
+npm run frontend:e2e:docker:lane:headed
 ```
 
 Run order is fixed in the lane command and should not be changed ad hoc during contributor validation.

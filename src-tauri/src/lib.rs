@@ -6,7 +6,13 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 pub fn run() {
-  tauri::Builder::default()
+  #[cfg(feature = "e2e-testing")]
+  let builder = tauri::Builder::default().plugin(tauri_plugin_playwright::init());
+
+  #[cfg(not(feature = "e2e-testing"))]
+  let builder = tauri::Builder::default();
+
+  builder
     .setup(move |app| {
       let log_level = if cfg!(debug_assertions) {
         log::LevelFilter::Info

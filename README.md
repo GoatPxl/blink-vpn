@@ -60,6 +60,18 @@ npm install
 npm run tauri:dev
 ```
 
+Run frontend Playwright tests:
+
+```bash
+npm run frontend:e2e
+```
+
+Run Tauri app with Playwright plugin enabled for native-webview E2E work:
+
+```bash
+npm run tauri:dev:e2e
+```
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
