@@ -82,6 +82,8 @@ export const VIEW_ROUTE: Record<AppView, string> = {
   settings: "/dashboard/settings",
 };
 
+export const NODE_CREATE_ROUTE = "/dashboard/nodes/create";
+
 export const REGION_LABELS: Record<string, string> = {
   nyc1: "New York",
   sfo3: "San Francisco",

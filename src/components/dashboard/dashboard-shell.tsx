@@ -31,6 +31,10 @@ const subtitleMap: Record<AppView, string> = {
 };
 
 function getActiveView(pathname: string | null): AppView {
+  if (pathname?.startsWith(VIEW_ROUTE.nodes)) {
+    return "nodes";
+  }
+
   const matched = navItems.find((item) => VIEW_ROUTE[item.id] === pathname);
   return matched?.id ?? "dashboard";
 }
