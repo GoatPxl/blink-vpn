@@ -27,7 +27,7 @@ const subtitleMap: Record<AppView, string> = {
   nodes: "Provision and manage provider-backed nodes and client tunnels.",
   health: "Inspect runtime handshake, endpoint, and tunnel health.",
   diagnostics: "Review redacted logs, recovery suggestions, and exportable bundles.",
-  settings: "Register and validate the active provider token used for orchestration.",
+  settings: "Register and validate provider tokens used for orchestration.",
 };
 
 function getActiveView(pathname: string | null): AppView {

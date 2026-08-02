@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("Dashboard settings provider token", () => {
-  test("saves a token and shows the stored token ref on the current provider card", async ({ page }) => {
+  test("opens provider modal from card, saves token, and shows updated connected provider details", async ({ page }) => {
     const apiToken = process.env.DO_API_TOKEN ?? "dop_v1_test_token_1234567890abcdef";
 
     await page.addInitScript((tokenFromEnv) => {
@@ -10,6 +10,7 @@ test.describe("Dashboard settings provider token", () => {
         id: string;
         name: string;
         slug: string;
+        status: "active" | "suspended";
         token_ref: string | null;
         created_at: string;
         updated_at: string;
@@ -19,6 +20,7 @@ test.describe("Dashboard settings provider token", () => {
         id: "provider-1",
         name: "DigitalOcean",
         slug: "digitalocean",
+        status: "active",
         token_ref: null,
         created_at: "2026-08-01T00:00:00Z",
         updated_at: "2026-08-01T00:00:00Z",
@@ -79,15 +81,16 @@ test.describe("Dashboard settings provider token", () => {
 
     await page.goto("/dashboard/settings");
 
-    await expect(page.getByRole("heading", { name: "Current Provider" })).toBeVisible();
-    await expect(page.getByRole("row", { name: /Token Status/i }).getByText("Missing", { exact: true })).toBeVisible();
-    await expect(page.getByRole("row", { name: /Stored Token Ref/i }).getByText("Not configured", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Select Provider" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Connected Providers" })).toBeVisible();
+    await expect(page.getByRole("row", { name: /DigitalOcean/i }).getByText("Missing", { exact: true })).toBeVisible();
 
+    await page.getByRole("button", { name: "Select DigitalOcean provider" }).click();
     await page.getByPlaceholder("dop_v1_...").fill(apiToken);
     await page.getByRole("button", { name: "Save Token", exact: true }).click();
 
-    await expect(page.getByRole("row", { name: /Token Status/i }).getByText("Configured", { exact: true })).toBeVisible();
-    await expect(page.getByRole("row", { name: /Stored Token Ref/i }).getByText("do-token...f6bf", { exact: true })).toBeVisible();
+    await expect(page.getByRole("row", { name: /DigitalOcean/i }).getByText("Configured", { exact: true })).toBeVisible();
+    await expect(page.getByRole("row", { name: /DigitalOcean/i }).getByText("do-token...f6bf", { exact: true })).toBeVisible();
     await expect(page.getByText(/Provider registered with token_ref:/).first()).toBeVisible();
     await expect(page.getByPlaceholder("dop_v1_...")).toHaveValue("");
   });

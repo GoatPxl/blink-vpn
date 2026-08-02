@@ -239,6 +239,87 @@ pub fn list_providers(backend: State<'_, Backend>) -> Result<Vec<ProviderRecord>
 }
 
 #[tauri::command]
+pub fn suspend_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), String> {
+  let provider = backend
+    .db
+    .get_provider(&provider_id)
+    .map_err(|err| err.to_string())?
+    .ok_or_else(|| format!("Provider '{}' was not found.", provider_id))?;
+
+  if provider.status == crate::backend::db::ProviderStatus::Suspended {
+    return Ok(());
+  }
+
+  backend
+    .db
+    .suspend_provider(&provider_id)
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn resume_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), String> {
+  let provider = backend
+    .db
+    .get_provider(&provider_id)
+    .map_err(|err| err.to_string())?
+    .ok_or_else(|| format!("Provider '{}' was not found.", provider_id))?;
+
+  if provider.status == crate::backend::db::ProviderStatus::Active {
+    return Ok(());
+  }
+
+  backend
+    .db
+    .resume_provider(&provider_id)
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn delete_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), String> {
+  let existing_providers = backend
+    .db
+    .list_providers()
+    .map_err(|err| err.to_string())?;
+
+  if existing_providers.len() <= 1 {
+    return Err("At least one provider must remain configured on this device.".to_string());
+  }
+
+  let provider = backend
+    .db
+    .get_provider(&provider_id)
+    .map_err(|err| err.to_string())?
+    .ok_or_else(|| format!("Provider '{}' was not found.", provider_id))?;
+
+  let provider_nodes = backend
+    .db
+    .list_vpn_nodes()
+    .map_err(|err| err.to_string())?
+    .into_iter()
+    .filter(|node| node.provider_id == provider_id)
+    .count();
+
+  if provider_nodes > 0 {
+    return Err(
+      "Cannot delete provider while nodes are still attached. Destroy dependent nodes first."
+        .to_string(),
+    );
+  }
+
+  if let Some(token_ref) = provider.token_ref {
+    backend
+      .secure_storage
+      .delete_provider_api_token(&token_ref)
+      .map_err(|err| err.to_string())?;
+  }
+
+  backend
+    .db
+    .delete_provider(&provider_id)
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 pub fn list_tunnels_for_node(
   node_id: String,
   backend: State<'_, Backend>,

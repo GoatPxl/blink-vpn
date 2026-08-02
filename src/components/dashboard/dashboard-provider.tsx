@@ -3,6 +3,7 @@
 import {
   checkDockerReadiness,
   connectTunnel as connectTunnelCommand,
+  deleteProvider as deleteProviderCommand,
   createVpnNode,
   destroyVpnNode,
   disconnectTunnel as disconnectTunnelCommand,
@@ -14,6 +15,8 @@ import {
   listTunnelsForNode,
   listVpnNodes,
   registerProviderToken,
+  resumeProvider as resumeProviderCommand,
+  suspendProvider as suspendProviderCommand,
   validateProviderToken,
   type DockerReadiness,
   type ProviderRecord,
@@ -65,7 +68,7 @@ type DashboardContextValue = {
   diagnosticsExportPath: string;
   providerId: string;
   providerName: string;
-  setActiveProviderId: (providerId: string) => void;
+  selectProviderId: (providerId: string) => void;
   providerAccessState: ProviderAccessState;
   providerStatusMessage: string;
   providerFeedback: string;
@@ -86,6 +89,9 @@ type DashboardContextValue = {
   refreshHealth: () => Promise<void>;
   saveToken: (apiToken: string) => Promise<void>;
   validateToken: () => Promise<void>;
+  suspendProvider: (provider: ProviderRecord) => Promise<void>;
+  resumeProvider: (provider: ProviderRecord) => Promise<void>;
+  deleteProvider: (provider: ProviderRecord) => Promise<void>;
   saveDockerFauxToken: (value: string) => Promise<void>;
   validateDockerReadiness: (options?: { silent?: boolean }) => Promise<void>;
   createNode: (input: CreateNodeInput) => Promise<void>;
@@ -561,7 +567,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(timeoutId);
   }, [dockerDevEnabled, validateDockerReadiness]);
 
-  const setActiveProviderId = useCallback((nextProviderId: string) => {
+  const selectProviderId = useCallback((nextProviderId: string) => {
     const nextProvider = providers.find((provider) => provider.id === nextProviderId) ?? null;
     if (!nextProvider) {
       return;
@@ -569,9 +575,51 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
     setProviderId(nextProvider.id);
     setProviderName(nextProvider.name);
-    setProviderFeedback(`Active provider switched to ${nextProvider.name}.`);
+    setProviderFeedback(`${nextProvider.name} selected for provider actions.`);
     void refreshProviderAccessStatus(nextProvider);
   }, [providers, refreshProviderAccessStatus]);
+
+  const suspendProvider = useCallback(async (provider: ProviderRecord) => {
+    setBusyAction("suspend-provider");
+    try {
+      await suspendProviderCommand(provider.id);
+      setRecovery(null);
+      pushToast("warning", "Provider suspended", `${provider.name} is now suspended.`);
+      await loadDashboard();
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [handleError, loadDashboard, pushToast]);
+
+  const resumeProvider = useCallback(async (provider: ProviderRecord) => {
+    setBusyAction("resume-provider");
+    try {
+      await resumeProviderCommand(provider.id);
+      setRecovery(null);
+      pushToast("success", "Provider resumed", `${provider.name} can be used again.`);
+      await loadDashboard();
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [handleError, loadDashboard, pushToast]);
+
+  const deleteProvider = useCallback(async (provider: ProviderRecord) => {
+    setBusyAction("delete-provider");
+    try {
+      await deleteProviderCommand(provider.id);
+      setRecovery(null);
+      pushToast("warning", "Provider deleted", `${provider.name} has been removed.`);
+      await loadDashboard();
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [handleError, loadDashboard, pushToast]);
 
   const configuredProvider = providers.find((provider) => provider.id === providerId) ?? providers[0] ?? null;
   const providerHasStoredToken = !!configuredProvider?.token_ref && providerAccessState !== "invalid";
@@ -596,7 +644,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     diagnosticsExportPath,
     providerId,
     providerName,
-    setActiveProviderId,
+    selectProviderId,
     providerAccessState,
     providerStatusMessage,
     providerFeedback,
@@ -617,6 +665,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     refreshHealth,
     saveToken,
     validateToken,
+    suspendProvider,
+    resumeProvider,
+    deleteProvider,
     saveDockerFauxToken,
     validateDockerReadiness,
     createNode,

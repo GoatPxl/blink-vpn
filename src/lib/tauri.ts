@@ -21,10 +21,13 @@ export type TunnelStatus =
   | "error"
   | "deleting";
 
+export type ProviderStatus = "active" | "suspended";
+
 export interface ProviderRecord {
   id: string;
   name: string;
   slug: string;
+  status: ProviderStatus;
   token_ref: string | null;
   created_at: string;
   updated_at: string;
@@ -251,6 +254,18 @@ export async function listVpnNodes(): Promise<VpnNodeRecord[]> {
 
 export async function listProviders(): Promise<ProviderRecord[]> {
   return invokeCommand<ProviderRecord[]>("list_providers");
+}
+
+export async function suspendProvider(providerId: string): Promise<void> {
+  await invokeCommand<void>("suspend_provider", { providerId });
+}
+
+export async function resumeProvider(providerId: string): Promise<void> {
+  await invokeCommand<void>("resume_provider", { providerId });
+}
+
+export async function deleteProvider(providerId: string): Promise<void> {
+  await invokeCommand<void>("delete_provider", { providerId });
 }
 
 export async function listTunnelsForNode(nodeId: string): Promise<TunnelRecord[]> {

@@ -13,6 +13,7 @@ export default function DashboardSettingsPage() {
   const {
     busyAction,
     configuredProvider,
+    deleteProvider,
     dockerDevEnabled,
     dockerFauxTokenConfigured,
     dockerFauxTokenConfiguredAt,
@@ -23,12 +24,13 @@ export default function DashboardSettingsPage() {
     providerFeedback,
     providerHasStoredToken,
     providerId,
-    providerName,
     providers,
-    setActiveProviderId,
+    resumeProvider,
+    selectProviderId,
     providerStatusMessage,
     saveDockerFauxToken,
     saveToken,
+    suspendProvider,
     validateDockerReadiness,
     validateToken,
   } = useDashboard();
@@ -62,15 +64,17 @@ export default function DashboardSettingsPage() {
       providerBadge={providerBadge}
       configuredProvider={configuredProvider}
       providerId={providerId}
-      providerName={providerName}
       providers={providers}
-      onSetActiveProvider={setActiveProviderId}
+      onSelectProvider={selectProviderId}
       apiToken={apiToken}
       setApiToken={setApiToken}
       onSaveToken={handleSaveToken}
       onSaveDockerFauxToken={handleSaveDockerFauxToken}
       onValidateToken={validateToken}
       onValidateDockerReadiness={validateDockerReadiness}
+      onSuspendProvider={suspendProvider}
+      onResumeProvider={resumeProvider}
+      onDeleteProvider={deleteProvider}
       busyAction={busyAction}
       onNavigateToView={(view) => router.push(VIEW_ROUTE[view])}
     />

@@ -10,7 +10,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::backend::bootstrap::BootstrapOutputContract;
-use crate::backend::db::{Database, DbError, ProviderRecord};
+use crate::backend::db::{Database, DbError, ProviderRecord, ProviderStatus};
 use crate::backend::secure_storage::{SecretStoreError, SecureStorage};
 
 #[allow(unused_imports)]
@@ -340,6 +340,8 @@ pub enum ProviderFlowError {
   MissingSecret { token_ref: String, detail: String },
   #[error("Provider with slug '{slug}' is not supported by this app build. {detail}")]
   UnsupportedProviderSlug { slug: String, detail: String },
+  #[error("Provider '{provider_id}' is suspended. {detail}")]
+  ProviderSuspended { provider_id: String, detail: String },
 }
 
 impl ProviderRegistry {
@@ -631,6 +633,13 @@ impl ProviderRegistry {
         provider_id: provider_id.to_string(),
         detail: "Cannot use provider because no DB row exists for this id.".to_string(),
       })?;
+
+    if provider.status == ProviderStatus::Suspended {
+      return Err(ProviderFlowError::ProviderSuspended {
+        provider_id: provider.id.clone(),
+        detail: "Resume the provider from Settings before running this operation.".to_string(),
+      });
+    }
 
     let adapter = self.adapter_for_slug(&provider.slug)?;
     Ok((provider, adapter))

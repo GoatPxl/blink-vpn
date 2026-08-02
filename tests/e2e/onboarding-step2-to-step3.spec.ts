@@ -141,6 +141,7 @@ test.describe("Onboarding Step 2", () => {
                 id: "provider-1",
                 name: "DigitalOcean",
                 slug: "digitalocean",
+                status: "active",
                 token_ref: seededTokenRef ?? state.tokenRef,
                 created_at: "2026-08-01T00:00:00Z",
                 updated_at: "2026-08-01T00:00:00Z",
@@ -212,7 +213,7 @@ test.describe("Onboarding Step 2", () => {
           }
 
           if (command === "list_providers") {
-            return [{ id: "provider-1", name: "DigitalOcean", slug: "digitalocean", token_ref: "do-token:provider-1:test-token-ref", created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z" }];
+            return [{ id: "provider-1", name: "DigitalOcean", slug: "digitalocean", status: "active", token_ref: "do-token:provider-1:test-token-ref", created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z" }];
           }
 
           if (command === "validate_provider_token") {

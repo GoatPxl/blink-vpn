@@ -18,6 +18,9 @@ export type DashboardBusyAction =
   | "save-docker-token"
   | "validate-token"
   | "validate-docker"
+  | "suspend-provider"
+  | "resume-provider"
+  | "delete-provider"
   | "create-node"
   | "create-tunnel"
   | "connect-tunnel"
@@ -101,7 +104,7 @@ export function statusBadge(status: string) {
 
 export function categorizeError(errorMessage: string): { kind: ErrorCategory; title: string; nextAction: string } {
   if (errorMessage.includes("Provider orchestration failed") || errorMessage.includes("Provider provider")) {
-    return { kind: "provider", title: "Provider issue", nextAction: "Verify the active provider token, then validate or re-save it before retrying." };
+    return { kind: "provider", title: "Provider issue", nextAction: "Verify the provider token, then validate or re-save it before retrying." };
   }
   if (errorMessage.includes("Database operation failed") || errorMessage.includes("was not found")) {
     return { kind: "database", title: "Local state issue", nextAction: "Refresh the dashboard. If state is still stale, use Force Cleanup on the affected node." };
@@ -226,6 +229,8 @@ export function AppIcon({ name, className = "h-4 w-4" }: { name: string; classNa
       return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><circle cx="12" cy="8" r="4" className={stroke} /><path d="M4 20c1.5-4 5-6 8-6s6.5 2 8 6" className={stroke} /></svg>;
     case "settings":
       return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><circle cx="12" cy="12" r="3" className={stroke} /><path d="M19.4 15a7.8 7.8 0 0 0 .1-2l2-1.1-2-3.5-2.2.6a7.8 7.8 0 0 0-1.7-1l-.3-2.3h-4l-.3 2.3a7.8 7.8 0 0 0-1.7 1L7 8.4 5 11.9 7 13a7.8 7.8 0 0 0 .1 2L5 16.1l2 3.5 2.2-.6a7.8 7.8 0 0 0 1.7 1l.3 2.3h4l.3-2.3a7.8 7.8 0 0 0 1.7-1l2.2.6 2-3.5L19.4 15Z" className={stroke} /></svg>;
+    case "cloud":
+      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><path d="M8.5 18.5h8.8a3.7 3.7 0 0 0 .6-7.4A5.7 5.7 0 0 0 6.9 9.2a4 4 0 0 0 1.6 9.3Z" className={stroke} /></svg>;
     default:
       return null;
   }

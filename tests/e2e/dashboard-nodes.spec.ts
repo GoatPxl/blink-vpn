@@ -31,7 +31,7 @@ test.describe("Dashboard Nodes", () => {
             return { generated_at: "2026-08-01T00:00:00Z", providers: [], nodes, tunnels: [], redacted_notes: [] };
           }
           if (command === "list_providers") {
-            return [{ id: "provider-1", name: "DigitalOcean", slug: "digitalocean", token_ref: "do-token:provider-1:seeded", created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z" }];
+            return [{ id: "provider-1", name: "DigitalOcean", slug: "digitalocean", status: "active", token_ref: "do-token:provider-1:seeded", created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z" }];
           }
           if (command === "validate_provider_token") {
             throw new Error("DigitalOcean token was rejected. Verify token scope and save a new token in Settings.");
@@ -164,7 +164,7 @@ test.describe("Dashboard Nodes", () => {
             return { generated_at: "2026-08-01T00:00:00Z", providers: [], nodes, tunnels, redacted_notes: [] };
           }
           if (command === "list_providers") {
-            return [{ id: "provider-1", name: "DigitalOcean", slug: "digitalocean", token_ref: "do-token:provider-1:seeded", created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z" }];
+            return [{ id: "provider-1", name: "DigitalOcean", slug: "digitalocean", status: "active", token_ref: "do-token:provider-1:seeded", created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z" }];
           }
           if (command === "validate_provider_token") return "Provider token valid for account acct-1 (active)";
           if (command === "list_provider_regions") {

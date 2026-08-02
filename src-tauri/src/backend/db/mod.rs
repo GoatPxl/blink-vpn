@@ -13,7 +13,46 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (5, include_str!("../../../migrations/0005_tunnel_stats_snapshot.sql")),
   (6, include_str!("../../../migrations/0006_vpn_node_pricing_snapshot.sql")),
   (7, include_str!("../../../migrations/0007_seed_docker_provider.sql")),
+  (8, include_str!("../../../migrations/0008_provider_status.sql")),
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ProviderStatus {
+  Active,
+  Suspended,
+}
+
+impl ProviderStatus {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Active => "active",
+      Self::Suspended => "suspended",
+    }
+  }
+}
+
+impl Display for ProviderStatus {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl TryFrom<&str> for ProviderStatus {
+  type Error = DbError;
+
+  fn try_from(value: &str) -> Result<Self, DbError> {
+    match value {
+      "active" => Ok(Self::Active),
+      "suspended" => Ok(Self::Suspended),
+      other => Err(DbError::Decode {
+        context: "providers.status",
+        detail: format!(
+          "Encountered unsupported provider status '{other}'. Recover by updating row data to a known status."
+        ),
+      }),
+    }
+  }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum NodeLifecycleStatus {
@@ -147,6 +186,7 @@ pub struct ProviderRecord {
   pub id: String,
   pub name: String,
   pub slug: String,
+  pub status: ProviderStatus,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub token_ref: Option<String>,
   pub created_at: String,
@@ -331,7 +371,7 @@ impl Database {
     let connection = self.open_connection()?;
     let mut statement = connection
       .prepare(
-        "SELECT id, name, slug, token_ref, created_at, updated_at
+        "SELECT id, name, slug, status, token_ref, created_at, updated_at
          FROM providers
          ORDER BY created_at ASC",
       )
@@ -363,7 +403,7 @@ impl Database {
     let connection = self.open_connection()?;
     connection
       .query_row(
-        "SELECT id, name, slug, token_ref, created_at, updated_at
+        "SELECT id, name, slug, status, token_ref, created_at, updated_at
          FROM providers WHERE id = ?1",
         params![id],
         map_provider_row,
@@ -441,6 +481,43 @@ impl Database {
     }
 
     Ok(())
+  }
+
+  pub fn update_provider_status(&self, id: &str, status: ProviderStatus) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let changed = connection
+      .execute(
+        "UPDATE providers
+         SET status = ?2,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1",
+        params![id, status.as_str()],
+      )
+      .map_err(|source| DbError::Query {
+        action: "update_provider_status",
+        detail: "Failed updating provider status."
+          .to_string(),
+        source,
+      })?;
+
+    if changed == 0 {
+      return Err(DbError::NotFound {
+        entity: "provider",
+        id: id.to_string(),
+        detail: "Status update skipped because no row matched the id."
+          .to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
+  pub fn suspend_provider(&self, id: &str) -> Result<(), DbError> {
+    self.update_provider_status(id, ProviderStatus::Suspended)
+  }
+
+  pub fn resume_provider(&self, id: &str) -> Result<(), DbError> {
+    self.update_provider_status(id, ProviderStatus::Active)
   }
 
   pub fn delete_provider(&self, id: &str) -> Result<(), DbError> {
@@ -897,13 +974,23 @@ impl Database {
 }
 
 fn map_provider_row(row: &Row<'_>) -> rusqlite::Result<ProviderRecord> {
+  let raw_status: String = row.get(3)?;
+  let status = ProviderStatus::try_from(raw_status.as_str()).map_err(|err| {
+    rusqlite::Error::FromSqlConversionFailure(
+      3,
+      rusqlite::types::Type::Text,
+      Box::new(err),
+    )
+  })?;
+
   Ok(ProviderRecord {
     id: row.get(0)?,
     name: row.get(1)?,
     slug: row.get(2)?,
-    token_ref: row.get(3)?,
-    created_at: row.get(4)?,
-    updated_at: row.get(5)?,
+    status,
+    token_ref: row.get(4)?,
+    created_at: row.get(5)?,
+    updated_at: row.get(6)?,
   })
 }
 
@@ -966,7 +1053,7 @@ fn map_tunnel_row(row: &Row<'_>) -> rusqlite::Result<TunnelRecord> {
 
 #[cfg(test)]
 mod tests {
-  use super::{Database, DbError, NodeLifecycleStatus, TunnelStatus};
+  use super::{Database, DbError, NodeLifecycleStatus, ProviderStatus, TunnelStatus};
 
   use std::path::PathBuf;
   use std::time::{SystemTime, UNIX_EPOCH};
@@ -1017,6 +1104,7 @@ mod tests {
     let providers = db.list_providers().expect("provider query should succeed");
     assert_eq!(providers.len(), 1);
     assert_eq!(providers[0].slug, "digitalocean");
+    assert_eq!(providers[0].status, ProviderStatus::Active);
 
     db
       .create_vpn_node("node-1", "provider-1", "Primary", "nyc1")
@@ -1090,5 +1178,36 @@ mod tests {
       }
       other => panic!("unexpected error: {other}"),
     }
+  }
+
+  #[test]
+  fn provider_status_suspend_and_resume_roundtrip() {
+    let db = setup_db("provider_status_roundtrip");
+    let provider_id = "provider-status-test";
+    let provider_slug = "provider-status-test";
+
+    db
+      .create_provider(provider_id, "Provider Status Test", provider_slug, None)
+      .expect("provider insert should succeed");
+
+    db
+      .suspend_provider(provider_id)
+      .expect("suspend should succeed");
+
+    let suspended = db
+      .get_provider(provider_id)
+      .expect("provider query should succeed")
+      .expect("provider should exist");
+    assert_eq!(suspended.status, ProviderStatus::Suspended);
+
+    db
+      .resume_provider(provider_id)
+      .expect("resume should succeed");
+
+    let active = db
+      .get_provider(provider_id)
+      .expect("provider query should succeed")
+      .expect("provider should exist");
+    assert_eq!(active.status, ProviderStatus::Active);
   }
 }
