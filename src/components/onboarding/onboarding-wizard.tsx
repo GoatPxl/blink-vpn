@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   createVpnNode,
   installWireGuardWithPrerequisites,
+  listProviders,
   listProviderPricing,
   listVpnNodes,
   registerProviderToken,
@@ -57,6 +58,7 @@ export function OnboardingWizard() {
   const [apiToken, setApiToken] = useState("");
   const [tokenMessage, setTokenMessage] = useState("No token action yet.");
   const [tokenBusy, setTokenBusy] = useState(false);
+  const [storedProviderTokenRef, setStoredProviderTokenRef] = useState<string | null>(null);
 
   const [pricingBusy, setPricingBusy] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
@@ -81,6 +83,17 @@ export function OnboardingWizard() {
   }, [step]);
 
   useEffect(() => {
+    if (step < 2) return;
+
+    const timeoutId = window.setTimeout(() => {
+      void syncStoredProviderTokenState(true);
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.providerId, step]);
+
+  useEffect(() => {
     if (step !== 3) return;
     if (!state.tokenSaved && !state.tokenValidated) return;
     const timeoutId = window.setTimeout(() => {
@@ -93,6 +106,73 @@ export function OnboardingWizard() {
   const selectedPlanPricing = useMemo(() => {
     return livePricing.find((entry) => entry.plan_key === state.plan) ?? null;
   }, [livePricing, state.plan]);
+
+  const hasUnsavedTokenInput = apiToken.trim().length > 0;
+  const hasStoredProviderToken = !!storedProviderTokenRef;
+
+  async function syncStoredProviderTokenState(validateStoredToken = false) {
+    try {
+      const providers = await listProviders();
+      const currentProvider = providers.find((provider) => provider.id === state.providerId) ?? null;
+      const tokenRef = currentProvider?.token_ref ?? null;
+
+      setStoredProviderTokenRef(tokenRef);
+
+      if (!tokenRef) {
+        return;
+      }
+
+      setState((current) => ({
+        ...current,
+        tokenSaved: true,
+      }));
+
+      setTokenMessage((current) => (
+        current === "No token action yet."
+          ? "Stored provider token found. Click Validate Token to continue, or enter a new token to replace it."
+          : current
+      ));
+
+      if (!validateStoredToken || hasUnsavedTokenInput) {
+        return;
+      }
+
+      const validateResult = await validateProviderToken(state.providerId);
+      setState((current) => ({
+        ...current,
+        tokenSaved: true,
+        tokenValidated: true,
+      }));
+      setTokenMessage(`Stored provider token found. ${validateResult}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const needsResave = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
+
+      if (needsResave) {
+        setStoredProviderTokenRef(null);
+        setState((current) => ({
+          ...current,
+          tokenSaved: false,
+          tokenValidated: false,
+        }));
+        setTokenMessage((current) => (
+          current === "No token action yet." || current.startsWith("Stored provider token")
+            ? "Stored provider token reference is stale or missing. Click Save Token to retry secure registration."
+            : current
+        ));
+        return;
+      }
+
+      if (validateStoredToken) {
+        setState((current) => ({
+          ...current,
+          tokenSaved: true,
+          tokenValidated: false,
+        }));
+        setTokenMessage(message);
+      }
+    }
+  }
 
   async function loadLivePricing() {
     setPricingBusy(true);
@@ -108,6 +188,7 @@ export function OnboardingWizard() {
       const message = error instanceof Error ? error.message : String(error);
       const isTokenRecoveryNeeded = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
       if (isTokenRecoveryNeeded) {
+        setStoredProviderTokenRef(null);
         setState((current) => ({
           ...current,
           tokenSaved: false,
@@ -164,6 +245,7 @@ export function OnboardingWizard() {
 
       // Validate immediately after save so Step 2 has a single clear outcome.
       const validateResult = await validateProviderToken(state.providerId);
+      await syncStoredProviderTokenState();
       setTokenMessage(`${saveResult} ${validateResult}`);
       setState((current) => ({ ...current, tokenSaved: true, tokenValidated: true }));
       setApiToken("");
@@ -171,6 +253,7 @@ export function OnboardingWizard() {
       const message = error instanceof Error ? error.message : String(error);
       const needsResave = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
       if (needsResave) {
+        setStoredProviderTokenRef(null);
         setState((current) => ({
           ...current,
           tokenSaved: false,
@@ -190,7 +273,12 @@ export function OnboardingWizard() {
   }
 
   async function onValidateToken() {
-    if (!state.tokenSaved) {
+    if (hasUnsavedTokenInput) {
+      setTokenMessage("Click Save + Validate Token to replace the stored token.");
+      return;
+    }
+
+    if (!state.tokenSaved && !hasStoredProviderToken) {
       setTokenMessage("Save your DigitalOcean token first, then validate it.");
       return;
     }
@@ -198,12 +286,14 @@ export function OnboardingWizard() {
     setTokenBusy(true);
     try {
       const result = await validateProviderToken(state.providerId);
+      await syncStoredProviderTokenState();
       setTokenMessage(result);
       setState((current) => ({ ...current, tokenValidated: true, tokenSaved: true }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const needsResave = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
       if (needsResave) {
+        setStoredProviderTokenRef(null);
         setState((current) => ({
           ...current,
           tokenSaved: false,
@@ -419,7 +509,7 @@ export function OnboardingWizard() {
               </label>
               <div className="flex flex-wrap gap-3">
                 <button type="button" onClick={() => void onSaveToken()} disabled={tokenBusy} className="inline-flex items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[#10131b] disabled:opacity-50">Save + Validate Token</button>
-                <button type="button" onClick={() => void onValidateToken()} disabled={tokenBusy || !state.tokenSaved} className="inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 text-sm text-[var(--on-surface)] disabled:opacity-50">Validate Token</button>
+                <button type="button" onClick={() => void onValidateToken()} disabled={tokenBusy || hasUnsavedTokenInput || (!state.tokenSaved && !hasStoredProviderToken)} className="inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 text-sm text-[var(--on-surface)] disabled:opacity-50">Validate Token</button>
               </div>
               <div className="text-xs text-[var(--on-surface-variant)]">
                 Step 3 unlocks only after a successful Validate Token action.

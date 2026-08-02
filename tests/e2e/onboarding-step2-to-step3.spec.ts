@@ -19,6 +19,7 @@ test.describe("Onboarding Step 2", () => {
       const state = {
         tokenSaved: false,
         apiToken: tokenFromEnv,
+        tokenRef: null as string | null,
       };
 
       const successPricing: Plan[] = [
@@ -51,6 +52,8 @@ test.describe("Onboarding Step 2", () => {
         },
       ];
 
+      const getSeededTokenRef = () => (window as unknown as { __TEST_PROVIDER_TOKEN_REF?: string | null }).__TEST_PROVIDER_TOKEN_REF ?? null;
+
       const internals = {
         invoke: async (command: string, args?: TauriArgs) => {
           if (command === "check_wireguard_readiness") {
@@ -71,11 +74,27 @@ test.describe("Onboarding Step 2", () => {
             }
             state.tokenSaved = true;
             state.apiToken = candidate;
+            state.tokenRef = "do-token:provider-1:test-token-ref";
             return "Provider registered with secure token reference.";
           }
 
+          if (command === "list_providers") {
+            const seededTokenRef = getSeededTokenRef();
+            return [
+              {
+                id: "provider-1",
+                name: "DigitalOcean",
+                slug: "digitalocean",
+                token_ref: seededTokenRef ?? state.tokenRef,
+                created_at: "2026-08-01T00:00:00Z",
+                updated_at: "2026-08-01T00:00:00Z",
+              },
+            ];
+          }
+
           if (command === "validate_provider_token") {
-            if (!state.tokenSaved || !state.apiToken) {
+            const seededTokenRef = getSeededTokenRef();
+            if ((!state.tokenSaved && !state.tokenRef && !seededTokenRef) || !state.apiToken) {
               throw new Error("Provider 'provider-1' has no token_ref. Provider must be initialized with a token before adapter operations.");
             }
             return "Provider token is valid for DigitalOcean API.";
@@ -85,6 +104,7 @@ test.describe("Onboarding Step 2", () => {
             const forcePricingStale = Boolean((window as unknown as { __TEST_FORCE_STALE?: boolean }).__TEST_FORCE_STALE);
             if (forcePricingStale) {
               state.tokenSaved = false;
+              state.tokenRef = null;
               throw new Error("Provider token_ref 'do-token:provider-1:stale' has no stored secret. Stored token reference is stale: secure storage entry is missing.");
             }
 
@@ -153,5 +173,15 @@ test.describe("Onboarding Step 2", () => {
 
     await expect(page.getByRole("heading", { name: "DigitalOcean Token" })).toBeVisible();
     await expect(page.getByText("Provider token is no longer valid in secure storage. Save Token, then Validate Token to continue.")).toBeVisible();
+  });
+
+  test("recognizes a token saved from settings and unlocks step 3 without re-entry", async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __TEST_PROVIDER_TOKEN_REF?: string | null }).__TEST_PROVIDER_TOKEN_REF = "do-token:provider-1:seeded-from-settings";
+    });
+
+    await page.goto("/onboarding");
+    await expect(page.getByText("Provider token is valid for DigitalOcean API.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Next", exact: true })).toBeEnabled();
   });
 });
