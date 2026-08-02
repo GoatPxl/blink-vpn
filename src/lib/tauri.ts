@@ -106,8 +106,14 @@ export interface ProviderPlanPricing {
   plan_label: string;
   size_slug: string;
   region: string;
+  memory_mb: number;
+  vcpus: number;
+  disk_gb: number;
+  transfer_tb: number;
+  transfer_note: string;
   monthly_usd: number;
   hourly_usd: number;
+  estimated: boolean;
   source_timestamp: string;
 }
 

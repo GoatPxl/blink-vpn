@@ -123,8 +123,14 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
           plan_label: plan.plan_label.to_string(),
           size_slug: size.slug.clone(),
           region: region.to_string(),
+          memory_mb: size.memory,
+          vcpus: size.vcpus,
+          disk_gb: size.disk,
+          transfer_tb: size.transfer,
+          transfer_note: format!("Includes up to {:.2} TB transfer before provider overage policies apply.", size.transfer),
           monthly_usd: size.price_monthly,
           hourly_usd: size.price_hourly,
+          estimated: false,
           source_timestamp: fetched_at_epoch_seconds.clone(),
         });
       }
@@ -243,8 +249,14 @@ pub struct ProviderPlanPricing {
   pub plan_label: String,
   pub size_slug: String,
   pub region: String,
+  pub memory_mb: u64,
+  pub vcpus: u64,
+  pub disk_gb: u64,
+  pub transfer_tb: f64,
+  pub transfer_note: String,
   pub monthly_usd: f64,
   pub hourly_usd: f64,
+  pub estimated: bool,
   pub source_timestamp: String,
 }
 
