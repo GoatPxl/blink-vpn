@@ -427,7 +427,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [refreshHealth, selectedNodeId, selectedTunnelId]);
 
   const configuredProvider = providers.find((provider) => provider.id === providerId) ?? providers[0] ?? null;
-  const providerHasStoredToken = !!configuredProvider?.token_ref;
+  const providerHasStoredToken = !!configuredProvider?.token_ref && providerAccessState !== "invalid";
   const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
   const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
   const noServerConfigured = nodes.length === 0;

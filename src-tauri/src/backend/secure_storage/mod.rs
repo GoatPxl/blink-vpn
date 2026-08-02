@@ -1,8 +1,17 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "windows")]
+use std::{ffi::c_void, ptr::null_mut};
 
 use thiserror::Error;
 use uuid::Uuid;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Foundation::{FILETIME, GetLastError, ERROR_NOT_FOUND};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Security::Credentials::{
+  CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
+  CRED_TYPE_GENERIC,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretKind {
@@ -114,10 +123,8 @@ impl SecureStorage {
       return Ok(Some(value));
     }
 
-    if let Ok(guard) = self.session_cache.lock() {
-      if let Some(cached) = guard.get(token_ref) {
-        return Ok(Some(cached.clone()));
-      }
+    if let Ok(mut guard) = self.session_cache.lock() {
+      guard.remove(token_ref);
     }
 
     Ok(None)
@@ -220,32 +227,49 @@ impl WindowsCredentialStore {
     Ok(())
   }
 
+  fn make_target_name(&self, secret_ref: &str) -> String {
+    format!("{}:{}", self.service_name, secret_ref)
+  }
+
+  fn to_wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+  }
+
   fn store_and_verify_secret_ref(&self, secret_ref: &str, secret: &str) -> Result<bool, SecretStoreError> {
-    let entry = keyring::Entry::new(&self.service_name, secret_ref).map_err(|source| {
-      SecretStoreError::Store {
-        detail: format!(
-          "Could not initialize Windows credential entry. Ensure Credential Manager is available. ({source})"
-        ),
-      }
-    })?;
+    let target = Self::to_wide(&self.make_target_name(secret_ref));
+    let username = Self::to_wide(secret_ref);
+    let mut blob = secret.as_bytes().to_vec();
 
-    entry
-      .set_password(secret)
-      .map_err(|source| SecretStoreError::Store {
-        detail: format!(
-          "Could not persist secret to Windows protected storage. ({source})"
-        ),
-      })?;
+    let mut credential = CREDENTIALW {
+      Flags: 0,
+      Type: CRED_TYPE_GENERIC,
+      TargetName: target.as_ptr() as *mut u16,
+      Comment: null_mut(),
+      LastWritten: FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+      },
+      CredentialBlobSize: blob.len() as u32,
+      CredentialBlob: blob.as_mut_ptr(),
+      Persist: CRED_PERSIST_LOCAL_MACHINE,
+      AttributeCount: 0,
+      Attributes: null_mut(),
+      TargetAlias: null_mut(),
+      UserName: username.as_ptr() as *mut u16,
+    };
 
-    match entry.get_password() {
-      Ok(roundtrip) => Ok(roundtrip == secret),
-      Err(keyring::Error::NoEntry) => Ok(false),
-      Err(source) => Err(SecretStoreError::Retrieve {
+    let write_ok = unsafe { CredWriteW(&mut credential as *mut CREDENTIALW, 0) };
+    if write_ok == 0 {
+      let code = unsafe { GetLastError() };
+      return Err(SecretStoreError::Store {
         detail: format!(
-          "Could not verify secret after write in Windows protected storage. ({source})"
+          "Could not persist secret to Windows protected storage (Win32 error {code})."
         ),
-      }),
+      });
     }
+
+    let roundtrip = self.retrieve_secret(secret_ref)?;
+    Ok(roundtrip.as_deref() == Some(secret))
   }
 }
 
@@ -257,60 +281,85 @@ impl SecretStore for WindowsCredentialStore {
     owner_id: &str,
     secret: &str,
   ) -> Result<String, SecretStoreError> {
-    let legacy_ref = self.build_secret_ref_legacy(kind, owner_id);
-    if self.store_and_verify_secret_ref(&legacy_ref, secret)? {
-      return Ok(legacy_ref);
-    }
-
     let compact_ref = self.build_secret_ref_compact(kind, owner_id);
     if self.store_and_verify_secret_ref(&compact_ref, secret)? {
       return Ok(compact_ref);
     }
 
     Err(SecretStoreError::Store {
-      detail: "Secret write succeeded but immediate read-back failed; token was not persisted reliably. Retry the save action.".to_string(),
+      detail: "Secret write succeeded but immediate read-back failed; token was not persisted reliably. Retry the save action and verify Windows Credential Manager health.".to_string(),
     })
   }
 
   fn retrieve_secret(&self, secret_ref: &str) -> Result<Option<String>, SecretStoreError> {
     Self::parse_secret_ref(secret_ref)?;
-    let entry = keyring::Entry::new(&self.service_name, secret_ref).map_err(|source| {
-      SecretStoreError::Retrieve {
-        detail: format!(
-          "Could not initialize credential lookup. ({source})"
-        ),
-      }
-    })?;
+    let target = Self::to_wide(&self.make_target_name(secret_ref));
+    let mut raw_credential: *mut CREDENTIALW = null_mut();
 
-    match entry.get_password() {
-      Ok(secret) => Ok(Some(secret)),
-      Err(keyring::Error::NoEntry) => Ok(None),
-      Err(source) => Err(SecretStoreError::Retrieve {
+    let read_ok = unsafe {
+      CredReadW(
+        target.as_ptr(),
+        CRED_TYPE_GENERIC,
+        0,
+        &mut raw_credential as *mut *mut CREDENTIALW,
+      )
+    };
+
+    if read_ok == 0 {
+      let code = unsafe { GetLastError() };
+      if code == ERROR_NOT_FOUND {
+        return Ok(None);
+      }
+
+      return Err(SecretStoreError::Retrieve {
         detail: format!(
-          "Could not read secret from Windows protected storage. ({source})"
+          "Could not read secret from Windows protected storage (Win32 error {code})."
         ),
-      }),
+      });
     }
+
+    let result = unsafe {
+      if raw_credential.is_null() {
+        None
+      } else {
+        let blob_ptr = (*raw_credential).CredentialBlob;
+        let blob_len = (*raw_credential).CredentialBlobSize as usize;
+
+        if blob_ptr.is_null() || blob_len == 0 {
+          Some(String::new())
+        } else {
+          let bytes = std::slice::from_raw_parts(blob_ptr as *const u8, blob_len);
+          Some(String::from_utf8_lossy(bytes).to_string())
+        }
+      }
+    };
+
+    if !raw_credential.is_null() {
+      unsafe { CredFree(raw_credential as *mut c_void) };
+    }
+
+    Ok(result)
   }
 
   fn delete_secret(&self, secret_ref: &str) -> Result<(), SecretStoreError> {
     Self::parse_secret_ref(secret_ref)?;
-    let entry = keyring::Entry::new(&self.service_name, secret_ref).map_err(|source| {
-      SecretStoreError::Delete {
-        detail: format!(
-          "Could not initialize credential delete operation. ({source})"
-        ),
-      }
-    })?;
+    let target = Self::to_wide(&self.make_target_name(secret_ref));
+    let delete_ok = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
 
-    match entry.delete_credential() {
-      Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-      Err(source) => Err(SecretStoreError::Delete {
+    if delete_ok == 0 {
+      let code = unsafe { GetLastError() };
+      if code == ERROR_NOT_FOUND {
+        return Ok(());
+      }
+
+      return Err(SecretStoreError::Delete {
         detail: format!(
-          "Could not delete secret from Windows protected storage. ({source})"
+          "Could not delete secret from Windows protected storage (Win32 error {code})."
         ),
-      }),
+      });
     }
+
+    Ok(())
   }
 
   fn backend_name(&self) -> &'static str {
@@ -456,7 +505,7 @@ mod tests {
   }
 
   #[test]
-  fn session_cache_returns_secret_when_backend_lookup_temporarily_missing() {
+  fn token_lookup_does_not_fallback_to_session_cache_when_backend_missing() {
     let storage = SecureStorage::from_store(Arc::new(VolatileNoReadStore));
 
     let token_ref = storage
@@ -467,6 +516,6 @@ mod tests {
       .get_digitalocean_api_token(&token_ref)
       .expect("token lookup should succeed");
 
-    assert_eq!(token.as_deref(), Some("dop_v1_secret"));
+    assert!(token.is_none());
   }
 }

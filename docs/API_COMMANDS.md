@@ -45,7 +45,7 @@ Request:
 Response:
 
 ```text
-Provider registered with token_ref: do-token:provider-1:...
+Provider registered with token_ref: do-token__provider-1__...
 ```
 
 ### Create a node

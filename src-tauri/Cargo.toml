@@ -28,6 +28,7 @@ thiserror = "2"
 keyring = "3"
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
 
 [dev-dependencies]
 mockito = "1"

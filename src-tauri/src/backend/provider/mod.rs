@@ -717,4 +717,46 @@ mod tests {
       .expect("provider should still exist");
     assert!(updated.token_ref.is_none());
   }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn provider_flow_roundtrip_with_windows_secure_storage_and_db() {
+    let db = Database::new(test_db_path("windows_secure_storage_roundtrip"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let registry = ProviderRegistry::new();
+    let secure_storage = SecureStorage::new();
+    let token = "dop_v1_windows_roundtrip_test_token";
+
+    let provider = registry
+      .create_digitalocean_provider_with_token(
+        &db,
+        &secure_storage,
+        "provider-1",
+        "DigitalOcean",
+        token,
+      )
+      .expect("provider create should succeed with Windows secure storage");
+
+    let token_ref = provider
+      .token_ref
+      .clone()
+      .expect("token ref should exist");
+
+    let persisted = db
+      .get_provider("provider-1")
+      .expect("provider lookup should succeed")
+      .expect("provider row should exist");
+
+    assert_eq!(persisted.token_ref.as_deref(), Some(token_ref.as_str()));
+
+    let recovered = secure_storage
+      .get_digitalocean_api_token(&token_ref)
+      .expect("token lookup should succeed");
+    assert_eq!(recovered.as_deref(), Some(token));
+
+    secure_storage
+      .delete_digitalocean_api_token(&token_ref)
+      .expect("cleanup delete should succeed");
+  }
 }
