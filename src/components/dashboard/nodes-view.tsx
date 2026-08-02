@@ -102,15 +102,14 @@ export function NodesView({
             <p className="mt-1 max-w-3xl text-sm text-[var(--on-surface-variant)]">Provision provider-backed nodes, review lifecycle state, and inspect the pricing snapshot captured when each node was created.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <span className={`inline-flex rounded-full border px-3 py-1.5 text-xs ${providerBadge.classes}`}>Provider access: {providerBadge.label}</span>
-            <Button tone="primary" onClick={onNavigateToCreate} disabled={busyAction !== null || providerAccessState !== "ready"}><span className="text-lg leading-none">+</span> Create Node</Button>
+            <Button tone="primary" onClick={onNavigateToCreate} disabled={busyAction !== null}><span className="text-lg leading-none">+</span> Create Node</Button>
           </div>
         </div>
 
         {(providerAccessState === "missing" || providerAccessState === "invalid") ? (
           <div className="flex flex-col gap-3 rounded-[20px] border border-[color:rgba(255,185,95,0.28)] bg-[color:rgba(255,185,95,0.08)] p-4 text-sm text-[var(--tertiary)] lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <div className="font-medium text-[var(--on-surface)]">Provisioning is disabled until provider access is healthy.</div>
+              <div className="font-medium text-[var(--on-surface)]">Provider access will be checked on the create page.</div>
               <div className="mt-1 text-[var(--on-surface-variant)]">{providerStatusMessage}</div>
             </div>
             <Button tone="secondary" onClick={() => onNavigateToView("settings")}>Open Settings</Button>

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { useDashboard } from "./dashboard-provider";
-import { AppIcon, providerAccessBadge, type AppView, VIEW_ROUTE } from "./shared";
+import { AppIcon, type AppView, VIEW_ROUTE } from "./shared";
 
 const navItems: Array<{ id: AppView; label: string; icon: string; eyebrow: string }> = [
   { id: "dashboard", label: "Dashboard", icon: "grid", eyebrow: "Overview" },
@@ -43,8 +43,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const activeView = getActiveView(pathname);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const { busyAction, loadDashboard, providerAccessState, recovery, toasts } = useDashboard();
-  const providerBadge = providerAccessBadge(providerAccessState);
+  const { busyAction, loadDashboard, recovery, toasts } = useDashboard();
 
   useEffect(() => {
     const closeOnDesktop = () => {
@@ -166,12 +165,6 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             <header className="rounded-[28px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(16,19,27,0.85),rgba(14,17,24,0.85))] px-5 py-4 shadow-[var(--shadow-elevated)] backdrop-blur-md">
               <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                 <div className="space-y-3">
-                  <div className="flex flex-wrap items-center gap-2 text-sm text-[var(--on-surface-variant)]">
-                    <span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">Phase 1 Control Plane</span>
-                    <span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">Windows</span>
-                    <span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">Dynamic Provider</span>
-                    <span className="rounded-full border border-[color:var(--outline-variant)] px-3 py-1">WireGuard</span>
-                  </div>
                   <div>
                     <h1 className="text-3xl font-semibold tracking-tight text-[var(--on-surface)]">{titleMap[activeView]}</h1>
                     <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--on-surface-variant)]">{subtitleMap[activeView]}</p>
@@ -179,13 +172,10 @@ export function DashboardShell({ children }: { children: ReactNode }) {
                 </div>
 
                 <div className="flex flex-col items-start gap-3 xl:items-end">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className={`inline-flex rounded-full border px-3 py-1.5 text-xs ${providerBadge.classes}`}>Provider access: {providerBadge.label}</span>
-                    <button type="button" onClick={() => void loadDashboard()} disabled={busyAction !== null} className="inline-flex items-center gap-2 rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2.5 text-sm font-medium text-[var(--on-surface)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-50">
-                      <AppIcon name="refresh" className="h-4 w-4" />
-                      {busyAction === "refresh" ? "Refreshing" : "Refresh dashboard"}
-                    </button>
-                  </div>
+                  <button type="button" onClick={() => void loadDashboard()} disabled={busyAction !== null} className="inline-flex items-center gap-2 rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2.5 text-sm font-medium text-[var(--on-surface)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-50">
+                    <AppIcon name="refresh" className="h-4 w-4" />
+                    {busyAction === "refresh" ? "Refreshing" : "Refresh dashboard"}
+                  </button>
                   <div className={`rounded-2xl border px-4 py-3 text-sm ${recovery ? "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface-variant)]"}`}>
                     <div className="text-[11px] uppercase tracking-[0.28em]">{recovery ? recovery.title : busyAction ? `Working: ${busyAction}` : "Idle"}</div>
                     <div className="mt-1 max-w-[28rem] text-[var(--on-surface)]/90">{recovery ? recovery.nextAction : "Shared dashboard chrome now stays mounted across child-route navigation."}</div>
