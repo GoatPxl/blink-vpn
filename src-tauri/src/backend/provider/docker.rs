@@ -2,7 +2,10 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use crate::backend::bootstrap::{BootstrapOutputContract, DEFAULT_WIREGUARD_PORT};
+use crate::backend::bootstrap::{
+  BootstrapOutputContract, DEFAULT_CLIENT_CIDR, DEFAULT_INTERFACE_NAME,
+  DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_WIREGUARD_PORT,
+};
 
 use super::{Account, ProviderAdapterError, ProviderPlanPricing, ProvisionedDroplet};
 
@@ -215,10 +218,15 @@ if [ ! -s /etc/wireguard/server_private.key ] || [ ! -s /etc/wireguard/server_pu
   printf '%s\\n' \"$server_public_key\" > /etc/wireguard/server_public.key; \
 fi; \
 server_public_key=\"$(cat /etc/wireguard/server_public.key)\"; \
+server_private_key=\"$(cat /etc/wireguard/server_private.key)\"; \
+printf '[Interface]\\nAddress = {server_cidr}\\nListenPort = {listen_port}\\nPrivateKey = %s\\nSaveConfig = false\\n\\nPostUp = iptables -A FORWARD -i {interface_name} -j ACCEPT; iptables -A FORWARD -o {interface_name} -j ACCEPT; iptables -t nat -A POSTROUTING -s {client_cidr} -j MASQUERADE\\nPostDown = iptables -D FORWARD -i {interface_name} -j ACCEPT; iptables -D FORWARD -o {interface_name} -j ACCEPT; iptables -t nat -D POSTROUTING -s {client_cidr} -j MASQUERADE\\n' \"$server_private_key\" > /etc/wireguard/{interface_name}.conf; \
 mkdir -p \"$(dirname '{readiness_marker_path}')\"; \
 printf '{{\"status\":\"ready\",\"server_public_key\":\"%s\",\"listen_port\":%d}}\\n' \"$server_public_key\" {listen_port} > '{readiness_marker_path}'; \
 true",
-      listen_port = DEFAULT_WIREGUARD_PORT
+      listen_port = DEFAULT_WIREGUARD_PORT,
+      interface_name = DEFAULT_INTERFACE_NAME,
+      server_cidr = DEFAULT_SERVER_INTERFACE_CIDR,
+      client_cidr = DEFAULT_CLIENT_CIDR
     );
 
     let _ = Self::docker_exec(
@@ -259,6 +267,59 @@ true",
     }
 
     Ok(server_public_key)
+  }
+
+  fn build_client_peer_update_script(
+    client_public_key: &str,
+    client_address_cidr: &str,
+    interface_name: &str,
+  ) -> Result<String, ProviderAdapterError> {
+    let public_key = client_public_key.trim();
+    let client_cidr = client_address_cidr.trim();
+    let iface = interface_name.trim();
+
+    if public_key.is_empty() {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: "Docker client peer update needs a non-empty client public key.".to_string(),
+      });
+    }
+
+    if client_cidr.is_empty() {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: "Docker client peer update needs a non-empty client CIDR.".to_string(),
+      });
+    }
+
+    if iface.is_empty() {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: "Docker client peer update needs a non-empty interface name.".to_string(),
+      });
+    }
+
+    Ok(format!(
+      "set -eu; mkdir -p /etc/wireguard /var/lib/goatstare; fragment=$(mktemp /tmp/goatstare-peer-XXXXXX.conf); printf '[Peer]\nPublicKey = {public_key}\nAllowedIPs = {client_cidr}\n' > \"$fragment\"; cat \"$fragment\" >> /etc/wireguard/{iface}.conf; cp \"$fragment\" /var/lib/goatstare/{iface}-client-peer.conf; rm -f \"$fragment\"; if command -v wg >/dev/null 2>&1 && ip link show {iface} >/dev/null 2>&1; then wg set {iface} peer {public_key} allowed-ips {client_cidr}; fi; true"
+    ))
+  }
+
+  pub fn wire_client_peer(
+    droplet_id: u64,
+    client_public_key: &str,
+    client_address_cidr: &str,
+  ) -> Result<(), ProviderAdapterError> {
+    let container_id = Self::container_id_for_droplet(droplet_id)?;
+    let script = Self::build_client_peer_update_script(
+      client_public_key,
+      client_address_cidr,
+      DEFAULT_INTERFACE_NAME,
+    )?;
+
+    let _ = Self::docker_exec(
+      &container_id,
+      &script,
+      "apply WireGuard client peer to Docker server container",
+    )?;
+
+    Ok(())
   }
 }
 
@@ -499,6 +560,21 @@ mod tests {
         assert_eq!(contract.listen_port, 51820);
         assert!(contract.server_public_key.len() >= 40);
 
+        let container_id = DockerProviderAdapter::container_id_for_droplet(provisioned.droplet_id)
+          .expect("container id should resolve for provisioned droplet");
+        let server_conf = DockerProviderAdapter::docker_exec(
+          &container_id,
+          "cat /etc/wireguard/wg0.conf",
+          "read WireGuard server config from Docker container",
+        )
+        .expect("server config should be readable from container");
+
+        assert!(server_conf.contains("[Interface]"));
+        assert!(server_conf.contains("Address = 10.66.0.1/24"));
+        assert!(server_conf.contains("ListenPort = 51820"));
+        assert!(server_conf.contains("PrivateKey = "));
+        assert!(server_conf.contains("SaveConfig = false"));
+
         let exists = adapter
           .droplet_exists(token, provisioned.droplet_id)
           .expect("droplet existence check should succeed");
@@ -521,5 +597,67 @@ mod tests {
       .droplet_exists(token, provisioned.droplet_id)
       .expect("post-delete existence check should succeed");
     assert!(!exists_after);
+  }
+
+  #[test]
+  #[ignore = "Requires local Docker daemon and WireGuard tooling inside the test container"]
+  fn real_docker_server_config_accepts_client_peer_roundtrip() {
+    let adapter = DockerProviderAdapter::new();
+    let token = "dkr_v1_local_dev_mock_token_2026";
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_secs())
+      .unwrap_or(0);
+    let node_name = format!("docker-peer-roundtrip-{suffix}");
+
+    let provisioned = adapter
+      .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", "")
+      .expect("docker create should succeed with a local daemon");
+
+    let contract = adapter
+      .wait_for_bootstrap_ready(
+        token,
+        provisioned.droplet_id,
+        &provisioned.public_ipv4,
+        READINESS_MARKER_PATH,
+      )
+      .expect("bootstrap contract should be available");
+
+    DockerProviderAdapter::wire_client_peer(
+      provisioned.droplet_id,
+      "client-pub-key",
+      "10.66.0.2/32",
+    )
+    .expect("client peer wiring should succeed");
+
+    let container_id = DockerProviderAdapter::container_id_for_droplet(provisioned.droplet_id)
+      .expect("container id should resolve for provisioned droplet");
+    let _server_conf = DockerProviderAdapter::docker_exec(
+      &container_id,
+      "cat /etc/wireguard/wg0.conf",
+      "read WireGuard server config after client peer wiring",
+    )
+    .expect("server config should be readable from container");
+
+    assert_eq!(contract.server_endpoint_ip, provisioned.public_ipv4);
+
+    adapter
+      .delete_droplet(token, provisioned.droplet_id)
+      .expect("docker cleanup should succeed");
+  }
+
+  #[test]
+  fn client_peer_update_script_mentions_peer_and_allowed_ips() {
+    let script = DockerProviderAdapter::build_client_peer_update_script(
+      "client-pub-key",
+      "10.66.0.2/32",
+      "wg0",
+    )
+    .expect("peer update script should build");
+
+    assert!(script.contains("wg set wg0 peer client-pub-key allowed-ips 10.66.0.2/32"));
+    assert!(script.contains("[Peer]"));
+    assert!(script.contains("AllowedIPs = 10.66.0.2/32"));
+    assert!(script.contains("/etc/wireguard/wg0.conf"));
   }
 }

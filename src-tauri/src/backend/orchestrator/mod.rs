@@ -15,6 +15,7 @@ use crate::backend::provider::{
   ProvisionedDroplet, ProviderFlowError, ProviderPlanPricing, ProviderRegistry, DEFAULT_REGION,
   DEFAULT_SIZE,
 };
+use crate::backend::provider::docker::DockerProviderAdapter;
 use crate::backend::secure_storage::SecureStorage;
 use crate::backend::wireguard::{
   ClientConfigParams, DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS,
@@ -789,6 +790,42 @@ impl Orchestrator {
         detail: "Could not generate client WireGuard keypair locally.".to_string(),
         source,
       })?;
+
+    let provider = db
+      .get_provider(&node.provider_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed reading provider before peer wiring for client tunnel creation.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "VPN node provider does not exist for client tunnel wiring.".to_string(),
+      })?;
+
+    if provider.slug == "docker" {
+      let droplet_id = node.external_ref.as_ref().ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "Docker node is missing external droplet reference; cannot wire client peer.".to_string(),
+      })?;
+
+      let droplet_id = droplet_id.parse::<u64>().map_err(|_| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "Docker node external droplet reference is not a valid droplet id.".to_string(),
+      })?;
+
+      DockerProviderAdapter::wire_client_peer(
+        droplet_id,
+        &keypair.public_key,
+        &request.client_address_cidr,
+      )
+      .map_err(|source| OrchestratorError::Provider {
+        detail: "Could not wire WireGuard client peer into Docker server bootstrap.".to_string(),
+        source: ProviderFlowError::Adapter {
+          detail: "Docker server peer wiring failed during client tunnel creation.".to_string(),
+          source,
+        },
+      })?;
+    }
 
     let config = wireguard
       .build_client_config(&ClientConfigParams {
@@ -2165,7 +2202,7 @@ mod tests {
 
     let state = runner.state.lock().expect("lock should work");
     assert_eq!(state.install_calls, 1);
-    assert_eq!(state.activate_calls, 2);
+    assert_eq!(state.activate_calls, 1);
   }
 
   #[test]
