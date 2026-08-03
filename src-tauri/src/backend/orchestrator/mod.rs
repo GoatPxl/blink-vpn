@@ -2218,9 +2218,18 @@ impl OrchestratorError {
       Self::WireGuard { detail, source } => UserFacingError {
         kind: UserFacingErrorKind::WireGuard,
         message: format!("{detail}: {source}"),
-        next_action:
-          "Repair WireGuard for Windows, then use Force Cleanup to remove stale tunnel artifacts."
-            .to_string(),
+        next_action: {
+          let lowered = source.to_string().to_ascii_lowercase();
+          if lowered.contains("access is denied")
+            || lowered.contains("requires elevation")
+            || lowered.contains("administrator")
+          {
+            "Approve the Windows UAC prompt for WireGuard tunnel operations, or run GoatStare as Administrator, then retry Connect.".to_string()
+          } else {
+            "Repair WireGuard for Windows, then use Force Cleanup to remove stale tunnel artifacts."
+              .to_string()
+          }
+        },
       },
       Self::Bootstrap { detail, .. } => UserFacingError {
         kind: UserFacingErrorKind::Unknown,

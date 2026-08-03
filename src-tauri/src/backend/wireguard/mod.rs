@@ -250,14 +250,30 @@ impl WireGuardManager {
       })?;
 
     let path_arg = file_path.as_os_str().to_string_lossy().to_string();
-    let import_result = self
-      .runner
-      .run(&wireguard_program, &["/installtunnelservice", &path_arg], None)
-      .map_err(|source| WireGuardError::Command {
-        command: "wireguard /installtunnelservice <config>".to_string(),
-        detail: "Could not register tunnel service in WireGuard for Windows.".to_string(),
-        source,
-      });
+    let install_args = ["/installtunnelservice", path_arg.as_str()];
+    let import_result = match self.runner.run(&wireguard_program, &install_args, None) {
+      Ok(output) => Ok(output),
+      Err(source) => {
+        let should_retry_elevated = matches!(
+          &source,
+          CommandExecError::NonZeroExit { detail, .. }
+            if is_windows_access_denied_detail(detail)
+        );
+
+        if should_retry_elevated {
+          run_wireguard_via_uac(&wireguard_program, &install_args)
+        } else {
+          Err(source)
+        }
+      }
+    }
+    .map_err(|source| WireGuardError::Command {
+      command: "wireguard /installtunnelservice <config>".to_string(),
+      detail:
+        "Could not register tunnel service in WireGuard for Windows. If prompted, approve administrator elevation for tunnel import."
+          .to_string(),
+      source,
+    });
 
     if let Err(err) = std::fs::remove_file(&file_path) {
       log::warn!(
@@ -329,14 +345,34 @@ impl WireGuardManager {
     let wireguard_program = self.resolve_wireguard_program()?;
     validate_tunnel_name(tunnel_name)?;
 
-    let result = self
-      .runner
-      .run(&wireguard_program, &["/uninstalltunnelservice", tunnel_name], None)
-      .map_err(|source| WireGuardError::Command {
-        command: format!("wireguard /uninstalltunnelservice {tunnel_name}"),
-        detail: "Could not unregister WireGuard tunnel service.".to_string(),
-        source,
-      });
+    if !self.tunnel_service_exists(tunnel_name)? {
+      return Ok(());
+    }
+
+    let uninstall_args = ["/uninstalltunnelservice", tunnel_name];
+    let result = match self.runner.run(&wireguard_program, &uninstall_args, None) {
+      Ok(output) => Ok(output),
+      Err(source) => {
+        let should_retry_elevated = matches!(
+          &source,
+          CommandExecError::NonZeroExit { detail, .. }
+            if is_windows_access_denied_detail(detail)
+        );
+
+        if should_retry_elevated {
+          run_wireguard_via_uac(&wireguard_program, &uninstall_args)
+        } else {
+          Err(source)
+        }
+      }
+    }
+    .map_err(|source| WireGuardError::Command {
+      command: format!("wireguard /uninstalltunnelservice {tunnel_name}"),
+      detail:
+        "Could not unregister WireGuard tunnel service. If prompted, approve administrator elevation for cleanup."
+          .to_string(),
+      source,
+    });
 
     match result {
       Ok(_) => Ok(()),
@@ -344,6 +380,28 @@ impl WireGuardManager {
         source: CommandExecError::NonZeroExit { code: Some(1060), .. },
         ..
       }) => Ok(()),
+      Err(WireGuardError::Command {
+        source: CommandExecError::NonZeroExit { detail, .. },
+        ..
+      }) if is_windows_service_missing_detail(&detail) => Ok(()),
+      Err(error) => Err(error),
+    }
+  }
+
+  fn tunnel_service_exists(&self, tunnel_name: &str) -> Result<bool, WireGuardError> {
+    let service_name = wireguard_service_name(tunnel_name);
+    let query_result = self
+      .runner
+      .run("sc", &["query", &service_name], None)
+      .map_err(|source| map_sc_tunnel_error(source, &service_name, "query"));
+
+    match query_result {
+      Ok(_) => Ok(true),
+      Err(WireGuardError::TunnelNotFound { .. }) => Ok(false),
+      Err(WireGuardError::Command {
+        source: CommandExecError::NonZeroExit { detail, .. },
+        ..
+      }) if is_windows_access_denied_detail(&detail) => Ok(true),
       Err(error) => Err(error),
     }
   }
@@ -777,6 +835,54 @@ fn validate_tunnel_name(tunnel_name: &str) -> Result<(), WireGuardError> {
   })
 }
 
+fn is_windows_service_missing_detail(detail: &str) -> bool {
+  let lowered = detail.to_ascii_lowercase();
+  lowered.contains("1060")
+    || lowered.contains("does not exist")
+    || lowered.contains("not found")
+    || lowered.contains("unable to find")
+    || lowered.contains("no such service")
+}
+
+fn is_windows_access_denied_detail(detail: &str) -> bool {
+  let lowered = detail.to_ascii_lowercase();
+  lowered.contains("access is denied")
+    || lowered.contains("requires elevation")
+    || lowered.contains("administrator")
+    || lowered.contains("0x80070005")
+}
+
+fn run_wireguard_via_uac(program: &str, args: &[&str]) -> Result<CommandOutput, CommandExecError> {
+  if !cfg!(target_os = "windows") {
+    return Err(CommandExecError::Spawn {
+      program: program.to_string(),
+      detail: "UAC elevation fallback is only supported on Windows.".to_string(),
+      source: std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "UAC fallback attempted on a non-Windows host",
+      ),
+    });
+  }
+
+  let escaped_program = program.replace('\'', "''");
+  let escaped_args = args
+    .iter()
+    .map(|arg| format!("'{}'", arg.replace('\'', "''")))
+    .collect::<Vec<_>>()
+    .join(", ");
+
+  let script = format!(
+    "$p = Start-Process -FilePath '{}' -Verb RunAs -Wait -PassThru -ArgumentList @({}); if ($null -eq $p) {{ exit 1223 }}; exit $p.ExitCode",
+    escaped_program, escaped_args
+  );
+
+  ProcessCommandRunner.run(
+    "powershell",
+    &["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script],
+    None,
+  )
+}
+
 fn resolve_wireguard_command_path(program: &str) -> Option<PathBuf> {
   if !cfg!(target_os = "windows") {
     return None;
@@ -888,7 +994,8 @@ mod tests {
   use super::{
     ClientConfigParams, CommandExecError, CommandOutput, CommandRunner,
     DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS, TunnelServiceState,
-    WireGuardError, WireGuardManager, build_client_config, parse_sc_state,
+    WireGuardError, WireGuardManager, build_client_config, is_windows_access_denied_detail,
+    is_windows_service_missing_detail, parse_sc_state,
     parse_wg_dump_metrics, parse_wg_version_output,
   };
   use std::sync::{Arc, Mutex};
@@ -940,6 +1047,22 @@ mod tests {
         return Ok(CommandOutput {
           stdout: "WireGuard for Windows".to_string(),
           stderr: String::new(),
+        });
+      }
+
+      if program_name == "sc" && args.len() == 2 && args[0] == "query" {
+        let service_exists = *self.service_exists.lock().expect("lock must work");
+        if service_exists {
+          return Ok(CommandOutput {
+            stdout: "STATE              : 1  STOPPED".to_string(),
+            stderr: String::new(),
+          });
+        }
+
+        return Err(CommandExecError::NonZeroExit {
+          program: "sc".to_string(),
+          code: Some(1060),
+          detail: "The specified service does not exist as an installed service.".to_string(),
         });
       }
 
@@ -1101,10 +1224,94 @@ mod tests {
     assert!(result.is_ok());
 
     let calls = runner.calls();
-    assert!(calls.iter().any(|(_, args)| args == &[
+    assert!(!calls.iter().any(|(_, args)| args == &[
       "/uninstalltunnelservice".to_string(),
       "wg-node-1".to_string(),
     ]));
     assert!(calls.iter().any(|(_, args)| args.first().is_some_and(|arg| arg == "/installtunnelservice")));
+  }
+
+  #[derive(Clone, Default)]
+  struct MockMissingServiceTextRunner;
+
+  impl CommandRunner for MockMissingServiceTextRunner {
+    fn run(
+      &self,
+      program: &str,
+      args: &[&str],
+      _stdin: Option<&str>,
+    ) -> Result<CommandOutput, CommandExecError> {
+      let program_name = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+
+      if program_name == "wg" && args == ["--version"] {
+        return Ok(CommandOutput {
+          stdout: "wireguard-tools v1".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wireguard" && args == ["/help"] {
+        return Ok(CommandOutput {
+          stdout: "WireGuard for Windows".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "sc" && args.len() == 2 && args[0] == "query" {
+        return Err(CommandExecError::NonZeroExit {
+          program: "sc".to_string(),
+          code: Some(1060),
+          detail: "The specified service does not exist as an installed service.".to_string(),
+        });
+      }
+
+      if program_name == "wireguard" && args.len() == 2 && args[0] == "/uninstalltunnelservice" {
+        return Err(CommandExecError::NonZeroExit {
+          program: "wireguard".to_string(),
+          code: Some(1),
+          detail: "The specified service does not exist as an installed service. (1060)"
+            .to_string(),
+        });
+      }
+
+      if program_name == "wireguard" && args.len() == 2 && args[0] == "/installtunnelservice" {
+        return Ok(CommandOutput {
+          stdout: "installed".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      Err(CommandExecError::NonZeroExit {
+        program: program.to_string(),
+        code: Some(1),
+        detail: "unsupported mock command".to_string(),
+      })
+    }
+  }
+
+  #[test]
+  fn import_tunnel_succeeds_when_uninstall_reports_missing_service_in_stderr_detail() {
+    let runner = Arc::new(MockMissingServiceTextRunner);
+    let wireguard = WireGuardManager::with_runner(runner);
+
+    let result = wireguard.import_tunnel(
+      "wg-node-1",
+      "[Interface]\nPrivateKey = priv\nAddress = 10.66.0.2/32\n\n[Peer]\nPublicKey = pub\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:51820\nPersistentKeepalive = 25\n",
+    );
+
+    assert!(result.is_ok());
+  }
+
+  #[test]
+  fn windows_error_detail_detectors_match_expected_variants() {
+    assert!(is_windows_service_missing_detail(
+      "The specified service does not exist as an installed service. (1060)"
+    ));
+    assert!(is_windows_access_denied_detail("[Error:  Access is denied.]"));
+    assert!(is_windows_access_denied_detail("The requested operation requires elevation."));
+    assert!(!is_windows_access_denied_detail("service missing"));
   }
 }
