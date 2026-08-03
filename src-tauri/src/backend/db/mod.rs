@@ -15,6 +15,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (7, include_str!("../../../migrations/0007_seed_docker_provider.sql")),
   (8, include_str!("../../../migrations/0008_provider_status.sql")),
   (9, include_str!("../../../migrations/0009_init_run_logs.sql")),
+  (10, include_str!("../../../migrations/0010_tunnel_client_config_metadata.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -220,6 +221,10 @@ pub struct TunnelRecord {
   pub node_id: String,
   pub name: String,
   pub status: TunnelStatus,
+  pub client_private_key_ref: Option<String>,
+  pub client_address_cidr: Option<String>,
+  pub dns_server: Option<String>,
+  pub allowed_ips: Option<String>,
   pub interface_name: Option<String>,
   pub assigned_ipv4: Option<String>,
   pub last_handshake_age_seconds: Option<i64>,
@@ -824,9 +829,9 @@ impl Database {
     let connection = self.open_connection()?;
     connection
       .query_row(
-        "SELECT id, node_id, name, status, interface_name, assigned_ipv4,
-          last_handshake_age_seconds, rx_bytes, tx_bytes, stats_updated_at,
-          last_error, created_at, updated_at
+        "SELECT id, node_id, name, status, client_private_key_ref, client_address_cidr,
+          dns_server, allowed_ips, interface_name, assigned_ipv4, last_handshake_age_seconds,
+          rx_bytes, tx_bytes, stats_updated_at, last_error, created_at, updated_at
          FROM tunnels
          WHERE id = ?1",
         params![id],
@@ -845,9 +850,9 @@ impl Database {
     let connection = self.open_connection()?;
     let mut statement = connection
       .prepare(
-        "SELECT id, node_id, name, status, interface_name, assigned_ipv4,
-          last_handshake_age_seconds, rx_bytes, tx_bytes, stats_updated_at,
-          last_error, created_at, updated_at
+        "SELECT id, node_id, name, status, client_private_key_ref, client_address_cidr,
+          dns_server, allowed_ips, interface_name, assigned_ipv4, last_handshake_age_seconds,
+          rx_bytes, tx_bytes, stats_updated_at, last_error, created_at, updated_at
          FROM tunnels
          WHERE node_id = ?1
          ORDER BY created_at ASC",
@@ -910,6 +915,50 @@ impl Database {
         id: id.to_string(),
         detail: "Status update skipped because no row matched the id."
           .to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
+  pub fn update_tunnel_client_config(
+    &self,
+    id: &str,
+    client_private_key_ref: Option<&str>,
+    client_address_cidr: Option<&str>,
+    dns_server: Option<&str>,
+    allowed_ips: Option<&str>,
+  ) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let changed = connection
+      .execute(
+        "UPDATE tunnels
+         SET client_private_key_ref = ?2,
+             client_address_cidr = ?3,
+             dns_server = ?4,
+             allowed_ips = ?5,
+             assigned_ipv4 = ?3,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1",
+        params![
+          id,
+          client_private_key_ref,
+          client_address_cidr,
+          dns_server,
+          allowed_ips,
+        ],
+      )
+      .map_err(|source| DbError::Query {
+        action: "update_tunnel_client_config",
+        detail: "Failed updating tunnel client configuration metadata.".to_string(),
+        source,
+      })?;
+
+    if changed == 0 {
+      return Err(DbError::NotFound {
+        entity: "tunnel",
+        id: id.to_string(),
+        detail: "Client configuration update skipped because no row matched the id.".to_string(),
       });
     }
 
@@ -1112,15 +1161,19 @@ fn map_tunnel_row(row: &Row<'_>) -> rusqlite::Result<TunnelRecord> {
     node_id: row.get(1)?,
     name: row.get(2)?,
     status,
-    interface_name: row.get(4)?,
-    assigned_ipv4: row.get(5)?,
-    last_handshake_age_seconds: row.get(6)?,
-    rx_bytes: row.get(7)?,
-    tx_bytes: row.get(8)?,
-    stats_updated_at: row.get(9)?,
-    last_error: row.get(10)?,
-    created_at: row.get(11)?,
-    updated_at: row.get(12)?,
+    client_private_key_ref: row.get(4)?,
+    client_address_cidr: row.get(5)?,
+    dns_server: row.get(6)?,
+    allowed_ips: row.get(7)?,
+    interface_name: row.get(8)?,
+    assigned_ipv4: row.get(9)?,
+    last_handshake_age_seconds: row.get(10)?,
+    rx_bytes: row.get(11)?,
+    tx_bytes: row.get(12)?,
+    stats_updated_at: row.get(13)?,
+    last_error: row.get(14)?,
+    created_at: row.get(15)?,
+    updated_at: row.get(16)?,
   })
 }
 

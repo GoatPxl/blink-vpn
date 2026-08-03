@@ -17,6 +17,7 @@ use crate::backend::provider::{
 };
 use crate::backend::provider::docker::DockerProviderAdapter;
 use crate::backend::secure_storage::SecureStorage;
+use crate::backend::secure_storage::SecretStoreError;
 use crate::backend::wireguard::{
   ClientConfigParams, DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS,
   TunnelRuntimeStatus, WireGuardError,
@@ -178,6 +179,12 @@ pub enum OrchestratorError {
     #[source]
     source: WireGuardError,
   },
+  #[error("Secure storage operation failed: {detail}")]
+  SecretStorage {
+    detail: String,
+    #[source]
+    source: SecretStoreError,
+  },
 }
 
 impl Orchestrator {
@@ -301,6 +308,9 @@ impl Orchestrator {
 
     let local_tunnels_removed = tunnels.len();
     for tunnel in tunnels {
+      if let Some(private_key_ref) = tunnel.client_private_key_ref.as_deref() {
+        let _ = secure_storage.delete_client_private_key(private_key_ref);
+      }
       let _ = db.delete_tunnel(&tunnel.id);
     }
 
@@ -721,6 +731,7 @@ impl Orchestrator {
     &self,
     wireguard: &WireGuardManager,
     db: &Database,
+    secure_storage: &SecureStorage,
     request: &CreateClientTunnelRequest,
   ) -> Result<CreateClientTunnelResult, OrchestratorError> {
     let node = db
@@ -743,17 +754,6 @@ impl Orchestrator {
         detail: "VPN node must be Ready before client tunnel activation.".to_string(),
       });
     }
-
-    let server_public_key = node
-      .server_public_key
-      .ok_or_else(|| OrchestratorError::InvalidState {
-        node_id: request.node_id.clone(),
-        detail: "VPN node is missing server public key; cannot build client config.".to_string(),
-      })?;
-    let endpoint_ip = node.public_ipv4.ok_or_else(|| OrchestratorError::InvalidState {
-      node_id: request.node_id.clone(),
-      detail: "VPN node is missing public endpoint IP; cannot build client config.".to_string(),
-    })?;
 
     let existing = db
       .get_tunnel(&request.tunnel_id)
@@ -784,10 +784,86 @@ impl Orchestrator {
       }
     }
 
-    let keypair = wireguard
-      .generate_client_keypair()
-      .map_err(|source| OrchestratorError::WireGuard {
-        detail: "Could not generate client WireGuard keypair locally.".to_string(),
+    let persisted_tunnel = db
+      .get_tunnel(&request.tunnel_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed reloading tunnel before secure key setup.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "Tunnel row is missing during secure key setup.".to_string(),
+      })?;
+
+    let (keypair, client_private_key_ref) = match persisted_tunnel.client_private_key_ref.as_deref() {
+      Some(key_ref) => match secure_storage
+        .get_client_private_key(key_ref)
+        .map_err(|source| OrchestratorError::SecretStorage {
+          detail: "Could not load persisted client private key from secure storage.".to_string(),
+          source,
+        })? {
+        Some(private_key) => {
+          let public_key = wireguard
+            .derive_public_key(&private_key)
+            .map_err(|source| OrchestratorError::WireGuard {
+              detail: "Could not derive WireGuard public key from persisted private key.".to_string(),
+              source,
+            })?;
+
+          (
+            crate::backend::wireguard::ClientKeyPair {
+              private_key,
+              public_key,
+            },
+            key_ref.to_string(),
+          )
+        }
+        None => {
+          let generated = wireguard
+            .generate_client_keypair()
+            .map_err(|source| OrchestratorError::WireGuard {
+              detail: "Could not generate client WireGuard keypair locally.".to_string(),
+              source,
+            })?;
+          let key_ref = secure_storage
+            .store_client_private_key(&request.node_id, &generated.private_key)
+            .map_err(|source| OrchestratorError::SecretStorage {
+              detail: "Could not persist client private key to secure storage.".to_string(),
+              source,
+            })?;
+
+          (generated, key_ref)
+        }
+      },
+      None => {
+        let generated = wireguard
+          .generate_client_keypair()
+          .map_err(|source| OrchestratorError::WireGuard {
+            detail: "Could not generate client WireGuard keypair locally.".to_string(),
+            source,
+          })?;
+
+        let key_ref = secure_storage
+          .store_client_private_key(&request.node_id, &generated.private_key)
+          .map_err(|source| OrchestratorError::SecretStorage {
+            detail: "Could not persist client private key to secure storage.".to_string(),
+            source,
+          })?;
+
+        (generated, key_ref)
+      }
+    };
+
+    db
+      .update_tunnel_client_config(
+        &request.tunnel_id,
+        Some(&client_private_key_ref),
+        Some(&request.client_address_cidr),
+        request.dns_server.as_deref(),
+        Some(&request.allowed_ips.join(",")),
+      )
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed persisting tunnel secure metadata.".to_string(),
         source,
       })?;
 
@@ -827,43 +903,12 @@ impl Orchestrator {
       })?;
     }
 
-    let config = wireguard
-      .build_client_config(&ClientConfigParams {
-        private_key: keypair.private_key,
-        client_address_cidr: request.client_address_cidr.clone(),
-        dns_server: request.dns_server.clone(),
-        server_public_key,
-        server_endpoint_ip: endpoint_ip,
-        server_listen_port: DEFAULT_WIREGUARD_PORT,
-        allowed_ips: request.allowed_ips.clone(),
-        persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
-      })
-      .map_err(|source| OrchestratorError::WireGuard {
-        detail: "Could not render client WireGuard config.".to_string(),
+    db
+      .update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, None)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed setting tunnel status to configured.".to_string(),
         source,
       })?;
-
-    if let Err(error) = wireguard.import_tunnel(&request.tunnel_name, &config) {
-      let _ = db.update_tunnel_status(
-        &request.tunnel_id,
-        TunnelStatus::Error,
-        Some("WireGuard tunnel import failed"),
-      );
-      return Err(OrchestratorError::WireGuard {
-        detail: "Could not import client tunnel into WireGuard for Windows.".to_string(),
-        source: error,
-      });
-    }
-
-    self.connect_tunnel_inner(
-      wireguard,
-      db,
-      &ConnectTunnelRequest {
-        node_id: request.node_id.clone(),
-        tunnel_id: request.tunnel_id.clone(),
-      },
-      false,
-    )?;
 
     Ok(CreateClientTunnelResult {
       tunnel_id: request.tunnel_id.clone(),
@@ -876,6 +921,7 @@ impl Orchestrator {
     &self,
     wireguard: &WireGuardManager,
     db: &Database,
+    secure_storage: &SecureStorage,
     tunnel_id: &str,
   ) -> Result<(), OrchestratorError> {
     let tunnel = db
@@ -896,6 +942,7 @@ impl Orchestrator {
     self.disconnect_tunnel(
       wireguard,
       db,
+      secure_storage,
       &DisconnectTunnelRequest {
         node_id: tunnel.node_id,
         tunnel_id: tunnel_id.to_string(),
@@ -907,6 +954,7 @@ impl Orchestrator {
     &self,
     wireguard: &WireGuardManager,
     db: &Database,
+    secure_storage: &SecureStorage,
     tunnel_id: &str,
   ) -> Result<(), OrchestratorError> {
     let tunnel = db
@@ -927,6 +975,7 @@ impl Orchestrator {
     self.connect_tunnel(
       wireguard,
       db,
+      secure_storage,
       &ConnectTunnelRequest {
         node_id: tunnel.node_id,
         tunnel_id: tunnel_id.to_string(),
@@ -938,17 +987,18 @@ impl Orchestrator {
     &self,
     wireguard: &WireGuardManager,
     db: &Database,
+    secure_storage: &SecureStorage,
     request: &ConnectTunnelRequest,
   ) -> Result<(), OrchestratorError> {
-    self.connect_tunnel_inner(wireguard, db, request, true)
+    self.connect_tunnel_inner(wireguard, db, secure_storage, request)
   }
 
   fn connect_tunnel_inner(
     &self,
     wireguard: &WireGuardManager,
     db: &Database,
+    secure_storage: &SecureStorage,
     request: &ConnectTunnelRequest,
-    allow_service_repair: bool,
   ) -> Result<(), OrchestratorError> {
     let node = db
       .get_vpn_node(&request.node_id)
@@ -1000,18 +1050,19 @@ impl Orchestrator {
       }
     }
 
+    let connect_config = load_connect_config_for_tunnel(secure_storage, &node, &tunnel)?;
+
+    wireguard
+      .import_tunnel(&tunnel.name, &connect_config)
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not import client tunnel into WireGuard for Windows during connect flow."
+          .to_string(),
+        source,
+      })?;
+
     if let Err(source) = wireguard.activate_tunnel(&tunnel.name) {
-      if allow_service_repair && matches!(source, WireGuardError::TunnelNotFound { .. }) {
-        log::warn!(
-          "event=tunnel.connect.repair_missing_service node_id={} tunnel_id={} tunnel_name={}",
-          request.node_id,
-          request.tunnel_id,
-          tunnel.name
-        );
-
-        return self.recover_missing_tunnel_service(wireguard, db, &node, &tunnel);
-      }
-
+      let _ = wireguard.unregister_tunnel(&tunnel.name);
+      let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel activation failed; service was removed."));
       return Err(OrchestratorError::WireGuard {
         detail: "Could not activate WireGuard tunnel service in connect flow.".to_string(),
         source,
@@ -1045,6 +1096,9 @@ impl Orchestrator {
       return Ok(());
     }
 
+    let _ = wireguard.unregister_tunnel(&tunnel.name);
+    let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel runtime did not report Running; service was removed."));
+
     Err(OrchestratorError::InvalidState {
       node_id: request.node_id.clone(),
       detail: "Tunnel did not report Running after activation. Retry connect or inspect WireGuard logs."
@@ -1052,33 +1106,11 @@ impl Orchestrator {
     })
   }
 
-  fn recover_missing_tunnel_service(
-    &self,
-    wireguard: &WireGuardManager,
-    db: &Database,
-    node: &crate::backend::db::VpnNodeRecord,
-    tunnel: &crate::backend::db::TunnelRecord,
-  ) -> Result<(), OrchestratorError> {
-    let request = CreateClientTunnelRequest {
-      tunnel_id: tunnel.id.clone(),
-      node_id: node.id.clone(),
-      tunnel_name: tunnel.name.clone(),
-      client_address_cidr: DEFAULT_CLIENT_CIDR.to_string(),
-      dns_server: Some("1.1.1.1".to_string()),
-      allowed_ips: DEFAULT_CLIENT_ALLOWED_IPS
-        .iter()
-        .map(|value| (*value).to_string())
-        .collect(),
-    };
-
-    self.create_and_activate_client_tunnel(wireguard, db, &request)?;
-    Ok(())
-  }
-
   pub fn disconnect_tunnel(
     &self,
     wireguard: &WireGuardManager,
     db: &Database,
+    _secure_storage: &SecureStorage,
     request: &DisconnectTunnelRequest,
   ) -> Result<(), OrchestratorError> {
     let node = db
@@ -1131,14 +1163,14 @@ impl Orchestrator {
         source,
       })?;
 
-    let runtime = wireguard
-      .read_tunnel_status(&tunnel.name)
+    wireguard
+      .unregister_tunnel(&tunnel.name)
       .map_err(|source| OrchestratorError::WireGuard {
-        detail: "Could not verify tunnel runtime state after disconnect.".to_string(),
+        detail: "Could not unregister WireGuard tunnel service in disconnect flow.".to_string(),
         source,
       })?;
 
-    persist_tunnel_stats_snapshot(db, &request.tunnel_id, &runtime)?;
+    let _ = db.update_tunnel_stats_snapshot(&request.tunnel_id, None, None, None);
 
     db
       .update_tunnel_status(&request.tunnel_id, TunnelStatus::Disconnected, None)
@@ -1172,12 +1204,22 @@ impl Orchestrator {
         },
       })?;
 
-    let status = wireguard
-      .read_tunnel_status(&tunnel.name)
-      .map_err(|source| OrchestratorError::WireGuard {
-        detail: "Could not read WireGuard runtime status.".to_string(),
-        source,
-      })?;
+    let status = match wireguard.read_tunnel_status(&tunnel.name) {
+      Ok(runtime) => runtime,
+      Err(WireGuardError::TunnelNotFound { .. }) => TunnelRuntimeStatus {
+        tunnel_name: tunnel.name.clone(),
+        state: crate::backend::wireguard::TunnelServiceState::Stopped,
+        last_handshake_age_seconds: None,
+        rx_bytes: None,
+        tx_bytes: None,
+      },
+      Err(source) => {
+        return Err(OrchestratorError::WireGuard {
+          detail: "Could not read WireGuard runtime status.".to_string(),
+          source,
+        })
+      }
+    };
 
     let db_status = match status.state {
       crate::backend::wireguard::TunnelServiceState::Running => TunnelStatus::Connected,
@@ -1482,17 +1524,17 @@ impl Orchestrator {
             }
           }
           Err(WireGuardError::TunnelNotFound { .. }) => {
-            let detail = "Tunnel service is missing locally; stale tunnel record removed during startup reconciliation."
-              .to_string();
-            let _ = wireguard.unregister_tunnel(&tunnel.name);
-            let _ = db.delete_tunnel(&tunnel.id);
-            report.issues.push(ReconcileIssue {
-              kind: ReconcileIssueKind::MissingTunnelArtifact,
-              node_id: Some(node.id.clone()),
-              tunnel_id: Some(tunnel.id.clone()),
-              repaired: true,
-              detail,
-            });
+            if tunnel.status == TunnelStatus::Connected {
+              let _ = db.update_tunnel_status(&tunnel.id, TunnelStatus::Disconnected, None);
+              report.issues.push(ReconcileIssue {
+                kind: ReconcileIssueKind::StaleTunnelStatusRepaired,
+                node_id: Some(node.id.clone()),
+                tunnel_id: Some(tunnel.id.clone()),
+                repaired: true,
+                detail: "Tunnel status repaired from 'connected' to 'disconnected' because no local WireGuard service exists."
+                  .to_string(),
+              });
+            }
           }
           Err(WireGuardError::NotInstalled { .. } | WireGuardError::UnsupportedPlatform { .. }) => {
             report.issues.push(ReconcileIssue {
@@ -1579,6 +1621,90 @@ fn persist_tunnel_stats_snapshot(
     )
     .map_err(|source| OrchestratorError::Database {
       detail: "Failed persisting tunnel runtime stats snapshot.".to_string(),
+      source,
+    })
+}
+
+fn parse_allowed_ips_csv(raw: Option<&str>) -> Vec<String> {
+  let mut parsed = raw
+    .unwrap_or_default()
+    .split(',')
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(ToOwned::to_owned)
+    .collect::<Vec<_>>();
+
+  if parsed.is_empty() {
+    parsed = DEFAULT_CLIENT_ALLOWED_IPS
+      .iter()
+      .map(|value| (*value).to_string())
+      .collect();
+  }
+
+  parsed
+}
+
+fn load_connect_config_for_tunnel(
+  secure_storage: &SecureStorage,
+  node: &crate::backend::db::VpnNodeRecord,
+  tunnel: &crate::backend::db::TunnelRecord,
+) -> Result<String, OrchestratorError> {
+  let server_public_key = node
+    .server_public_key
+    .clone()
+    .ok_or_else(|| OrchestratorError::InvalidState {
+      node_id: node.id.clone(),
+      detail: "VPN node is missing server public key; cannot connect tunnel.".to_string(),
+    })?;
+
+  let endpoint_ip = node.public_ipv4.clone().ok_or_else(|| OrchestratorError::InvalidState {
+    node_id: node.id.clone(),
+    detail: "VPN node is missing public endpoint IP; cannot connect tunnel.".to_string(),
+  })?;
+
+  let private_key_ref = tunnel
+    .client_private_key_ref
+    .as_deref()
+    .ok_or_else(|| OrchestratorError::InvalidState {
+      node_id: node.id.clone(),
+      detail: "Tunnel is unconfigured (missing secure private-key reference). Configure tunnel first."
+        .to_string(),
+    })?;
+
+  let private_key = secure_storage
+    .get_client_private_key(private_key_ref)
+    .map_err(|source| OrchestratorError::SecretStorage {
+      detail: "Could not read tunnel private key from secure storage during connect.".to_string(),
+      source,
+    })?
+    .ok_or_else(|| OrchestratorError::InvalidState {
+      node_id: node.id.clone(),
+      detail: "Tunnel private key reference is stale in secure storage. Reconfigure the tunnel and retry connect."
+        .to_string(),
+    })?;
+
+  let client_address_cidr = tunnel
+    .client_address_cidr
+    .clone()
+    .filter(|value| !value.trim().is_empty())
+    .unwrap_or_else(|| DEFAULT_CLIENT_CIDR.to_string());
+
+  let allowed_ips = parse_allowed_ips_csv(tunnel.allowed_ips.as_deref());
+
+  let config = ClientConfigParams {
+    private_key,
+    client_address_cidr,
+    dns_server: tunnel.dns_server.clone(),
+    server_public_key,
+    server_endpoint_ip: endpoint_ip,
+    server_listen_port: DEFAULT_WIREGUARD_PORT,
+    allowed_ips,
+    persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+  };
+
+  crate::backend::wireguard::build_client_config(&config)
+    .map_err(|source| OrchestratorError::WireGuard {
+      detail: "Could not render client WireGuard config during connect flow.".to_string(),
       source,
     })
 }
@@ -1994,7 +2120,7 @@ mod tests {
       .expect("node should transition to connected");
   }
 
-  fn setup_ready_node_and_tunnel(db: &Database) {
+  fn setup_ready_node_and_tunnel(db: &Database, secure_storage: &SecureStorage) {
     db
       .create_vpn_node("node-ready", TEST_PROVIDER_ID, "Node Ready", "nyc1")
       .expect("node should insert");
@@ -2018,8 +2144,20 @@ mod tests {
     db
       .create_tunnel("tunnel-ready", "node-ready", "Primary-Node-wg", Some("Primary-Node-wg"))
       .expect("tunnel should insert");
+    let key_ref = secure_storage
+      .store_client_private_key("node-ready", "client-private-key")
+      .expect("client private key should persist");
     db
-      .update_tunnel_status("tunnel-ready", TunnelStatus::Disconnected, None)
+      .update_tunnel_client_config(
+        "tunnel-ready",
+        Some(&key_ref),
+        Some(DEFAULT_CLIENT_CIDR),
+        Some("1.1.1.1"),
+        Some("0.0.0.0/0,::/0"),
+      )
+      .expect("tunnel client config should persist");
+    db
+      .update_tunnel_status("tunnel-ready", TunnelStatus::Ready, None)
       .expect("tunnel status should update");
   }
 
@@ -2149,9 +2287,11 @@ mod tests {
 
     let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
     let orchestrator = Orchestrator::new();
+    let secure_storage = SecureStorage::dev_mock();
     let result = orchestrator.connect_tunnel(
       &wireguard,
       &db,
+      &secure_storage,
       &ConnectTunnelRequest {
         node_id: "node-1".to_string(),
         tunnel_id: "missing-tunnel".to_string(),
@@ -2168,10 +2308,11 @@ mod tests {
   }
 
   #[test]
-  fn connect_flow_repairs_missing_tunnel_service_and_connects() {
-    let db = Database::new(test_db_path("connect_repairs_missing_service"));
+  fn connect_flow_imports_service_on_demand_and_connects() {
+    let db = Database::new(test_db_path("connect_on_demand_service_import"));
     db.run_migrations().expect("migrations should succeed");
-    setup_ready_node_and_tunnel(&db);
+    let secure_storage = SecureStorage::dev_mock();
+    setup_ready_node_and_tunnel(&db, &secure_storage);
 
     let runner = Arc::new(MockWireGuardRunner::missing_service());
     let wireguard = WireGuardManager::with_runner(runner.clone());
@@ -2181,12 +2322,13 @@ mod tests {
       .connect_tunnel(
         &wireguard,
         &db,
+        &secure_storage,
         &ConnectTunnelRequest {
           node_id: "node-ready".to_string(),
           tunnel_id: "tunnel-ready".to_string(),
         },
       )
-      .expect("connect should self-repair once and succeed");
+      .expect("connect should import and activate tunnel service on demand");
 
     let tunnel = db
       .get_tunnel("tunnel-ready")
@@ -2206,10 +2348,11 @@ mod tests {
   }
 
   #[test]
-  fn connect_flow_repair_attempt_is_single_shot_when_service_remains_missing() {
-    let db = Database::new(test_db_path("connect_repair_single_shot"));
+  fn connect_flow_fails_when_service_import_does_not_create_service() {
+    let db = Database::new(test_db_path("connect_import_missing_service"));
     db.run_migrations().expect("migrations should succeed");
-    setup_ready_node_and_tunnel(&db);
+    let secure_storage = SecureStorage::dev_mock();
+    setup_ready_node_and_tunnel(&db, &secure_storage);
 
     let runner = Arc::new(MockWireGuardRunner::missing_service_unrecoverable());
     let wireguard = WireGuardManager::with_runner(runner.clone());
@@ -2218,6 +2361,7 @@ mod tests {
     let result = orchestrator.connect_tunnel(
       &wireguard,
       &db,
+      &secure_storage,
       &ConnectTunnelRequest {
         node_id: "node-ready".to_string(),
         tunnel_id: "tunnel-ready".to_string(),
@@ -2234,7 +2378,7 @@ mod tests {
 
     let state = runner.state.lock().expect("lock should work");
     assert_eq!(state.install_calls, 1);
-    assert_eq!(state.activate_calls, 2);
+    assert_eq!(state.activate_calls, 0);
   }
 
   #[test]
@@ -2323,7 +2467,7 @@ mod tests {
   }
 
   #[test]
-  fn reconcile_flags_missing_local_tunnel_artifact() {
+  fn reconcile_marks_connected_tunnel_as_disconnected_when_service_missing() {
     let db = Database::new(test_db_path("reconcile_missing_tunnel_artifact"));
     db.run_migrations().expect("migrations should succeed");
     let secure_storage = SecureStorage::dev_mock();
@@ -2339,17 +2483,18 @@ mod tests {
     assert!(report
       .issues
       .iter()
-      .any(|issue| issue.kind == ReconcileIssueKind::MissingTunnelArtifact));
+      .any(|issue| issue.kind == ReconcileIssueKind::StaleTunnelStatusRepaired));
 
     assert!(report
       .issues
       .iter()
-      .any(|issue| issue.kind == ReconcileIssueKind::MissingTunnelArtifact && issue.repaired));
+      .any(|issue| issue.kind == ReconcileIssueKind::StaleTunnelStatusRepaired && issue.repaired));
 
     let tunnel = db
       .get_tunnel("tunnel-connect")
       .expect("query should succeed");
-    assert!(tunnel.is_none());
+    let tunnel = tunnel.expect("tunnel should remain as metadata record");
+    assert_eq!(tunnel.status, TunnelStatus::Disconnected);
   }
 
   #[test]
@@ -2528,6 +2673,12 @@ impl OrchestratorError {
             )
           }
         },
+      },
+      Self::SecretStorage { detail, .. } => UserFacingError {
+        kind: UserFacingErrorKind::Persistence,
+        message: detail.clone(),
+        next_action: "Open Settings, re-save provider credentials, then retry Connect."
+          .to_string(),
       },
       Self::Bootstrap { detail, .. } => UserFacingError {
         kind: UserFacingErrorKind::Unknown,

@@ -463,6 +463,7 @@ pub fn create_and_activate_client_tunnel(
     .create_and_activate_client_tunnel(
       &backend.wireguard,
       &backend.db,
+      &backend.secure_storage,
       &CreateClientTunnelRequest {
         tunnel_id,
         node_id,
@@ -475,7 +476,7 @@ pub fn create_and_activate_client_tunnel(
     .map_err(|err| err.to_string())?;
 
   Ok(format!(
-    "Tunnel connected: tunnel_id={}, tunnel_name={}, client_public_key={}",
+    "Tunnel configured: tunnel_id={}, tunnel_name={}, client_public_key={}",
     result.tunnel_id, result.tunnel_name, result.client_public_key
   ))
 }
@@ -484,7 +485,7 @@ pub fn create_and_activate_client_tunnel(
 pub fn activate_client_tunnel(tunnel_id: String, backend: State<'_, Backend>) -> Result<(), String> {
   backend
     .orchestrator
-    .activate_client_tunnel(&backend.wireguard, &backend.db, &tunnel_id)
+    .activate_client_tunnel(&backend.wireguard, &backend.db, &backend.secure_storage, &tunnel_id)
     .map_err(|err| err.to_string())
 }
 
@@ -495,7 +496,7 @@ pub fn deactivate_client_tunnel(
 ) -> Result<(), String> {
   backend
     .orchestrator
-    .deactivate_client_tunnel(&backend.wireguard, &backend.db, &tunnel_id)
+    .deactivate_client_tunnel(&backend.wireguard, &backend.db, &backend.secure_storage, &tunnel_id)
     .map_err(|err| err.to_string())
 }
 
@@ -530,6 +531,7 @@ pub fn connect_tunnel(
     .connect_tunnel(
       &backend.wireguard,
       &backend.db,
+      &backend.secure_storage,
       &ConnectTunnelRequest { node_id, tunnel_id },
     )
     .map_err(|err| {
@@ -618,6 +620,7 @@ pub fn disconnect_tunnel(
     .disconnect_tunnel(
       &backend.wireguard,
       &backend.db,
+      &backend.secure_storage,
       &DisconnectTunnelRequest { node_id, tunnel_id },
     )
     .map_err(|err| {

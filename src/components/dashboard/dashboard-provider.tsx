@@ -670,6 +670,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
               allowedIps: ["0.0.0.0/0", "::/0"],
             });
 
+            setBusyAction("connect-tunnel");
+            await connectTunnelCommand(node.id, recoverableTunnel.id);
+
             setRecovery(null);
             pushToast("success", "Tunnel recovered", `${recoverableTunnel.name} was re-imported and connected.`);
             await loadDashboard(node.id);
@@ -720,6 +723,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
             dnsServer: "1.1.1.1",
             allowedIps: ["0.0.0.0/0", "::/0"],
           });
+
+          setBusyAction("connect-tunnel");
+          await connectTunnelCommand(tunnel.node_id, tunnel.id);
 
           setRecovery(null);
           pushToast("success", "Tunnel recovered", `${tunnel.name} was re-imported and connected.`);

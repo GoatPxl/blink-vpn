@@ -267,6 +267,30 @@ impl WireGuardManager {
     })
   }
 
+  pub fn derive_public_key(&self, private_key: &str) -> Result<String, WireGuardError> {
+    self.ensure_installed()?;
+    let wg_program = self.resolve_wg_program()?;
+    self.record_command(&format!("{} pubkey", wg_program));
+
+    let public_out = self
+      .runner
+      .run(&wg_program, &["pubkey"], Some(private_key))
+      .map_err(|source| WireGuardError::Command {
+        command: "wg pubkey".to_string(),
+        detail: "WireGuard public key derivation failed locally.".to_string(),
+        source,
+      })?;
+
+    let public_key = public_out.stdout.trim().to_string();
+    if public_key.is_empty() {
+      return Err(WireGuardError::InvalidOutput {
+        detail: "WireGuard generated an empty public key output.".to_string(),
+      });
+    }
+
+    Ok(public_key)
+  }
+
   pub fn import_tunnel(&self, tunnel_name: &str, config_text: &str) -> Result<(), WireGuardError> {
     self.ensure_installed()?;
     let wireguard_program = self.resolve_wireguard_program()?;
@@ -339,6 +363,9 @@ impl WireGuardManager {
           .to_string(),
       source,
     });
+
+    let _ = std::fs::remove_file(&file_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
 
     import_result.map(|_| ())
   }
@@ -468,6 +495,7 @@ impl WireGuardManager {
         },
         ..
       }) => Ok(()),
+      Err(WireGuardError::TunnelNotFound { .. }) => Ok(()),
       Err(error) => Err(error),
     }
   }
