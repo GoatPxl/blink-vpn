@@ -17,7 +17,8 @@ use crate::backend::provider::{
 };
 use crate::backend::secure_storage::SecureStorage;
 use crate::backend::wireguard::{
-  ClientConfigParams, DEFAULT_CLIENT_KEEPALIVE_SECONDS, TunnelRuntimeStatus, WireGuardError,
+  ClientConfigParams, DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+  TunnelRuntimeStatus, WireGuardError,
   WireGuardManager,
 };
 
@@ -812,13 +813,14 @@ impl Orchestrator {
       });
     }
 
-    self.connect_tunnel(
+    self.connect_tunnel_inner(
       wireguard,
       db,
       &ConnectTunnelRequest {
         node_id: request.node_id.clone(),
         tunnel_id: request.tunnel_id.clone(),
       },
+      false,
     )?;
 
     Ok(CreateClientTunnelResult {
@@ -896,6 +898,16 @@ impl Orchestrator {
     db: &Database,
     request: &ConnectTunnelRequest,
   ) -> Result<(), OrchestratorError> {
+    self.connect_tunnel_inner(wireguard, db, request, true)
+  }
+
+  fn connect_tunnel_inner(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    request: &ConnectTunnelRequest,
+    allow_service_repair: bool,
+  ) -> Result<(), OrchestratorError> {
     let node = db
       .get_vpn_node(&request.node_id)
       .map_err(|source| OrchestratorError::Database {
@@ -946,12 +958,23 @@ impl Orchestrator {
       }
     }
 
-    wireguard
-      .activate_tunnel(&tunnel.name)
-      .map_err(|source| OrchestratorError::WireGuard {
+    if let Err(source) = wireguard.activate_tunnel(&tunnel.name) {
+      if allow_service_repair && matches!(source, WireGuardError::TunnelNotFound { .. }) {
+        log::warn!(
+          "event=tunnel.connect.repair_missing_service node_id={} tunnel_id={} tunnel_name={}",
+          request.node_id,
+          request.tunnel_id,
+          tunnel.name
+        );
+
+        return self.recover_missing_tunnel_service(wireguard, db, &node, &tunnel);
+      }
+
+      return Err(OrchestratorError::WireGuard {
         detail: "Could not activate WireGuard tunnel service in connect flow.".to_string(),
         source,
-      })?;
+      });
+    }
 
     let runtime = wireguard
       .read_tunnel_status(&tunnel.name)
@@ -985,6 +1008,29 @@ impl Orchestrator {
       detail: "Tunnel did not report Running after activation. Retry connect or inspect WireGuard logs."
         .to_string(),
     })
+  }
+
+  fn recover_missing_tunnel_service(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    node: &crate::backend::db::VpnNodeRecord,
+    tunnel: &crate::backend::db::TunnelRecord,
+  ) -> Result<(), OrchestratorError> {
+    let request = CreateClientTunnelRequest {
+      tunnel_id: tunnel.id.clone(),
+      node_id: node.id.clone(),
+      tunnel_name: tunnel.name.clone(),
+      client_address_cidr: DEFAULT_CLIENT_CIDR.to_string(),
+      dns_server: Some("1.1.1.1".to_string()),
+      allowed_ips: DEFAULT_CLIENT_ALLOWED_IPS
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect(),
+    };
+
+    self.create_and_activate_client_tunnel(wireguard, db, &request)?;
+    Ok(())
   }
 
   pub fn disconnect_tunnel(
@@ -1646,7 +1692,10 @@ mod tests {
   struct MockWireGuardState {
     service_exists: bool,
     service_running: bool,
+    install_creates_service: bool,
     deactivate_calls: usize,
+    activate_calls: usize,
+    install_calls: usize,
     unregister_calls: usize,
   }
 
@@ -1656,7 +1705,10 @@ mod tests {
         state: Arc::new(Mutex::new(MockWireGuardState {
           service_exists: true,
           service_running: true,
+          install_creates_service: true,
           deactivate_calls: 0,
+          activate_calls: 0,
+          install_calls: 0,
           unregister_calls: 0,
         })),
       }
@@ -1667,7 +1719,10 @@ mod tests {
         state: Arc::new(Mutex::new(MockWireGuardState {
           service_exists: true,
           service_running: false,
+          install_creates_service: true,
           deactivate_calls: 0,
+          activate_calls: 0,
+          install_calls: 0,
           unregister_calls: 0,
         })),
       }
@@ -1678,7 +1733,24 @@ mod tests {
         state: Arc::new(Mutex::new(MockWireGuardState {
           service_exists: false,
           service_running: false,
+          install_creates_service: true,
           deactivate_calls: 0,
+          activate_calls: 0,
+          install_calls: 0,
+          unregister_calls: 0,
+        })),
+      }
+    }
+
+    fn missing_service_unrecoverable() -> Self {
+      Self {
+        state: Arc::new(Mutex::new(MockWireGuardState {
+          service_exists: false,
+          service_running: false,
+          install_creates_service: false,
+          deactivate_calls: 0,
+          activate_calls: 0,
+          install_calls: 0,
           unregister_calls: 0,
         })),
       }
@@ -1711,6 +1783,20 @@ mod tests {
         });
       }
 
+      if program_name == "wg" && args == ["genkey"] {
+        return Ok(CommandOutput {
+          stdout: "client-private-key".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wg" && args == ["pubkey"] {
+        return Ok(CommandOutput {
+          stdout: "client-public-key".to_string(),
+          stderr: String::new(),
+        });
+      }
+
       if program_name == "sc" && args.len() >= 2 {
         let mut state = self.state.lock().expect("lock must succeed");
         match args[0] {
@@ -1735,6 +1821,7 @@ mod tests {
             });
           }
           "start" => {
+            state.activate_calls += 1;
             if !state.service_exists {
               return Err(CommandExecError::NonZeroExit {
                 program: "sc".to_string(),
@@ -1774,6 +1861,19 @@ mod tests {
         state.service_running = false;
         return Ok(CommandOutput {
           stdout: format!("uninstalled {}", args[1]),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wireguard" && args.len() == 2 && args[0] == "/installtunnelservice" {
+        let mut state = self.state.lock().expect("lock must succeed");
+        state.install_calls += 1;
+        if state.install_creates_service {
+          state.service_exists = true;
+          state.service_running = false;
+        }
+        return Ok(CommandOutput {
+          stdout: format!("installed {}", args[1]),
           stderr: String::new(),
         });
       }
@@ -1848,6 +1948,35 @@ mod tests {
     db
       .transition_vpn_node_status("node-connect", NodeLifecycleStatus::Connected, None)
       .expect("node should transition to connected");
+  }
+
+  fn setup_ready_node_and_tunnel(db: &Database) {
+    db
+      .create_vpn_node("node-ready", TEST_PROVIDER_ID, "Node Ready", "nyc1")
+      .expect("node should insert");
+    db
+      .transition_vpn_node_status("node-ready", NodeLifecycleStatus::Provisioning, None)
+      .expect("transition to provisioning should succeed");
+    db
+      .transition_vpn_node_status("node-ready", NodeLifecycleStatus::Bootstrapping, None)
+      .expect("transition to bootstrapping should succeed");
+    db
+      .transition_vpn_node_status("node-ready", NodeLifecycleStatus::Ready, None)
+      .expect("transition to ready should succeed");
+    db
+      .update_vpn_node_runtime_details(
+        "node-ready",
+        Some("42"),
+        Some("203.0.113.10"),
+        Some("server-pub-key-123"),
+      )
+      .expect("runtime details should persist");
+    db
+      .create_tunnel("tunnel-ready", "node-ready", "Primary-Node-wg", Some("Primary-Node-wg"))
+      .expect("tunnel should insert");
+    db
+      .update_tunnel_status("tunnel-ready", TunnelStatus::Disconnected, None)
+      .expect("tunnel status should update");
   }
 
   fn test_db_path(test_name: &str) -> PathBuf {
@@ -1992,6 +2121,76 @@ mod tests {
         ..
       })
     ));
+  }
+
+  #[test]
+  fn connect_flow_repairs_missing_tunnel_service_and_connects() {
+    let db = Database::new(test_db_path("connect_repairs_missing_service"));
+    db.run_migrations().expect("migrations should succeed");
+    setup_ready_node_and_tunnel(&db);
+
+    let runner = Arc::new(MockWireGuardRunner::missing_service());
+    let wireguard = WireGuardManager::with_runner(runner.clone());
+    let orchestrator = Orchestrator::new();
+
+    orchestrator
+      .connect_tunnel(
+        &wireguard,
+        &db,
+        &ConnectTunnelRequest {
+          node_id: "node-ready".to_string(),
+          tunnel_id: "tunnel-ready".to_string(),
+        },
+      )
+      .expect("connect should self-repair once and succeed");
+
+    let tunnel = db
+      .get_tunnel("tunnel-ready")
+      .expect("query should succeed")
+      .expect("tunnel should exist");
+    assert_eq!(tunnel.status, TunnelStatus::Connected);
+
+    let node = db
+      .get_vpn_node("node-ready")
+      .expect("query should succeed")
+      .expect("node should exist");
+    assert_eq!(node.lifecycle_status, NodeLifecycleStatus::Connected);
+
+    let state = runner.state.lock().expect("lock should work");
+    assert_eq!(state.install_calls, 1);
+    assert_eq!(state.activate_calls, 2);
+  }
+
+  #[test]
+  fn connect_flow_repair_attempt_is_single_shot_when_service_remains_missing() {
+    let db = Database::new(test_db_path("connect_repair_single_shot"));
+    db.run_migrations().expect("migrations should succeed");
+    setup_ready_node_and_tunnel(&db);
+
+    let runner = Arc::new(MockWireGuardRunner::missing_service_unrecoverable());
+    let wireguard = WireGuardManager::with_runner(runner.clone());
+    let orchestrator = Orchestrator::new();
+
+    let result = orchestrator.connect_tunnel(
+      &wireguard,
+      &db,
+      &ConnectTunnelRequest {
+        node_id: "node-ready".to_string(),
+        tunnel_id: "tunnel-ready".to_string(),
+      },
+    );
+
+    assert!(matches!(
+      result,
+      Err(OrchestratorError::WireGuard {
+        source: WireGuardError::TunnelNotFound { .. },
+        ..
+      })
+    ));
+
+    let state = runner.state.lock().expect("lock should work");
+    assert_eq!(state.install_calls, 1);
+    assert_eq!(state.activate_calls, 2);
   }
 
   #[test]

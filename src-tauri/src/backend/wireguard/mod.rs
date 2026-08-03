@@ -419,6 +419,16 @@ impl WireGuardManager {
 
     let state = parse_sc_state(&service_out.stdout)?;
 
+    if state != TunnelServiceState::Running {
+      return Ok(TunnelRuntimeStatus {
+        tunnel_name: tunnel_name.to_string(),
+        state,
+        last_handshake_age_seconds: None,
+        rx_bytes: None,
+        tx_bytes: None,
+      });
+    }
+
     let dump_out = self
       .runner
       .run(&wg_program, &["show", tunnel_name, "dump"], None)
@@ -598,7 +608,7 @@ impl CommandRunner for ProcessCommandRunner {
       return Err(CommandExecError::NonZeroExit {
         program: resolved_program.to_string(),
         code: output.status.code(),
-        detail: format_nonzero_detail(&stderr),
+        detail: format_nonzero_detail(&stdout, &stderr),
       });
     }
 
@@ -968,6 +978,20 @@ fn map_sc_tunnel_error(source: CommandExecError, service_name: &str, operation: 
     };
   }
 
+  if let CommandExecError::NonZeroExit {
+    ref detail,
+    ..
+  } = source
+  {
+    if is_windows_service_missing_detail(detail) {
+      return WireGuardError::TunnelNotFound {
+        tunnel_name: service_name.strip_prefix("WireGuardTunnel$").unwrap_or(service_name).to_string(),
+        detail: "WireGuard tunnel service does not exist on this machine. Re-import the tunnel configuration."
+          .to_string(),
+      };
+    }
+  }
+
   WireGuardError::Command {
     command: format!("sc {operation} {service_name}"),
     detail: "Could not complete WireGuard tunnel service operation.".to_string(),
@@ -975,18 +999,24 @@ fn map_sc_tunnel_error(source: CommandExecError, service_name: &str, operation: 
   }
 }
 
-fn format_nonzero_detail(stderr: &str) -> String {
-  let trimmed = stderr.trim();
-  if trimmed.is_empty() {
-    "Process exited with a non-zero code and no stderr output.".to_string()
+fn format_nonzero_detail(stdout: &str, stderr: &str) -> String {
+  let stderr_trimmed = stderr.trim();
+  let stdout_trimmed = stdout.trim();
+
+  let base = if !stderr_trimmed.is_empty() {
+    stderr_trimmed
+  } else if !stdout_trimmed.is_empty() {
+    stdout_trimmed
   } else {
-    let mut safe = OsString::from(trimmed).to_string_lossy().to_string();
-    if safe.len() > 500 {
-      safe.truncate(500);
-      safe.push_str("...[truncated]");
-    }
-    safe
+    return "Process exited with a non-zero code and no stdout/stderr output.".to_string();
+  };
+
+  let mut safe = OsString::from(base).to_string_lossy().to_string();
+  if safe.len() > 500 {
+    safe.truncate(500);
+    safe.push_str("...[truncated]");
   }
+  safe
 }
 
 #[cfg(test)]
@@ -1313,5 +1343,91 @@ mod tests {
     assert!(is_windows_access_denied_detail("[Error:  Access is denied.]"));
     assert!(is_windows_access_denied_detail("The requested operation requires elevation."));
     assert!(!is_windows_access_denied_detail("service missing"));
+  }
+
+  #[test]
+  fn map_sc_tunnel_error_detects_missing_service_from_detail_text() {
+    let error = super::map_sc_tunnel_error(
+      CommandExecError::NonZeroExit {
+        program: "sc".to_string(),
+        code: Some(1),
+        detail: "[SC] StartService FAILED 1060: The specified service does not exist as an installed service."
+          .to_string(),
+      },
+      "WireGuardTunnel$Primary-Node-wg",
+      "start",
+    );
+
+    match error {
+      WireGuardError::TunnelNotFound { tunnel_name, .. } => {
+        assert_eq!(tunnel_name, "Primary-Node-wg");
+      }
+      other => panic!("expected TunnelNotFound, got {other}"),
+    }
+  }
+
+  #[derive(Clone, Default)]
+  struct MockStoppedServiceRunner;
+
+  impl CommandRunner for MockStoppedServiceRunner {
+    fn run(
+      &self,
+      program: &str,
+      args: &[&str],
+      _stdin: Option<&str>,
+    ) -> Result<CommandOutput, CommandExecError> {
+      let program_name = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+
+      if program_name == "wg" && args == ["-v"] {
+        return Ok(CommandOutput {
+          stdout: "wireguard-tools v1".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wireguard" && args == ["/help"] {
+        return Ok(CommandOutput {
+          stdout: "WireGuard for Windows".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "sc" && args.len() == 2 && args[0] == "query" {
+        return Ok(CommandOutput {
+          stdout: "STATE              : 1  STOPPED".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wg" && args.len() >= 2 && args[0] == "show" {
+        return Err(CommandExecError::NonZeroExit {
+          program: "wg".to_string(),
+          code: Some(1),
+          detail: "wg show should not be called when service is stopped".to_string(),
+        });
+      }
+
+      Err(CommandExecError::NonZeroExit {
+        program: program.to_string(),
+        code: Some(1),
+        detail: "unsupported mock command".to_string(),
+      })
+    }
+  }
+
+  #[test]
+  fn read_tunnel_status_skips_wg_show_when_service_is_stopped() {
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockStoppedServiceRunner));
+    let status = wireguard
+      .read_tunnel_status("Primary-Node-wg")
+      .expect("status read should succeed for stopped service");
+
+    assert_eq!(status.state, TunnelServiceState::Stopped);
+    assert_eq!(status.last_handshake_age_seconds, None);
+    assert_eq!(status.rx_bytes, None);
+    assert_eq!(status.tx_bytes, None);
   }
 }

@@ -613,6 +613,39 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       await loadDashboard(node.id);
       await refreshHealthSnapshot(true);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const staleOrMissingService = message.includes("was not found locally")
+        || message.includes("does not exist on this machine")
+        || message.includes("OpenService FAILED 1060")
+        || message.includes("Could not complete WireGuard tunnel service operation")
+        || message.includes("WireGuard command failed for 'sc start WireGuardTunnel$");
+
+      if (staleOrMissingService) {
+        const recoverableTunnel = tunnels.find((tunnel) => tunnel.node_id === node.id) ?? null;
+        if (recoverableTunnel) {
+          try {
+            setBusyAction("create-tunnel");
+            await createAndActivateClientTunnel({
+              tunnelId: recoverableTunnel.id,
+              nodeId: recoverableTunnel.node_id,
+              tunnelName: recoverableTunnel.name,
+              clientAddressCidr: "10.66.0.2/32",
+              dnsServer: "1.1.1.1",
+              allowedIps: ["0.0.0.0/0", "::/0"],
+            });
+
+            setRecovery(null);
+            pushToast("success", "Tunnel recovered", `${recoverableTunnel.name} was re-imported and connected.`);
+            await loadDashboard(node.id);
+            await refreshHealthSnapshot(true);
+            return;
+          } catch (recoveryError) {
+            handleError(recoveryError);
+            return;
+          }
+        }
+      }
+
       handleError(error);
     } finally {
       setBusyAction(null);
