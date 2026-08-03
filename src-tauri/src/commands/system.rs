@@ -42,6 +42,7 @@ pub struct DiagnosticsBundleResponse {
   pub providers: Vec<crate::backend::db::ProviderRecord>,
   pub nodes: Vec<VpnNodeRecord>,
   pub tunnels: Vec<TunnelRecord>,
+  pub init_runs: Vec<crate::backend::db::InitRunLogRecord>,
   pub redacted_notes: Vec<String>,
 }
 
@@ -572,6 +573,7 @@ pub fn connect_tunnel(
       providers: bundle.providers,
       nodes: bundle.nodes,
       tunnels: bundle.tunnels,
+      init_runs: bundle.init_runs,
       redacted_notes: bundle.redacted_notes,
     })
   }

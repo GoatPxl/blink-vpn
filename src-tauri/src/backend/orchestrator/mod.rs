@@ -143,6 +143,7 @@ pub struct DiagnosticsBundle {
   pub providers: Vec<crate::backend::db::ProviderRecord>,
   pub nodes: Vec<crate::backend::db::VpnNodeRecord>,
   pub tunnels: Vec<crate::backend::db::TunnelRecord>,
+  pub init_runs: Vec<crate::backend::db::InitRunLogRecord>,
   pub redacted_notes: Vec<String>,
 }
 
@@ -354,6 +355,38 @@ impl Orchestrator {
       request.provider_id
     );
 
+    let provider_slug = db
+      .get_provider(&request.provider_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading provider metadata before create flow.".to_string(),
+        source,
+      })?
+      .map(|provider| provider.slug)
+      .unwrap_or_else(|| "digitalocean".to_string());
+    let init_kind = if provider_slug == "docker" {
+      "docker-init"
+    } else {
+      "cloud-init"
+    };
+    let record_init = |stage: &str, outcome: &str, output: String| {
+      let _ = db.append_init_run_log(
+        &request.node_id,
+        &provider_slug,
+        init_kind,
+        stage,
+        outcome,
+        &logging::redact_sensitive_text(&output),
+      );
+    };
+    record_init(
+      "create.start",
+      "info",
+      format!(
+        "init flow started; provider_id={} correlation_id={}",
+        request.provider_id, correlation_id
+      ),
+    );
+
     providers
       .resolve_provider_token_for_orchestrator(db, secure_storage, &request.provider_id)
       .map_err(|source| OrchestratorError::Provider {
@@ -460,6 +493,17 @@ impl Orchestrator {
         source,
       })?;
 
+    record_init(
+      "bootstrap.render",
+      "success",
+      format!(
+        "readiness marker path={} output contract preview endpoint={} listen_port={}",
+        bootstrap_artifact.readiness_marker_path,
+        bootstrap_artifact.output_contract_preview.server_endpoint_ip,
+        bootstrap_artifact.output_contract_preview.listen_port
+      ),
+    );
+
     let mut created_droplet: Option<ProvisionedDroplet> = None;
 
     let pricing = providers
@@ -509,6 +553,15 @@ impl Orchestrator {
           source,
         })?;
 
+      record_init(
+        "provider.create",
+        "success",
+        format!(
+          "droplet created with external_ref={} endpoint_ip={}",
+          droplet.droplet_id, droplet.public_ipv4
+        ),
+      );
+
       created_droplet = Some(droplet.clone());
 
       db
@@ -544,6 +597,15 @@ impl Orchestrator {
           source,
         })?;
 
+      record_init(
+        "bootstrap.wait",
+        "success",
+        format!(
+          "ready contract endpoint={} listen_port={}",
+          contract.server_endpoint_ip, contract.listen_port
+        ),
+      );
+
       db
         .update_vpn_node_runtime_details(
           &request.node_id,
@@ -569,6 +631,15 @@ impl Orchestrator {
         request.node_id,
         droplet.droplet_id,
         contract.server_endpoint_ip
+      );
+
+      record_init(
+        "create.ready",
+        "success",
+        format!(
+          "node ready with droplet_id={} endpoint_ip={}",
+          droplet.droplet_id, contract.server_endpoint_ip
+        ),
       );
 
       Ok(CreateVpnNodeResult {
@@ -601,8 +672,24 @@ impl Orchestrator {
             droplet.droplet_id,
             cleanup_error
           );
+          record_init(
+            "rollback.cleanup",
+            "error",
+            format!(
+              "droplet cleanup failed for {}: {}",
+              droplet.droplet_id, cleanup_error
+            ),
+          );
+        } else {
+          record_init(
+            "rollback.cleanup",
+            "success",
+            format!("droplet cleanup completed for {}", droplet.droplet_id),
+          );
         }
       }
+
+      record_init("create.error", "error", final_reason.clone());
 
       let _ = db.transition_vpn_node_status(
         &request.node_id,
@@ -1106,6 +1193,11 @@ impl Orchestrator {
       })?);
     }
 
+    let init_runs = db.list_init_run_logs(200).map_err(|source| OrchestratorError::Database {
+      detail: "Failed loading init run logs for diagnostics bundle.".to_string(),
+      source,
+    })?;
+
     let providers = providers
       .into_iter()
       .map(|mut provider| {
@@ -1134,6 +1226,14 @@ impl Orchestrator {
       })
       .collect::<Vec<_>>();
 
+    let init_runs = init_runs
+      .into_iter()
+      .map(|mut init_run| {
+        init_run.output = logging::redact_sensitive_text(&init_run.output);
+        init_run
+      })
+      .collect::<Vec<_>>();
+
     let mut redacted_notes = Vec::new();
     for node in &nodes {
       if let Some(reason) = &node.error_reason {
@@ -1153,12 +1253,24 @@ impl Orchestrator {
         ));
       }
     }
+    for init_run in &init_runs {
+      if init_run.outcome.eq_ignore_ascii_case("error") {
+        redacted_notes.push(format!(
+          "init:{}:{} stage={} output={}",
+          init_run.node_id,
+          init_run.init_kind,
+          init_run.stage,
+          logging::redact_sensitive_text(&init_run.output)
+        ));
+      }
+    }
 
     Ok(DiagnosticsBundle {
       generated_at: chrono_like_timestamp(),
       providers,
       nodes,
       tunnels,
+      init_runs,
       redacted_notes,
     })
   }
@@ -1392,6 +1504,8 @@ mod tests {
   use crate::backend::secure_storage::SecureStorage;
   use crate::backend::provider::ProviderRegistry;
   use crate::backend::wireguard::{CommandExecError, CommandOutput, CommandRunner};
+
+  const TEST_PROVIDER_ID: &str = "provider-1";
 
   #[derive(Default)]
   struct MockAdapterState {
@@ -1705,7 +1819,7 @@ mod tests {
 
   fn setup_connected_node_and_tunnel(db: &Database) {
     db
-      .create_vpn_node("node-connect", "provider-1", "Node Connect", "nyc1")
+      .create_vpn_node("node-connect", TEST_PROVIDER_ID, "Node Connect", "nyc1")
       .expect("node should insert");
     db
       .transition_vpn_node_status("node-connect", NodeLifecycleStatus::Provisioning, None)
@@ -1747,12 +1861,12 @@ mod tests {
 
   fn setup_provider_and_token(db: &Database, secure_storage: &SecureStorage) {
     let token_ref = secure_storage
-      .store_digitalocean_api_token("provider-1", "token-abc")
+      .store_digitalocean_api_token(TEST_PROVIDER_ID, "token-abc")
       .expect("token should store");
 
     db
-      .create_provider("provider-1", "DigitalOcean", "digitalocean", Some(&token_ref))
-      .expect("provider should insert");
+      .update_provider_token_ref(TEST_PROVIDER_ID, Some(&token_ref))
+      .expect("provider token ref should update");
   }
 
   #[test]
@@ -1776,7 +1890,7 @@ mod tests {
         &secure_storage,
         &CreateVpnNodeRequest {
           node_id: "node-1".to_string(),
-          provider_id: "provider-1".to_string(),
+          provider_id: TEST_PROVIDER_ID.to_string(),
           node_name: "node-main".to_string(),
           region: "nyc1".to_string(),
           plan_key: "s-1vcpu-1gb".to_string(),
@@ -1818,7 +1932,7 @@ mod tests {
       &secure_storage,
       &CreateVpnNodeRequest {
         node_id: "node-2".to_string(),
-        provider_id: "provider-1".to_string(),
+        provider_id: TEST_PROVIDER_ID.to_string(),
         node_name: "node-main".to_string(),
         region: "nyc1".to_string(),
         plan_key: "s-1vcpu-1gb".to_string(),
@@ -1844,10 +1958,10 @@ mod tests {
     db.run_migrations().expect("migrations should succeed");
 
     db
-      .create_provider("provider-1", "DigitalOcean", "digitalocean", Some("do-token:provider-1:abc"))
-      .expect("provider should insert");
+      .update_provider_token_ref(TEST_PROVIDER_ID, Some("do-token:provider-1:abc"))
+      .expect("provider token ref should update");
     db
-      .create_vpn_node("node-1", "provider-1", "Node", "nyc1")
+      .create_vpn_node("node-1", TEST_PROVIDER_ID, "Node", "nyc1")
       .expect("node should insert");
     db
       .transition_vpn_node_status("node-1", NodeLifecycleStatus::Provisioning, None)
@@ -1887,7 +2001,7 @@ mod tests {
     let secure_storage = SecureStorage::dev_mock();
     setup_provider_and_token(&db, &secure_storage);
     db
-      .create_vpn_node("node-1", "provider-1", "Node", "nyc1")
+      .create_vpn_node("node-1", TEST_PROVIDER_ID, "Node", "nyc1")
       .expect("node should insert");
     db
       .transition_vpn_node_status("node-1", NodeLifecycleStatus::Provisioning, None)
@@ -1998,7 +2112,7 @@ mod tests {
     let secure_storage = SecureStorage::dev_mock();
     setup_provider_and_token(&db, &secure_storage);
     db
-      .create_vpn_node("node-partial", "provider-1", "Node Partial", "nyc1")
+      .create_vpn_node("node-partial", TEST_PROVIDER_ID, "Node Partial", "nyc1")
       .expect("node should insert");
     db
       .transition_vpn_node_status("node-partial", NodeLifecycleStatus::Provisioning, None)

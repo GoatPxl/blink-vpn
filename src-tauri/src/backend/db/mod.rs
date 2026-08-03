@@ -14,6 +14,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (6, include_str!("../../../migrations/0006_vpn_node_pricing_snapshot.sql")),
   (7, include_str!("../../../migrations/0007_seed_docker_provider.sql")),
   (8, include_str!("../../../migrations/0008_provider_status.sql")),
+  (9, include_str!("../../../migrations/0009_init_run_logs.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -228,6 +229,18 @@ pub struct TunnelRecord {
   pub last_error: Option<String>,
   pub created_at: String,
   pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InitRunLogRecord {
+  pub id: i64,
+  pub node_id: String,
+  pub provider_slug: String,
+  pub init_kind: String,
+  pub stage: String,
+  pub outcome: String,
+  pub output: String,
+  pub created_at: String,
 }
 
 #[derive(Debug, Error)]
@@ -962,6 +975,66 @@ impl Database {
     Ok(())
   }
 
+  pub fn append_init_run_log(
+    &self,
+    node_id: &str,
+    provider_slug: &str,
+    init_kind: &str,
+    stage: &str,
+    outcome: &str,
+    output: &str,
+  ) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    connection
+      .execute(
+        "INSERT INTO init_run_logs (node_id, provider_slug, init_kind, stage, outcome, output)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![node_id, provider_slug, init_kind, stage, outcome, output],
+      )
+      .map_err(|source| DbError::Query {
+        action: "append_init_run_log",
+        detail: "Failed writing init run log row.".to_string(),
+        source,
+      })?;
+
+    Ok(())
+  }
+
+  pub fn list_init_run_logs(&self, limit: usize) -> Result<Vec<InitRunLogRecord>, DbError> {
+    let connection = self.open_connection()?;
+    let mut statement = connection
+      .prepare(
+        "SELECT id, node_id, provider_slug, init_kind, stage, outcome, output, created_at
+         FROM init_run_logs
+         ORDER BY id DESC
+         LIMIT ?1",
+      )
+      .map_err(|source| DbError::Query {
+        action: "list_init_run_logs_prepare",
+        detail: "Failed preparing init run log query.".to_string(),
+        source,
+      })?;
+
+    let rows = statement
+      .query_map(params![limit as i64], map_init_run_log_row)
+      .map_err(|source| DbError::Query {
+        action: "list_init_run_logs_query",
+        detail: "Failed running init run log query.".to_string(),
+        source,
+      })?;
+
+    let mut output = Vec::new();
+    for row in rows {
+      output.push(row.map_err(|source| DbError::Query {
+        action: "list_init_run_logs_collect",
+        detail: "Failed decoding init run log rows.".to_string(),
+        source,
+      })?);
+    }
+
+    Ok(output)
+  }
+
   fn open_connection(&self) -> Result<Connection, DbError> {
     let path = self.path.to_string_lossy().to_string();
     Connection::open(&self.path).map_err(|source| DbError::Open {
@@ -1051,6 +1124,19 @@ fn map_tunnel_row(row: &Row<'_>) -> rusqlite::Result<TunnelRecord> {
   })
 }
 
+fn map_init_run_log_row(row: &Row<'_>) -> rusqlite::Result<InitRunLogRecord> {
+  Ok(InitRunLogRecord {
+    id: row.get(0)?,
+    node_id: row.get(1)?,
+    provider_slug: row.get(2)?,
+    init_kind: row.get(3)?,
+    stage: row.get(4)?,
+    outcome: row.get(5)?,
+    output: row.get(6)?,
+    created_at: row.get(7)?,
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::{Database, DbError, NodeLifecycleStatus, ProviderStatus, TunnelStatus};
@@ -1097,17 +1183,20 @@ mod tests {
   fn repository_provider_and_node_crud_roundtrip() {
     let db = setup_db("provider_node_crud");
 
+    let provider_id = "provider-test-a";
     db
-      .create_provider("provider-1", "DigitalOcean", "digitalocean", None)
+      .create_provider(provider_id, "DigitalOcean", "do-test-a", None)
       .expect("provider insert should succeed");
 
-    let providers = db.list_providers().expect("provider query should succeed");
-    assert_eq!(providers.len(), 1);
-    assert_eq!(providers[0].slug, "digitalocean");
-    assert_eq!(providers[0].status, ProviderStatus::Active);
+    let provider = db
+      .get_provider(provider_id)
+      .expect("provider query should succeed")
+      .expect("provider should exist");
+    assert_eq!(provider.slug, "do-test-a");
+    assert_eq!(provider.status, ProviderStatus::Active);
 
     db
-      .create_vpn_node("node-1", "provider-1", "Primary", "nyc1")
+      .create_vpn_node("node-1", provider_id, "Primary", "nyc1")
       .expect("node insert should succeed");
 
     let node = db
@@ -1135,11 +1224,12 @@ mod tests {
   fn repository_tunnel_crud_roundtrip() {
     let db = setup_db("tunnel_crud");
 
+    let provider_id = "provider-test-b";
     db
-      .create_provider("provider-1", "DigitalOcean", "digitalocean", None)
+      .create_provider(provider_id, "DigitalOcean", "do-test-b", None)
       .expect("provider insert should succeed");
     db
-      .create_vpn_node("node-1", "provider-1", "Primary", "fra1")
+      .create_vpn_node("node-1", provider_id, "Primary", "fra1")
       .expect("node insert should succeed");
     db
       .create_tunnel("tunnel-1", "node-1", "Main Tunnel", Some("wg0"))
@@ -1160,11 +1250,12 @@ mod tests {
   fn invalid_status_transition_returns_actionable_error() {
     let db = setup_db("transition_error");
 
+    let provider_id = "provider-test-c";
     db
-      .create_provider("provider-1", "DigitalOcean", "digitalocean", None)
+      .create_provider(provider_id, "DigitalOcean", "do-test-c", None)
       .expect("provider insert should succeed");
     db
-      .create_vpn_node("node-1", "provider-1", "Primary", "fra1")
+      .create_vpn_node("node-1", provider_id, "Primary", "fra1")
       .expect("node insert should succeed");
 
     let error = db
@@ -1209,5 +1300,37 @@ mod tests {
       .expect("provider query should succeed")
       .expect("provider should exist");
     assert_eq!(active.status, ProviderStatus::Active);
+  }
+
+  #[test]
+  fn init_run_log_roundtrip() {
+    let db = setup_db("init_run_log_roundtrip");
+
+    let provider_id = "provider-test-d";
+    db
+      .create_provider(provider_id, "DigitalOcean", "do-test-d", None)
+      .expect("provider insert should succeed");
+    db
+      .create_vpn_node("node-1", provider_id, "Primary", "nyc1")
+      .expect("node insert should succeed");
+
+    db
+      .append_init_run_log(
+        "node-1",
+        "digitalocean",
+        "cloud-init",
+        "bootstrap-ready",
+        "success",
+        "readiness marker parsed",
+      )
+      .expect("init run log insert should succeed");
+
+    let logs = db
+      .list_init_run_logs(20)
+      .expect("init run log query should succeed");
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].node_id, "node-1");
+    assert_eq!(logs[0].init_kind, "cloud-init");
+    assert_eq!(logs[0].outcome, "success");
   }
 }

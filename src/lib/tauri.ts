@@ -84,7 +84,19 @@ export interface DiagnosticsBundle {
   providers: ProviderRecord[];
   nodes: VpnNodeRecord[];
   tunnels: TunnelRecord[];
+  init_runs?: InitRunRecord[];
   redacted_notes: string[];
+}
+
+export interface InitRunRecord {
+  id: number;
+  node_id: string;
+  provider_slug: string;
+  init_kind: string;
+  stage: string;
+  outcome: string;
+  output: string;
+  created_at: string;
 }
 
 export interface WireGuardReadiness {
