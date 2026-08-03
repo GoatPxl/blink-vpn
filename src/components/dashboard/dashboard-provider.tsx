@@ -280,6 +280,25 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    if (provider.slug === "docker") {
+      setProviderAccessState("checking");
+      setProviderStatusMessage("Checking Docker daemon readiness for local provider operations...");
+      try {
+        const readiness = await checkDockerReadiness();
+        if (readiness.installed && readiness.daemon_reachable) {
+          setProviderAccessState("ready");
+        } else {
+          setProviderAccessState("invalid");
+        }
+        setProviderStatusMessage(readiness.message);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setProviderAccessState("invalid");
+        setProviderStatusMessage(message);
+      }
+      return;
+    }
+
     setProviderAccessState("checking");
     setProviderStatusMessage(`Checking stored provider access for ${providerLabel}...`);
 
@@ -438,7 +457,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       pushToast("success", "Token validated", result);
     } catch (error) {
       setProviderAccessState("invalid");
-      setProviderFeedback(handleError(error));
+      const message = handleError(error);
+      setProviderStatusMessage(message);
+      setProviderFeedback(message);
     } finally {
       setBusyAction(null);
     }

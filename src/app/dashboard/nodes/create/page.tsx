@@ -33,6 +33,14 @@ export default function DashboardNodesCreatePage() {
   const [pricingByRegion, setPricingByRegion] = useState<Record<string, ProviderPlanPricing[]>>({});
   const [pricingBusy, setPricingBusy] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
+  const isProviderSuspended = configuredProvider?.status === "suspended";
+  const suspendedMessage = configuredProvider
+    ? `Provider '${configuredProvider.id}' is suspended. Resume the provider from Settings before running this operation.`
+    : "Selected provider is suspended. Resume the provider from Settings before running this operation.";
+  const effectiveProviderStatusMessage = isProviderSuspended
+    ? suspendedMessage
+    : providerStatusMessage;
+  const nodesProvisioningDisabled = providerAccessState !== "ready" || isProviderSuspended;
 
   const providerBadge = providerAccessBadge(providerAccessState);
 
@@ -41,7 +49,9 @@ export default function DashboardNodesCreatePage() {
 
     async function loadPricingCatalog() {
       const canLoadDockerPlanningCatalog = configuredProvider?.slug === "docker" && !!configuredProvider.token_ref;
-      const canLoadPricingCatalog = !!providerId && (providerAccessState === "ready" || canLoadDockerPlanningCatalog);
+      const canLoadPricingCatalog = !!providerId
+        && !isProviderSuspended
+        && (providerAccessState === "ready" || canLoadDockerPlanningCatalog);
 
       if (!canLoadPricingCatalog) {
         if (active) {
@@ -50,8 +60,8 @@ export default function DashboardNodesCreatePage() {
           setRegion("");
           setPlanKey("");
           setPricingError(
-            providerAccessState === "missing" || providerAccessState === "invalid"
-              ? providerStatusMessage
+            providerAccessState === "missing" || providerAccessState === "invalid" || isProviderSuspended
+              ? effectiveProviderStatusMessage
               : null,
           );
         }
@@ -87,7 +97,7 @@ export default function DashboardNodesCreatePage() {
         setPricingByRegion(nextPricingByRegion);
         setRegion(nextRegion);
         setPlanKey(nextPlanKey);
-        setPricingError(providerAccessState === "ready" ? null : providerStatusMessage);
+        setPricingError(providerAccessState === "ready" && !isProviderSuspended ? null : effectiveProviderStatusMessage);
       } catch (error) {
         if (!active) {
           return;
@@ -109,7 +119,7 @@ export default function DashboardNodesCreatePage() {
     return () => {
       active = false;
     };
-  }, [configuredProvider, providerAccessState, providerId, providerStatusMessage, region, planKey]);
+  }, [configuredProvider, providerAccessState, providerId, effectiveProviderStatusMessage, isProviderSuspended, region, planKey]);
 
   const selectedRegionPricing = pricingByRegion[region] ?? [];
   const selectedCreatePlan = selectedRegionPricing.find((plan) => plan.plan_key === planKey) ?? null;
@@ -134,7 +144,7 @@ export default function DashboardNodesCreatePage() {
     <NodesCreateView
       providerAccessState={providerAccessState}
       providerBadge={providerBadge}
-      providerStatusMessage={providerStatusMessage}
+      providerStatusMessage={effectiveProviderStatusMessage}
       providerId={providerId}
       providerName={providerName}
       configuredProvider={configuredProvider}
@@ -152,8 +162,8 @@ export default function DashboardNodesCreatePage() {
       setNodeId={setNodeId}
       setNodeName={setNodeName}
       nodeName={nodeName}
-      nodeFeedback={pricingError ?? (providerAccessState !== "ready" ? providerStatusMessage : "No node action yet.")}
-      nodesProvisioningDisabled={providerAccessState !== "ready"}
+      nodeFeedback={pricingError ?? (nodesProvisioningDisabled ? effectiveProviderStatusMessage : "No node action yet.")}
+      nodesProvisioningDisabled={nodesProvisioningDisabled}
       availableRegions={availableRegions}
       pricingCatalog={selectedRegionPricing}
       selectedCreatePlanDisplay={selectedCreatePlanDisplay}

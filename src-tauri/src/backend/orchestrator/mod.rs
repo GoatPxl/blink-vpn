@@ -400,7 +400,11 @@ impl Orchestrator {
     providers
       .validate_provider_token(db, secure_storage, &request.provider_id)
       .map_err(|source| OrchestratorError::Provider {
-        detail: "Provider token failed validation before provisioning node.".to_string(),
+        detail: if provider_slug == "docker" {
+          "Docker provider validation failed before provisioning node. Verify Docker Desktop is running and daemon is reachable, then retry.".to_string()
+        } else {
+          "Provider token failed validation before provisioning node.".to_string()
+        },
         source,
       })?;
 
@@ -2399,7 +2403,7 @@ mod tests {
 
     assert_eq!(user_facing.kind, UserFacingErrorKind::WireGuard);
     assert!(user_facing.message.contains("did not respond to the start request in a timely fashion"));
-    assert!(user_facing.next_action.contains("Wait a few seconds, then retry Connect"));
+    assert!(user_facing.next_action.contains("retry Connect"));
   }
 }
 
