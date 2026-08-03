@@ -309,10 +309,7 @@ impl WireGuardManager {
     }
 
     let service_name = wireguard_service_name(tunnel_name);
-    let start_result = self
-      .runner
-      .run("sc", &["start", &service_name], None)
-      .map_err(|source| map_sc_tunnel_error(source, &service_name, "start"));
+    let start_result = run_sc_with_uac_fallback(&*self.runner, "start", &service_name);
 
     match start_result {
       Ok(_) => self.wait_for_running_tunnel(tunnel_name),
@@ -338,6 +335,7 @@ impl WireGuardManager {
 
   fn wait_for_running_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
     let mut last_state = TunnelActivationProbeState::Unknown;
+    let mut tried_elevated_query = false;
 
     for _ in 0..ACTIVATE_POLL_ATTEMPTS {
       match self.probe_tunnel_service_state(tunnel_name) {
@@ -346,7 +344,16 @@ impl WireGuardManager {
           last_state = state;
           thread::sleep(ACTIVATE_POLL_INTERVAL);
         }
-        Err(_) => {
+        Err(error) => {
+          if !tried_elevated_query && is_wireguard_access_denied_error(&error) {
+            tried_elevated_query = true;
+            if let Ok(state) = probe_tunnel_service_state_via_uac(tunnel_name) {
+              if state == TunnelActivationProbeState::Running {
+                return Ok(());
+              }
+              last_state = state;
+            }
+          }
           thread::sleep(ACTIVATE_POLL_INTERVAL);
         }
       }
@@ -401,10 +408,7 @@ impl WireGuardManager {
     validate_tunnel_name(tunnel_name)?;
 
     let service_name = wireguard_service_name(tunnel_name);
-    let stop_result = self
-      .runner
-      .run("sc", &["stop", &service_name], None)
-      .map_err(|source| map_sc_tunnel_error(source, &service_name, "stop"));
+    let stop_result = run_sc_with_uac_fallback(&*self.runner, "stop", &service_name);
 
     match stop_result {
       Ok(_) => Ok(()),
@@ -925,6 +929,31 @@ fn wireguard_service_name(tunnel_name: &str) -> String {
   format!("WireGuardTunnel${tunnel_name}")
 }
 
+fn parse_tunnel_activation_probe_state(raw_output: &str) -> TunnelActivationProbeState {
+  for line in raw_output.lines() {
+    let trimmed = line.trim();
+    if !trimmed.to_ascii_uppercase().starts_with("STATE") {
+      continue;
+    }
+
+    if trimmed.contains("RUNNING") {
+      return TunnelActivationProbeState::Running;
+    }
+
+    if trimmed.contains("START_PENDING") {
+      return TunnelActivationProbeState::Starting;
+    }
+
+    if trimmed.contains("STOPPED") {
+      return TunnelActivationProbeState::Stopped;
+    }
+
+    return TunnelActivationProbeState::Unknown;
+  }
+
+  TunnelActivationProbeState::Unknown
+}
+
 fn validate_tunnel_name(tunnel_name: &str) -> Result<(), WireGuardError> {
   let is_valid = !tunnel_name.trim().is_empty()
     && tunnel_name
@@ -956,6 +985,53 @@ fn is_windows_access_denied_detail(detail: &str) -> bool {
     || lowered.contains("requires elevation")
     || lowered.contains("administrator")
     || lowered.contains("0x80070005")
+}
+
+fn is_wireguard_access_denied_error(error: &WireGuardError) -> bool {
+  match error {
+    WireGuardError::Command {
+      source: CommandExecError::NonZeroExit { detail, .. },
+      ..
+    } => is_windows_access_denied_detail(detail),
+    _ => false,
+  }
+}
+
+fn run_sc_with_uac_fallback(
+  runner: &dyn CommandRunner,
+  operation: &str,
+  service_name: &str,
+) -> Result<CommandOutput, WireGuardError> {
+  let args = [operation, service_name];
+  match runner.run("sc", &args, None) {
+    Ok(output) => Ok(output),
+    Err(source) => {
+      if should_retry_sc_with_uac(&source) {
+        run_wireguard_via_uac("sc", &args)
+          .map_err(|elevated_source| map_sc_tunnel_error(elevated_source, service_name, operation))
+      } else {
+        Err(map_sc_tunnel_error(source, service_name, operation))
+      }
+    }
+  }
+}
+
+fn should_retry_sc_with_uac(source: &CommandExecError) -> bool {
+  match source {
+    CommandExecError::NonZeroExit { detail, .. } => is_windows_access_denied_detail(detail),
+    _ => false,
+  }
+}
+
+fn probe_tunnel_service_state_via_uac(
+  tunnel_name: &str,
+) -> Result<TunnelActivationProbeState, WireGuardError> {
+  let service_name = wireguard_service_name(tunnel_name);
+  let output = run_wireguard_via_uac("sc", &["query", &service_name]).map_err(|source| {
+    map_sc_tunnel_error(source, &service_name, "query")
+  })?;
+
+  Ok(parse_tunnel_activation_probe_state(&output.stdout))
 }
 
 fn run_wireguard_via_uac(program: &str, args: &[&str]) -> Result<CommandOutput, CommandExecError> {
@@ -1453,6 +1529,28 @@ mod tests {
     assert!(is_windows_access_denied_detail("The requested operation requires elevation."));
     assert!(!is_windows_access_denied_detail("service missing"));
   }
+
+    #[test]
+    fn retries_sc_with_uac_when_access_denied() {
+      let source = CommandExecError::NonZeroExit {
+        program: "sc".to_string(),
+        code: Some(5),
+        detail: "Access is denied.".to_string(),
+      };
+
+      assert!(super::should_retry_sc_with_uac(&source));
+    }
+
+    #[test]
+    fn does_not_retry_sc_with_uac_for_non_permission_failures() {
+      let source = CommandExecError::NonZeroExit {
+        program: "sc".to_string(),
+        code: Some(1060),
+        detail: "The specified service does not exist as an installed service.".to_string(),
+      };
+
+      assert!(!super::should_retry_sc_with_uac(&source));
+    }
 
   #[test]
   fn map_sc_tunnel_error_detects_missing_service_from_detail_text() {

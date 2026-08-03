@@ -2442,26 +2442,45 @@ impl OrchestratorError {
         next_action: {
           let lowered_source = source.to_string().to_ascii_lowercase();
           let lowered_detail = detail.to_ascii_lowercase();
+          let tunnel_name = extract_tunnel_name_from_wireguard_error(&source.to_string());
+          let tunnel_repair_commands = tunnel_name
+            .as_deref()
+            .map(|name| {
+              format!(
+                "PowerShell recovery: sc.exe query \"WireGuardTunnel${name}\"; wireguard.exe /uninstalltunnelservice {name}; then click Connect again in Nodes."
+              )
+            })
+            .unwrap_or_else(|| {
+              "PowerShell recovery: sc.exe query WireGuardManager; then click Connect again in Nodes."
+                .to_string()
+            });
 
           if lowered_source.contains("access is denied")
             || lowered_source.contains("requires elevation")
             || lowered_source.contains("administrator")
           {
-            "Approve the Windows UAC prompt for WireGuard tunnel operations, or run GoatStare as Administrator, then retry Connect.".to_string()
+            format!(
+              "Approve the Windows UAC prompt (or run GoatStare as Administrator), then retry Connect. {tunnel_repair_commands}"
+            )
           } else if lowered_detail.contains("did not reach running")
             || lowered_detail.contains("did not report running")
             || lowered_source.contains("timely fashion")
             || lowered_source.contains("start pending")
           {
-            "The tunnel service is still starting or timed out. Wait a few seconds, then retry Connect. If it keeps failing, open WireGuard logs and verify the tunnel configuration.".to_string()
+            format!(
+              "The tunnel service start timed out. Wait 5-10 seconds and retry Connect once. If it fails again: {tunnel_repair_commands} If that still fails, use Nodes -> Uninstall Host to destroy the node and re-provision."
+            )
           } else if lowered_source.contains("does not exist")
             || lowered_detail.contains("not found locally")
             || lowered_detail.contains("re-import the tunnel configuration")
           {
-            "Re-import the tunnel configuration, then retry Connect. If the service was removed manually, create or repair the tunnel first.".to_string()
+            format!(
+              "The local tunnel service is missing. {tunnel_repair_commands}"
+            )
           } else {
-            "Repair WireGuard for Windows, then use Force Cleanup to remove stale tunnel artifacts."
-              .to_string()
+            format!(
+              "Repair WireGuard for Windows and retry Connect. If the issue persists: {tunnel_repair_commands}"
+            )
           }
         },
       },
@@ -2473,6 +2492,22 @@ impl OrchestratorError {
             .to_string(),
       },
     }
+  }
+}
+
+fn extract_tunnel_name_from_wireguard_error(source_text: &str) -> Option<String> {
+  let marker = "WireGuardTunnel$";
+  let marker_index = source_text.find(marker)?;
+  let remainder = &source_text[(marker_index + marker.len())..];
+  let tunnel_name: String = remainder
+    .chars()
+    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+    .collect();
+
+  if tunnel_name.is_empty() {
+    None
+  } else {
+    Some(tunnel_name)
   }
 }
 

@@ -13,6 +13,8 @@
     "frontend:e2e:docker:preflight": "docker version",
     "frontend:e2e:docker:lane": "set NEXT_PUBLIC_DEV_DOCKER=1&& npm run frontend:e2e:docker:preflight && playwright test --project=frontend tests/e2e/dashboard-docker-provider.spec.ts tests/e2e/dashboard-docker-nodes.spec.ts tests/e2e/dashboard-docker-host-install-connect.spec.ts tests/e2e/dashboard-docker-tunnel.spec.ts tests/e2e/dashboard-docker-destroy-cleanup.spec.ts",
     "frontend:e2e:docker:lane:headed": "set NEXT_PUBLIC_DEV_DOCKER=1&& npm run frontend:e2e:docker:preflight && playwright test --project=frontend --headed tests/e2e/dashboard-docker-provider.spec.ts tests/e2e/dashboard-docker-nodes.spec.ts tests/e2e/dashboard-docker-host-install-connect.spec.ts tests/e2e/dashboard-docker-tunnel.spec.ts tests/e2e/dashboard-docker-destroy-cleanup.spec.ts",
+    "tauri:e2e:docker:real": "playwright test --project=tauri-real tests/e2e/dashboard-docker-real-tauri.spec.ts",
+    "backend:test:docker:real": "cargo test --manifest-path src-tauri/Cargo.toml real_docker_create_init_and_delete_roundtrip -- --ignored --nocapture",
     "e2e": "npm run frontend:e2e",
     "e2e:headed": "npm run frontend:e2e:headed",
     "e2e:docker:preflight": "npm run frontend:e2e:docker:preflight",

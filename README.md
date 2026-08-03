@@ -60,7 +60,7 @@ npm install
 npm run tauri:dev
 ```
 
-Run frontend Playwright tests:
+Run frontend Playwright tests (browser-mode, mocked Tauri bridge):
 
 ```bash
 npm run frontend:e2e
@@ -70,6 +70,18 @@ Run Tauri app with Playwright plugin enabled for native-webview E2E work:
 
 ```bash
 npm run tauri:dev:e2e
+
+Run real Docker backend adapter integration test (no mock fixtures):
+
+```bash
+npm run backend:test:docker:real
+```
+
+Run real Tauri Docker flow E2E (no mock fixtures):
+
+```bash
+npm run tauri:e2e:docker:real
+```
 ```
 
 ## Documentation

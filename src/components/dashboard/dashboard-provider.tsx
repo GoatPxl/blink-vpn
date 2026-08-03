@@ -194,14 +194,29 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const handleError = useCallback((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
+    const explicitNextIndex = message.indexOf(" Next: ");
+    const explicitNext = explicitNextIndex >= 0
+      ? message.slice(explicitNextIndex + " Next: ".length).trim()
+      : null;
+    const baseMessage = explicitNextIndex >= 0
+      ? message.slice(0, explicitNextIndex).trim()
+      : message;
     const classification = categorizeError(message);
-    setRecovery({ ...classification, message });
+    setRecovery({
+      ...classification,
+      message: baseMessage,
+      nextAction: explicitNext ?? classification.nextAction,
+    });
     pushToast(
       classification.kind === "state" ? "warning" : "error",
       classification.title,
-      `${message} ${classification.nextAction}`,
+      explicitNext
+        ? `${baseMessage} Next: ${explicitNext}`
+        : `${baseMessage} ${classification.nextAction}`,
     );
-    return message;
+    return explicitNext
+      ? `${baseMessage} Next: ${explicitNext}`
+      : `${baseMessage} ${classification.nextAction}`;
   }, [pushToast]);
 
   const clearThroughputSamples = useCallback(() => {

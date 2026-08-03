@@ -66,7 +66,7 @@ export function NodesCreateView({
         <div className="flex flex-col gap-4 rounded-[24px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-5 shadow-[var(--shadow-elevated)] lg:flex-row lg:items-end lg:justify-between">
           <div>
             <h2 className="text-[28px] font-semibold tracking-tight text-[var(--on-surface)]">Create Node</h2>
-            <p className="mt-1 max-w-3xl text-sm text-[var(--on-surface-variant)]">Provision a new node with the currently selected provider token and synthetic size catalog.</p>
+            <p className="mt-1 max-w-3xl text-sm text-[var(--on-surface-variant)]">Provision a new node with the currently selected provider token and live provider size catalog for the selected integration.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className={`inline-flex rounded-full border px-3 py-1.5 text-xs ${providerBadge.classes}`}>Provider access: {providerBadge.label}</span>

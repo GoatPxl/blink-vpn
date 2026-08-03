@@ -18,7 +18,7 @@ Phase 1 tests are organized around deterministic behavior and failure handling.
 ### What is Mocked
 
 - DigitalOcean HTTP interactions use `mockito` or local test doubles.
-- Docker provider behavior uses local adapter-level mocks/stubs and synthetic data contracts.
+- Frontend browser-mode Playwright specs use a mocked Tauri invoke bridge (`tests/e2e/fixtures/tauri-mocks.ts`).
 - WireGuard command execution uses a mock `CommandRunner` in unit tests.
 - Secure storage uses the in-memory mock store outside Windows.
 
@@ -28,9 +28,9 @@ Phase 1 tests are organized around deterministic behavior and failure handling.
 - Live cloud provider accounts are not required for the normal test suite.
 - Real WireGuard services are not required for unit tests.
 
-## Docker E2E Real-Daemon Lane
+## Docker Frontend Browser Lane (Mocked Tauri Bridge)
 
-This lane is the contributor gate for Docker dashboard flows in Prompts 3-7.
+This lane validates frontend Docker dashboard state transitions with deterministic command stubs.
 
 ### Prerequisites
 
@@ -72,6 +72,22 @@ npm run frontend:e2e:docker:lane:headed
 
 - If preflight fails, do not run the lane; start Docker Desktop and rerun preflight.
 - If lane fails, fix in prompt order (provider -> nodes -> tunnel -> destroy/cleanup) and rerun the full lane.
+
+## Docker Real Backend Lane (No Mock Fixtures)
+
+This lane validates real Docker adapter execution including container provisioning, init-script readiness, and teardown.
+
+```bash
+npm run backend:test:docker:real
+```
+
+## Docker Real Tauri E2E Lane (No Mock Fixtures)
+
+This lane drives the real Tauri app/webview and backend using the Playwright plugin bridge.
+
+```bash
+npm run tauri:e2e:docker:real
+```
 
 ## How to Run Tests
 

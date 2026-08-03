@@ -22,7 +22,12 @@ export default defineConfig({
   projects: [
     {
       name: "frontend",
+      testIgnore: /dashboard-docker-real-tauri\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "tauri-real",
+      testMatch: /dashboard-docker-real-tauri\.spec\.ts/,
     },
   ],
 });

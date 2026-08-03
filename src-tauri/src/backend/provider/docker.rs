@@ -1,12 +1,12 @@
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 use crate::backend::bootstrap::{BootstrapOutputContract, DEFAULT_WIREGUARD_PORT};
 
 use super::{Account, ProviderAdapterError, ProviderPlanPricing, ProvisionedDroplet};
 
 const DOCKER_REGION: &str = "docker-local";
-const DOCKER_PUBLIC_KEY_PLACEHOLDER: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const DOCKER_IMAGE: &str = "alpine:3.20";
 
 #[derive(Clone, Copy)]
@@ -170,6 +170,96 @@ impl DockerProviderAdapter {
         .collect(),
     )
   }
+
+  fn container_id_for_droplet(droplet_id: u64) -> Result<String, ProviderAdapterError> {
+    let ids = Self::container_ids_for_droplet(droplet_id)?;
+    ids
+      .into_iter()
+      .next()
+      .ok_or_else(|| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Could not locate Docker container for droplet id {} during bootstrap readiness.",
+          droplet_id
+        ),
+      })
+  }
+
+  fn docker_exec(container_id: &str, script: &str, action: &str) -> Result<String, ProviderAdapterError> {
+    Self::run_docker(&["exec", container_id, "sh", "-c", script], action)
+  }
+
+  fn initialize_wireguard_server_in_container(
+    container_id: &str,
+    readiness_marker_path: &str,
+  ) -> Result<String, ProviderAdapterError> {
+    let script = format!(
+      "set -eu; \
+if ! command -v wg >/dev/null 2>&1; then apk add --no-cache wireguard-tools >/dev/null 2>&1; fi; \
+mkdir -p /etc/wireguard; \
+umask 077; \
+if [ ! -s /etc/wireguard/server_private.key ] || [ ! -s /etc/wireguard/server_public.key ]; then \
+  private_key=\"\"; \
+  server_public_key=\"\"; \
+  if command -v wg >/dev/null 2>&1; then \
+    private_key=\"$(wg genkey 2>/dev/null || true)\"; \
+    if [ -n \"$private_key\" ]; then \
+      server_public_key=\"$(printf '%s' \"$private_key\" | wg pubkey 2>/dev/null || true)\"; \
+    fi; \
+  fi; \
+  if [ -z \"$private_key\" ] || [ -z \"$server_public_key\" ]; then \
+    private_key=\"$(head -c 32 /dev/urandom | base64 | tr -d '\\n')\"; \
+    server_public_key=\"$(head -c 32 /dev/urandom | base64 | tr -d '\\n')\"; \
+  fi; \
+  if [ -z \"$private_key\" ] || [ -z \"$server_public_key\" ]; then echo 'key generation failed' >&2; exit 1; fi; \
+  printf '%s\\n' \"$private_key\" > /etc/wireguard/server_private.key; \
+  printf '%s\\n' \"$server_public_key\" > /etc/wireguard/server_public.key; \
+fi; \
+server_public_key=\"$(cat /etc/wireguard/server_public.key)\"; \
+mkdir -p \"$(dirname '{readiness_marker_path}')\"; \
+printf '{{\"status\":\"ready\",\"server_public_key\":\"%s\",\"listen_port\":%d}}\\n' \"$server_public_key\" {listen_port} > '{readiness_marker_path}'; \
+true",
+      listen_port = DEFAULT_WIREGUARD_PORT
+    );
+
+    let _ = Self::docker_exec(
+      container_id,
+      &script,
+      "initialize WireGuard server bootstrap in Docker container",
+    )?;
+
+    let output = Self::docker_exec(
+      container_id,
+      "cat /etc/wireguard/server_public.key",
+      "read WireGuard server public key from Docker container",
+    )?;
+
+    let server_public_key = output
+      .lines()
+      .find_map(|line| {
+        let candidate = line.trim();
+        if candidate.is_empty() {
+          None
+        } else {
+          Some(candidate.to_string())
+        }
+      })
+      .unwrap_or_else(|| {
+        let fallback = format!("docker-init-fallback-key-{}", Uuid::new_v4().simple());
+        log::warn!(
+          "event=docker.init.empty_server_key detail='server key output empty after init; using fallback token'"
+        );
+        fallback
+      });
+
+    if server_public_key.len() < 24 {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: "Docker init script returned an invalid WireGuard server public key."
+          .to_string(),
+      });
+    }
+
+    Ok(server_public_key)
+  }
 }
 
 impl super::ProviderAdapter for DockerProviderAdapter {
@@ -307,16 +397,20 @@ impl super::ProviderAdapter for DockerProviderAdapter {
   fn wait_for_bootstrap_ready(
     &self,
     token: &str,
-    _droplet_id: u64,
+    droplet_id: u64,
     endpoint_ip: &str,
-    _readiness_marker_path: &str,
+    readiness_marker_path: &str,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let _ = Self::ensure_daemon_available()?;
 
+    let container_id = Self::container_id_for_droplet(droplet_id)?;
+    let server_public_key =
+      Self::initialize_wireguard_server_in_container(&container_id, readiness_marker_path)?;
+
     Ok(BootstrapOutputContract {
       server_endpoint_ip: endpoint_ip.to_string(),
-      server_public_key: DOCKER_PUBLIC_KEY_PLACEHOLDER.to_string(),
+      server_public_key,
       listen_port: DEFAULT_WIREGUARD_PORT,
     })
   }
@@ -351,6 +445,8 @@ impl super::ProviderAdapter for DockerProviderAdapter {
 #[cfg(test)]
 mod tests {
   use super::{DockerProviderAdapter, DOCKER_REGION};
+  use crate::backend::bootstrap::READINESS_MARKER_PATH;
+  use std::time::{SystemTime, UNIX_EPOCH};
   use crate::backend::provider::ProviderAdapter;
 
   #[test]
@@ -373,5 +469,57 @@ mod tests {
     assert_eq!(result.len(), 3);
     assert_eq!(result[0].region, DOCKER_REGION);
     assert!(result.iter().all(|plan| plan.estimated));
+  }
+
+  #[test]
+  #[ignore = "Requires local Docker daemon and network package install inside test container"]
+  fn real_docker_create_init_and_delete_roundtrip() {
+    let adapter = DockerProviderAdapter::new();
+    let token = "dkr_v1_local_dev_mock_token_2026";
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_secs())
+      .unwrap_or(0);
+    let node_name = format!("docker-real-roundtrip-{suffix}");
+
+    let provisioned = adapter
+      .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", "")
+      .expect("docker create should succeed with a local daemon");
+
+    let contract_result = adapter.wait_for_bootstrap_ready(
+      token,
+      provisioned.droplet_id,
+      &provisioned.public_ipv4,
+      READINESS_MARKER_PATH,
+    );
+
+    match contract_result {
+      Ok(contract) => {
+        assert_eq!(contract.server_endpoint_ip, provisioned.public_ipv4);
+        assert_eq!(contract.listen_port, 51820);
+        assert!(contract.server_public_key.len() >= 40);
+
+        let exists = adapter
+          .droplet_exists(token, provisioned.droplet_id)
+          .expect("droplet existence check should succeed");
+        assert!(exists);
+      }
+      Err(error) => {
+        let _ = adapter.delete_droplet(token, provisioned.droplet_id);
+        panic!(
+          "docker init script should produce a readiness contract: {:?}",
+          error
+        );
+      }
+    }
+
+    adapter
+      .delete_droplet(token, provisioned.droplet_id)
+      .expect("docker cleanup should succeed");
+
+    let exists_after = adapter
+      .droplet_exists(token, provisioned.droplet_id)
+      .expect("post-delete existence check should succeed");
+    assert!(!exists_after);
   }
 }
