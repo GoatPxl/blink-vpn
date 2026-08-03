@@ -140,6 +140,16 @@ impl WireGuardManager {
     }
   }
 
+  pub fn resolution_diagnostics(&self) -> WireGuardResolutionDiagnostics {
+    WireGuardResolutionDiagnostics {
+      process_path: std::env::var_os("PATH").map(|value| value.to_string_lossy().to_string()),
+      wg_resolved_path: resolve_wireguard_command_path("wg")
+        .map(|path| path.to_string_lossy().to_string()),
+      wireguard_resolved_path: resolve_wireguard_command_path("wireguard")
+        .map(|path| path.to_string_lossy().to_string()),
+    }
+  }
+
   fn resolve_wg_program(&self) -> Result<String, WireGuardError> {
     self.resolve_program("wg")
   }
@@ -153,7 +163,11 @@ impl WireGuardManager {
       return Ok(path.to_string_lossy().to_string());
     }
 
-    Ok(command_name.to_string())
+    Err(WireGuardError::NotInstalled {
+      detail: format!(
+        "Could not locate a single WireGuard installation containing '{command_name}.exe'. Repair WireGuard for Windows so both 'wg.exe' and 'wireguard.exe' are installed together, then click Re-check."
+      ),
+    })
   }
 
   pub fn generate_client_keypair(&self) -> Result<ClientKeyPair, WireGuardError> {
@@ -203,8 +217,23 @@ impl WireGuardManager {
     let wireguard_program = self.resolve_wireguard_program()?;
     validate_tunnel_name(tunnel_name)?;
 
-    let mut file_path = std::env::temp_dir();
-    file_path.push(format!("{tunnel_name}-{}.conf", Uuid::new_v4()));
+    match self.unregister_tunnel(tunnel_name) {
+      Ok(_) => {}
+      Err(WireGuardError::TunnelNotFound { .. }) => {}
+      Err(error) => return Err(error),
+    }
+
+    let mut temp_dir = std::env::temp_dir();
+    temp_dir.push(format!("goatstare-wireguard-{}", Uuid::new_v4()));
+
+    std::fs::create_dir_all(&temp_dir).map_err(|source| WireGuardError::Io {
+      action: "create_tunnel_config_temp_dir",
+      detail: "Could not create temporary directory for WireGuard tunnel import.".to_string(),
+      source,
+    })?;
+
+    let mut file_path = temp_dir.clone();
+    file_path.push(format!("{tunnel_name}.conf"));
 
     let mut file = std::fs::File::create(&file_path).map_err(|source| WireGuardError::Io {
       action: "create_tunnel_config_temp_file",
@@ -234,6 +263,14 @@ impl WireGuardManager {
       log::warn!(
         "Failed to clean up temporary WireGuard config file '{}': {}",
         file_path.display(),
+        err
+      );
+    }
+
+    if let Err(err) = std::fs::remove_dir_all(&temp_dir) {
+      log::warn!(
+        "Failed to clean up temporary WireGuard config directory '{}': {}",
+        temp_dir.display(),
         err
       );
     }
@@ -292,16 +329,23 @@ impl WireGuardManager {
     let wireguard_program = self.resolve_wireguard_program()?;
     validate_tunnel_name(tunnel_name)?;
 
-    self
+    let result = self
       .runner
       .run(&wireguard_program, &["/uninstalltunnelservice", tunnel_name], None)
       .map_err(|source| WireGuardError::Command {
         command: format!("wireguard /uninstalltunnelservice {tunnel_name}"),
         detail: "Could not unregister WireGuard tunnel service.".to_string(),
         source,
-      })?;
+      });
 
-    Ok(())
+    match result {
+      Ok(_) => Ok(()),
+      Err(WireGuardError::Command {
+        source: CommandExecError::NonZeroExit { code: Some(1060), .. },
+        ..
+      }) => Ok(()),
+      Err(error) => Err(error),
+    }
   }
 
   pub fn read_tunnel_status(&self, tunnel_name: &str) -> Result<TunnelRuntimeStatus, WireGuardError> {
@@ -394,6 +438,13 @@ pub struct WireGuardReadiness {
   pub version: Option<String>,
   pub message: String,
   pub action_guidance: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireGuardResolutionDiagnostics {
+  pub process_path: Option<String>,
+  pub wg_resolved_path: Option<String>,
+  pub wireguard_resolved_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -739,12 +790,6 @@ fn resolve_wireguard_command_path(program: &str) -> Option<PathBuf> {
     return Some(in_path);
   }
 
-  let mut default_path = PathBuf::from(r"C:\Program Files\WireGuard");
-  default_path.push(format!("{program}.exe"));
-  if default_path.is_file() {
-    return Some(default_path);
-  }
-
   None
 }
 
@@ -841,10 +886,107 @@ fn format_nonzero_detail(stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::{
-    ClientConfigParams, DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS,
-    TunnelServiceState, WireGuardError, build_client_config, parse_sc_state,
+    ClientConfigParams, CommandExecError, CommandOutput, CommandRunner,
+    DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS, TunnelServiceState,
+    WireGuardError, WireGuardManager, build_client_config, parse_sc_state,
     parse_wg_dump_metrics, parse_wg_version_output,
   };
+  use std::sync::{Arc, Mutex};
+
+  #[derive(Clone, Default)]
+  struct MockImportRunner {
+    calls: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+    service_exists: Arc<Mutex<bool>>,
+  }
+
+  impl MockImportRunner {
+    fn with_service_exists(service_exists: bool) -> Self {
+      Self {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        service_exists: Arc::new(Mutex::new(service_exists)),
+      }
+    }
+
+    fn calls(&self) -> Vec<(String, Vec<String>)> {
+      self.calls.lock().expect("lock must work").clone()
+    }
+  }
+
+  impl CommandRunner for MockImportRunner {
+    fn run(
+      &self,
+      program: &str,
+      args: &[&str],
+      _stdin: Option<&str>,
+    ) -> Result<CommandOutput, CommandExecError> {
+      let program_name = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+
+      self.calls.lock().expect("lock must work").push((
+        program.to_string(),
+        args.iter().map(|value| value.to_string()).collect(),
+      ));
+
+      if program_name == "wg" && args == ["--version"] {
+        return Ok(CommandOutput {
+          stdout: "wireguard-tools v1".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wireguard" && args == ["/help"] {
+        return Ok(CommandOutput {
+          stdout: "WireGuard for Windows".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wireguard" && args.len() == 2 && args[0] == "/uninstalltunnelservice" {
+        let mut service_exists = self.service_exists.lock().expect("lock must work");
+        if !*service_exists {
+          return Err(CommandExecError::NonZeroExit {
+            program: "wireguard".to_string(),
+            code: Some(1060),
+            detail: "service missing".to_string(),
+          });
+        }
+
+        *service_exists = false;
+        return Ok(CommandOutput {
+          stdout: format!("uninstalled {}", args[1]),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wireguard" && args.len() == 2 && args[0] == "/installtunnelservice" {
+        let file_name = std::path::Path::new(args[1])
+          .file_name()
+          .and_then(|value| value.to_str())
+          .unwrap_or("");
+        if !file_name.ends_with(".conf") || !file_name.starts_with("wg-node-1") {
+          return Err(CommandExecError::NonZeroExit {
+            program: "wireguard".to_string(),
+            code: Some(1),
+            detail: format!("unexpected config path {file_name}"),
+          });
+        }
+
+        *self.service_exists.lock().expect("lock must work") = true;
+        return Ok(CommandOutput {
+          stdout: "installed".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      Err(CommandExecError::NonZeroExit {
+        program: program.to_string(),
+        code: Some(1),
+        detail: "unsupported mock command".to_string(),
+      })
+    }
+  }
 
   #[test]
   fn client_config_generation_includes_required_peer_fields() {
@@ -921,5 +1063,48 @@ mod tests {
   fn parse_wg_version_output_extracts_first_line() {
     let version = parse_wg_version_output("wireguard-tools v1.0.20210914\nextra");
     assert_eq!(version, Some("wireguard-tools v1.0.20210914".to_string()));
+  }
+
+  #[test]
+  fn import_tunnel_replaces_stale_service_and_uses_tunnel_name_basename() {
+    let runner = MockImportRunner::with_service_exists(true);
+    let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
+
+    let result = wireguard.import_tunnel(
+      "wg-node-1",
+      "[Interface]\nPrivateKey = priv\nAddress = 10.66.0.2/32\n\n[Peer]\nPublicKey = pub\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:51820\nPersistentKeepalive = 25\n",
+    );
+
+    assert!(result.is_ok());
+
+    let calls = runner.calls();
+    assert!(calls.iter().any(|(_, args)| args == &["/uninstalltunnelservice".to_string(), "wg-node-1".to_string()]));
+
+    let install_call = calls
+      .iter()
+      .find(|(_, args)| args.first().is_some_and(|arg| arg == "/installtunnelservice"))
+      .expect("install command should be issued");
+
+    assert!(install_call.1[1].ends_with("wg-node-1.conf"));
+  }
+
+  #[test]
+  fn import_tunnel_succeeds_when_service_is_not_preinstalled() {
+    let runner = MockImportRunner::with_service_exists(false);
+    let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
+
+    let result = wireguard.import_tunnel(
+      "wg-node-1",
+      "[Interface]\nPrivateKey = priv\nAddress = 10.66.0.2/32\n\n[Peer]\nPublicKey = pub\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:51820\nPersistentKeepalive = 25\n",
+    );
+
+    assert!(result.is_ok());
+
+    let calls = runner.calls();
+    assert!(calls.iter().any(|(_, args)| args == &[
+      "/uninstalltunnelservice".to_string(),
+      "wg-node-1".to_string(),
+    ]));
+    assert!(calls.iter().any(|(_, args)| args.first().is_some_and(|arg| arg == "/installtunnelservice")));
   }
 }

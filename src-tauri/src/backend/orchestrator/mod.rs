@@ -1392,14 +1392,15 @@ impl Orchestrator {
             }
           }
           Err(WireGuardError::TunnelNotFound { .. }) => {
-            let detail = "Tunnel service is missing locally; re-import tunnel configuration."
+            let detail = "Tunnel service is missing locally; stale tunnel record removed during startup reconciliation."
               .to_string();
-            let _ = db.update_tunnel_status(&tunnel.id, TunnelStatus::Error, Some(&detail));
+            let _ = wireguard.unregister_tunnel(&tunnel.name);
+            let _ = db.delete_tunnel(&tunnel.id);
             report.issues.push(ReconcileIssue {
               kind: ReconcileIssueKind::MissingTunnelArtifact,
               node_id: Some(node.id.clone()),
               tunnel_id: Some(tunnel.id.clone()),
-              repaired: false,
+              repaired: true,
               detail,
             });
           }
@@ -2097,11 +2098,15 @@ mod tests {
       .iter()
       .any(|issue| issue.kind == ReconcileIssueKind::MissingTunnelArtifact));
 
+    assert!(report
+      .issues
+      .iter()
+      .any(|issue| issue.kind == ReconcileIssueKind::MissingTunnelArtifact && issue.repaired));
+
     let tunnel = db
       .get_tunnel("tunnel-connect")
-      .expect("query should succeed")
-      .expect("tunnel should exist");
-    assert_eq!(tunnel.status, TunnelStatus::Error);
+      .expect("query should succeed");
+    assert!(tunnel.is_none());
   }
 
   #[test]

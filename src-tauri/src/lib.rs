@@ -38,6 +38,14 @@ pub fn run() {
       let database_path = app_data_dir.join("goatstare_phase1.sqlite3");
       let backend = backend::Backend::new(database_path);
 
+      let wireguard_diagnostics = backend.wireguard.resolution_diagnostics();
+      log::info!(
+        "event=wireguard.resolution_diagnostics path={} wg_resolved_path={:?} wireguard_resolved_path={:?}",
+        wireguard_diagnostics.process_path.as_deref().unwrap_or("<unset>"),
+        wireguard_diagnostics.wg_resolved_path,
+        wireguard_diagnostics.wireguard_resolved_path
+      );
+
       if let Err(err) = backend.bootstrap.validate_environment() {
         log::warn!("bootstrap validation warning: {err}");
       }

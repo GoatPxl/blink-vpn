@@ -74,14 +74,6 @@ export function OnboardingWizard() {
 
   useEffect(() => {
     if (!isHydrated) return;
-    if (step === 1 && wireGuardReadiness === null) {
-      void checkWireGuard();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isHydrated, step]);
-
-  useEffect(() => {
-    if (!isHydrated) return;
     if (step < 2) return;
 
     const timeoutId = window.setTimeout(() => {
@@ -494,7 +486,7 @@ export function OnboardingWizard() {
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <button type="button" onClick={() => void checkWireGuard()} disabled={wireGuardBusy} className="inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 text-sm text-[var(--on-surface)] hover:bg-[color:rgba(255,255,255,0.08)] disabled:opacity-50">
-                  {wireGuardBusy ? "Checking..." : "Re-check"}
+                  {wireGuardBusy ? "Checking..." : wireGuardReadiness ? "Re-check" : "Check WireGuard"}
                 </button>
                 <button
                   type="button"

@@ -9,10 +9,18 @@ test.describe("Dashboard Docker host install and connect", () => {
     "Docker host install/connect tests require NEXT_PUBLIC_DEV_DOCKER=1 for frontend Docker surfaces.",
   );
 
-  test("installs the Docker host then connects the local WireGuard client", async ({ page }) => {
+  test("shows no WireGuard error on boot or connect", async ({ page }, testInfo) => {
     await installDockerHostInstallAndConnectMock(page, DOCKER_API_TOKEN);
 
     await page.goto("/dashboard/nodes");
+
+    await expect(page.getByText("WireGuard issue", { exact: false })).toHaveCount(0);
+    await expect(page.getByText("WireGuard operation failed", { exact: false })).toHaveCount(0);
+    await expect(page.getByText("Repair WireGuard for Windows", { exact: false })).toHaveCount(0);
+    await testInfo.attach("boot-state", {
+      body: await page.screenshot({ fullPage: true }),
+      contentType: "image/png",
+    });
 
     const nodeRow = page.getByRole("row", { name: /Docker Host Node/i });
     await expect(nodeRow).toBeVisible();
@@ -55,6 +63,13 @@ test.describe("Dashboard Docker host install and connect", () => {
     await connectNodeButton.click();
 
     await expect(page.getByText("Tunnel connected")).toBeVisible();
+    await expect(page.getByText("WireGuard issue", { exact: false })).toHaveCount(0);
+    await expect(page.getByText("WireGuard operation failed", { exact: false })).toHaveCount(0);
+    await expect(page.getByText("Repair WireGuard for Windows", { exact: false })).toHaveCount(0);
+    await testInfo.attach("post-connect-state", {
+      body: await page.screenshot({ fullPage: true }),
+      contentType: "image/png",
+    });
 
     const postConnectState = await page.evaluate(() => {
       return {
