@@ -240,6 +240,8 @@ write_files:
     permissions: '0644'
     content: |
       net.ipv4.ip_forward=1
+      net.ipv4.conf.all.forwarding=1
+      net.ipv4.conf.default.forwarding=1
   - path: /usr/local/bin/goatstare-bootstrap.sh
     permissions: '0700'
     owner: root:root
@@ -318,6 +320,7 @@ iptables -N GOATSTARE-INPUT 2>/dev/null || true
 iptables -F GOATSTARE-INPUT
 iptables -A GOATSTARE-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A GOATSTARE-INPUT -i lo -j ACCEPT
+iptables -A GOATSTARE-INPUT -i ${{WG_IFACE}} -j ACCEPT
 iptables -A GOATSTARE-INPUT -p tcp --dport 22 -j ACCEPT
 iptables -A GOATSTARE-INPUT -p udp --dport ${{WG_PORT}} -j ACCEPT
 iptables -A GOATSTARE-INPUT -j DROP
@@ -379,12 +382,15 @@ mod tests {
     assert!(artifact.cloud_init_user_data.contains("- wireguard-tools"));
     assert!(artifact.cloud_init_user_data.contains("- iptables"));
     assert!(artifact.cloud_init_user_data.contains("net.ipv4.ip_forward=1"));
+    assert!(artifact.cloud_init_user_data.contains("net.ipv4.conf.all.forwarding=1"));
+    assert!(artifact.cloud_init_user_data.contains("net.ipv4.conf.default.forwarding=1"));
     assert!(artifact.cloud_init_user_data.contains("goatstare.bootstrap.stage=${stage}"));
     assert!(artifact.cloud_init_user_data.contains("log_stage \"start\""));
     assert!(artifact.cloud_init_user_data.contains("log_stage \"complete\""));
     assert!(artifact.cloud_init_user_data.contains("log_stage \"marker-validate\""));
     assert!(artifact.cloud_init_user_data.contains("EXPECTED_MARKER"));
     assert!(artifact.cloud_init_user_data.contains("ACTUAL_MARKER=$(cat ${MARKER_PATH})"));
+    assert!(artifact.cloud_init_user_data.contains("iptables -A GOATSTARE-INPUT -i ${WG_IFACE} -j ACCEPT"));
     assert!(artifact.cloud_init_user_data.contains("iptables -t nat -A POSTROUTING"));
     assert!(artifact.cloud_init_user_data.contains("wg genkey"));
     assert!(artifact.cloud_init_user_data.contains("wg-quick@${WG_IFACE}"));
