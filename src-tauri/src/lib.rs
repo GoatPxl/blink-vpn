@@ -39,9 +39,10 @@ pub fn run() {
       let backend = backend::Backend::new(database_path);
 
       let wireguard_diagnostics = backend.wireguard.resolution_diagnostics();
+      let path_summary = summarize_path_for_log(wireguard_diagnostics.process_path.as_deref());
       log::info!(
-        "event=wireguard.resolution_diagnostics path={} wg_resolved_path={:?} wireguard_resolved_path={:?}",
-        wireguard_diagnostics.process_path.as_deref().unwrap_or("<unset>"),
+        "event=wireguard.resolution_diagnostics path_summary={} wg_resolved_path={:?} wireguard_resolved_path={:?}",
+        path_summary,
         wireguard_diagnostics.wg_resolved_path,
         wireguard_diagnostics.wireguard_resolved_path
       );
@@ -118,4 +119,34 @@ pub fn run() {
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
+}
+
+fn summarize_path_for_log(path_value: Option<&str>) -> String {
+  let Some(raw) = path_value else {
+    return "<unset>".to_string();
+  };
+
+  let entries = raw
+    .split(';')
+    .map(|value| value.trim())
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>();
+
+  let mut wireguard_entries = entries
+    .iter()
+    .copied()
+    .filter(|entry| entry.to_ascii_lowercase().contains("wireguard"))
+    .take(3)
+    .map(|entry| entry.to_string())
+    .collect::<Vec<_>>();
+
+  if wireguard_entries.is_empty() {
+    wireguard_entries.push("none".to_string());
+  }
+
+  format!(
+    "entries={} wireguard_entries={}",
+    entries.len(),
+    wireguard_entries.join("|")
+  )
 }

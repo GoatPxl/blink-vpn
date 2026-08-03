@@ -86,6 +86,12 @@ export interface DiagnosticsBundle {
   tunnels: TunnelRecord[];
   init_runs?: InitRunRecord[];
   redacted_notes: string[];
+  wireguard_debug?: {
+    commands: string[];
+    last_import_tunnel_name: string | null;
+    last_import_config_redacted: string | null;
+    last_import_config_temp_path: string | null;
+  };
 }
 
 export interface InitRunRecord {

@@ -146,6 +146,7 @@ pub struct DiagnosticsBundle {
   pub tunnels: Vec<crate::backend::db::TunnelRecord>,
   pub init_runs: Vec<crate::backend::db::InitRunLogRecord>,
   pub redacted_notes: Vec<String>,
+  pub wireguard_debug: crate::backend::wireguard::WireGuardDebugSnapshot,
 }
 
 #[derive(Debug, Error)]
@@ -1220,6 +1221,7 @@ impl Orchestrator {
 
   pub fn build_diagnostics_bundle(
     &self,
+    wireguard: &WireGuardManager,
     db: &Database,
   ) -> Result<DiagnosticsBundle, OrchestratorError> {
     let providers = db.list_providers().map_err(|source| OrchestratorError::Database {
@@ -1318,6 +1320,7 @@ impl Orchestrator {
       tunnels,
       init_runs,
       redacted_notes,
+      wireguard_debug: wireguard.debug_snapshot(),
     })
   }
   pub fn reconcile_startup(
@@ -2363,11 +2366,12 @@ mod tests {
   fn diagnostics_bundle_redacts_provider_token_refs() {
     let db = Database::new(test_db_path("diagnostics_redaction"));
     db.run_migrations().expect("migrations should succeed");
+    let wireguard = WireGuardManager::new();
 
     setup_provider_and_token(&db, &SecureStorage::dev_mock());
 
     let bundle = Orchestrator::new()
-      .build_diagnostics_bundle(&db)
+      .build_diagnostics_bundle(&wireguard, &db)
       .expect("bundle should build");
 
     assert!(bundle.providers.iter().all(|provider| provider.token_ref.is_none()));

@@ -44,6 +44,7 @@ pub struct DiagnosticsBundleResponse {
   pub tunnels: Vec<TunnelRecord>,
   pub init_runs: Vec<crate::backend::db::InitRunLogRecord>,
   pub redacted_notes: Vec<String>,
+  pub wireguard_debug: crate::backend::wireguard::WireGuardDebugSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -565,7 +566,7 @@ pub fn connect_tunnel(
     ensure_builtin_providers(&backend.db, backend.feature_flags.docker_dev)?;
     let bundle = backend
       .orchestrator
-      .build_diagnostics_bundle(&backend.db)
+      .build_diagnostics_bundle(&backend.wireguard, &backend.db)
       .map_err(|err| err.to_string())?;
 
     Ok(DiagnosticsBundleResponse {
@@ -575,6 +576,7 @@ pub fn connect_tunnel(
       tunnels: bundle.tunnels,
       init_runs: bundle.init_runs,
       redacted_notes: bundle.redacted_notes,
+      wireguard_debug: bundle.wireguard_debug,
     })
   }
 
@@ -585,7 +587,7 @@ pub fn export_diagnostics_bundle(
 ) -> Result<String, String> {
   let bundle = backend
     .orchestrator
-    .build_diagnostics_bundle(&backend.db)
+    .build_diagnostics_bundle(&backend.wireguard, &backend.db)
     .map_err(|err| err.to_string())?;
 
   let bundle_json = serde_json::to_string_pretty(&bundle).map_err(|err| err.to_string())?;

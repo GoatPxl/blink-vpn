@@ -1,8 +1,9 @@
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,25 +11,75 @@ use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::backend::logging;
+
 pub const DEFAULT_CLIENT_ALLOWED_IPS: &[&str] = &["0.0.0.0/0", "::/0"];
 pub const DEFAULT_CLIENT_KEEPALIVE_SECONDS: u16 = 25;
 const ACTIVATE_POLL_ATTEMPTS: usize = 10;
 const ACTIVATE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const TRACE_HISTORY_LIMIT: usize = 120;
 
 #[derive(Clone)]
 pub struct WireGuardManager {
   runner: Arc<dyn CommandRunner>,
+  debug_trace: Arc<Mutex<WireGuardDebugTrace>>,
 }
 
 impl WireGuardManager {
   pub fn new() -> Self {
     Self {
       runner: Arc::new(ProcessCommandRunner),
+      debug_trace: Arc::new(Mutex::new(WireGuardDebugTrace::default())),
     }
   }
 
   pub fn with_runner(runner: Arc<dyn CommandRunner>) -> Self {
-    Self { runner }
+    Self {
+      runner,
+      debug_trace: Arc::new(Mutex::new(WireGuardDebugTrace::default())),
+    }
+  }
+
+  pub fn debug_snapshot(&self) -> WireGuardDebugSnapshot {
+    let guard = self
+      .debug_trace
+      .lock()
+      .expect("wireguard debug trace lock should work");
+
+    WireGuardDebugSnapshot {
+      commands: guard.commands.iter().cloned().collect(),
+      last_import_tunnel_name: guard.last_import_tunnel_name.clone(),
+      last_import_config_redacted: guard.last_import_config_redacted.clone(),
+      last_import_config_temp_path: guard.last_import_config_temp_path.clone(),
+    }
+  }
+
+  fn record_command(&self, command: &str) {
+    let mut guard = self
+      .debug_trace
+      .lock()
+      .expect("wireguard debug trace lock should work");
+    if guard.commands.len() >= TRACE_HISTORY_LIMIT {
+      guard.commands.pop_front();
+    }
+    guard
+      .commands
+      .push_back(format!("{} | {}", chrono_like_timestamp(), command));
+  }
+
+  fn record_last_import_snapshot(
+    &self,
+    tunnel_name: &str,
+    temp_path: &str,
+    config_text: &str,
+  ) {
+    let mut guard = self
+      .debug_trace
+      .lock()
+      .expect("wireguard debug trace lock should work");
+    guard.last_import_tunnel_name = Some(tunnel_name.to_string());
+    guard.last_import_config_temp_path = Some(temp_path.to_string());
+    guard.last_import_config_redacted = Some(logging::redact_sensitive_text(config_text));
   }
 
   pub fn ensure_installed(&self) -> Result<(), WireGuardError> {
@@ -176,6 +227,7 @@ impl WireGuardManager {
   pub fn generate_client_keypair(&self) -> Result<ClientKeyPair, WireGuardError> {
     self.ensure_installed()?;
     let wg_program = self.resolve_wg_program()?;
+    self.record_command(&format!("{} genkey", wg_program));
 
     let private_out = self
       .runner
@@ -237,6 +289,13 @@ impl WireGuardManager {
 
     let mut file_path = temp_dir.clone();
     file_path.push(format!("{tunnel_name}.conf"));
+    let path_arg = file_path.as_os_str().to_string_lossy().to_string();
+
+    self.record_last_import_snapshot(tunnel_name, &path_arg, config_text);
+    self.record_command(&format!(
+      "wireguard /installtunnelservice {}",
+      path_arg
+    ));
 
     let mut file = std::fs::File::create(&file_path).map_err(|source| WireGuardError::Io {
       action: "create_tunnel_config_temp_file",
@@ -252,7 +311,6 @@ impl WireGuardManager {
         source,
       })?;
 
-    let path_arg = file_path.as_os_str().to_string_lossy().to_string();
     let install_args = ["/installtunnelservice", path_arg.as_str()];
     let import_result = match self.runner.run(&wireguard_program, &install_args, None) {
       Ok(output) => Ok(output),
@@ -264,6 +322,10 @@ impl WireGuardManager {
         );
 
         if should_retry_elevated {
+          self.record_command(&format!(
+            "wireguard /installtunnelservice {} (retry via UAC)",
+            path_arg
+          ));
           run_wireguard_via_uac(&wireguard_program, &install_args)
         } else {
           Err(source)
@@ -309,6 +371,7 @@ impl WireGuardManager {
     }
 
     let service_name = wireguard_service_name(tunnel_name);
+  self.record_command(&format!("sc start {}", service_name));
     let start_result = run_sc_with_uac_fallback(&*self.runner, "start", &service_name);
 
     match start_result {
@@ -372,6 +435,7 @@ impl WireGuardManager {
     tunnel_name: &str,
   ) -> Result<TunnelActivationProbeState, WireGuardError> {
     let service_name = wireguard_service_name(tunnel_name);
+    self.record_command(&format!("sc query {}", service_name));
     let service_out = self
       .runner
       .run("sc", &["query", &service_name], None)
@@ -408,6 +472,7 @@ impl WireGuardManager {
     validate_tunnel_name(tunnel_name)?;
 
     let service_name = wireguard_service_name(tunnel_name);
+    self.record_command(&format!("sc stop {}", service_name));
     let stop_result = run_sc_with_uac_fallback(&*self.runner, "stop", &service_name);
 
     match stop_result {
@@ -433,6 +498,7 @@ impl WireGuardManager {
     }
 
     let uninstall_args = ["/uninstalltunnelservice", tunnel_name];
+    self.record_command(&format!("{} /uninstalltunnelservice {}", wireguard_program, tunnel_name));
     let result = match self.runner.run(&wireguard_program, &uninstall_args, None) {
       Ok(output) => Ok(output),
       Err(source) => {
@@ -443,6 +509,10 @@ impl WireGuardManager {
         );
 
         if should_retry_elevated {
+          self.record_command(&format!(
+            "{} /uninstalltunnelservice {} (retry via UAC)",
+            wireguard_program, tunnel_name
+          ));
           run_wireguard_via_uac(&wireguard_program, &uninstall_args)
         } else {
           Err(source)
@@ -473,6 +543,7 @@ impl WireGuardManager {
 
   fn tunnel_service_exists(&self, tunnel_name: &str) -> Result<bool, WireGuardError> {
     let service_name = wireguard_service_name(tunnel_name);
+    self.record_command(&format!("sc query {}", service_name));
     let query_result = self
       .runner
       .run("sc", &["query", &service_name], None)
@@ -495,6 +566,7 @@ impl WireGuardManager {
     validate_tunnel_name(tunnel_name)?;
 
     let service_name = wireguard_service_name(tunnel_name);
+    self.record_command(&format!("sc query {}", service_name));
     let service_out = self
       .runner
       .run("sc", &["query", &service_name], None)
@@ -512,6 +584,7 @@ impl WireGuardManager {
       });
     }
 
+    self.record_command(&format!("{} show {} dump", wg_program, tunnel_name));
     let dump_out = self
       .runner
       .run(&wg_program, &["show", tunnel_name, "dump"], None)
@@ -545,6 +618,22 @@ impl WireGuardManager {
   ) -> Result<String, WireGuardError> {
     build_client_config(params)
   }
+}
+
+#[derive(Debug, Clone, Default)]
+struct WireGuardDebugTrace {
+  commands: VecDeque<String>,
+  last_import_tunnel_name: Option<String>,
+  last_import_config_redacted: Option<String>,
+  last_import_config_temp_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireGuardDebugSnapshot {
+  pub commands: Vec<String>,
+  pub last_import_tunnel_name: Option<String>,
+  pub last_import_config_redacted: Option<String>,
+  pub last_import_config_temp_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1202,6 +1291,14 @@ fn format_nonzero_detail(stdout: &str, stderr: &str) -> String {
     safe.push_str("...[truncated]");
   }
   safe
+}
+
+fn chrono_like_timestamp() -> String {
+  let epoch = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|value| value.as_secs())
+    .unwrap_or(0);
+  format!("epoch:{epoch}")
 }
 
 #[cfg(test)]
