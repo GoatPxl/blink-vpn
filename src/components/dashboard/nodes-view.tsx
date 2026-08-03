@@ -164,11 +164,12 @@ export function NodesView({
                 </thead>
                 <tbody>
                   {nodes.map((node) => {
+                    const nodeLifecycle = node.lifecycle_status.toLowerCase();
                     const tunnelForNode = (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === node.id) ?? null;
-                    const nodeCanConnect = !!tunnelForNode && tunnelForNode.status !== "connected";
-                    const canInstallHost = node.lifecycle_status === "new";
-                    const hostInstallInProgress = node.lifecycle_status === "provisioning" || node.lifecycle_status === "bootstrapping";
-                    const canUninstallHost = node.lifecycle_status === "ready" || node.lifecycle_status === "connected" || node.lifecycle_status === "error";
+                    const nodeCanConnect = !!tunnelForNode && tunnelForNode.status.toLowerCase() !== "connected";
+                    const canInstallHost = nodeLifecycle === "new";
+                    const hostInstallInProgress = nodeLifecycle === "provisioning" || nodeLifecycle === "bootstrapping";
+                    const canUninstallHost = nodeLifecycle === "ready" || nodeLifecycle === "connected" || nodeLifecycle === "error";
                     const nodePricing = getNodePricingDisplay(node, pricingByRegion);
                     return (
                       <tr key={node.id} className={`border-t border-[color:var(--outline-variant)] ${selectedNodeId === node.id ? "bg-[color:rgba(171,199,255,0.08)]" : "bg-transparent"}`}>

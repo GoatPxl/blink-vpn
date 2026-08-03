@@ -627,6 +627,32 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       await loadDashboard(tunnel.node_id);
       await refreshHealth();
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const missingService = message.includes("was not found locally") || message.includes("does not exist on this machine");
+
+      if (missingService) {
+        try {
+          setBusyAction("create-tunnel");
+          await createAndActivateClientTunnel({
+            tunnelId: tunnel.id,
+            nodeId: tunnel.node_id,
+            tunnelName: tunnel.name,
+            clientAddressCidr: "10.66.0.2/32",
+            dnsServer: "1.1.1.1",
+            allowedIps: ["0.0.0.0/0", "::/0"],
+          });
+
+          setRecovery(null);
+          pushToast("success", "Tunnel recovered", `${tunnel.name} was re-imported and connected.`);
+          await loadDashboard(tunnel.node_id);
+          await refreshHealth();
+          return;
+        } catch (recoveryError) {
+          handleError(recoveryError);
+          return;
+        }
+      }
+
       handleError(error);
     } finally {
       setBusyAction(null);
