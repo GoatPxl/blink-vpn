@@ -1642,3 +1642,289 @@ export async function installDockerDestroyCleanupMock(page: Page): Promise<void>
     syncState();
   });
 }
+
+export async function installDockerHostInstallAndConnectMock(
+  page: Page,
+  dockerApiToken: string,
+): Promise<void> {
+  await page.addInitScript((token) => {
+    type TauriArgs = Record<string, unknown> | undefined;
+    type ProviderRecord = {
+      id: string;
+      name: string;
+      slug: string;
+      status: "active" | "suspended";
+      token_ref: string | null;
+      created_at: string;
+      updated_at: string;
+    };
+
+    const providers: ProviderRecord[] = [
+      {
+        id: "provider-docker",
+        name: "Docker",
+        slug: "docker",
+        status: "active",
+        token_ref: `docker-token:provider-docker:${token}`,
+        created_at: "2026-08-01T00:00:00Z",
+        updated_at: "2026-08-01T00:00:00Z",
+      },
+    ];
+
+    const node = {
+      id: "node-docker-host-1",
+      provider_id: "provider-docker",
+      name: "Docker Host Node",
+      region: "docker-local",
+      plan_key: "docker-small",
+      size_slug: "docker-small",
+      price_monthly_usd: 6,
+      price_hourly_usd: 0.009,
+      price_source_timestamp: "2026-08-01T00:00:00Z",
+      lifecycle_status: "new",
+      external_ref: null as string | null,
+      public_ipv4: null as string | null,
+      server_public_key: null as string | null,
+      error_reason: null as string | null,
+      created_at: "2026-08-01T00:00:00Z",
+      updated_at: "2026-08-01T00:00:00Z",
+    };
+
+    const tunnels: Array<{
+      id: string;
+      node_id: string;
+      name: string;
+      status: string;
+      interface_name: string;
+      assigned_ipv4: string;
+      last_handshake_age_seconds: number | null;
+      rx_bytes: number | null;
+      tx_bytes: number | null;
+      stats_updated_at: string;
+      last_error: string | null;
+      created_at: string;
+      updated_at: string;
+    }> = [];
+
+    const commandCounts = {
+      create_vpn_node_to_ready: 0,
+      create_and_activate_client_tunnel: 0,
+      connect_tunnel: 0,
+      get_health_panel_data: 0,
+    };
+
+    let lastCreateNodeRequest: Record<string, unknown> | null = null;
+    let lastCreateTunnelRequest: Record<string, unknown> | null = null;
+
+    const makeHealth = (nodeId: string) => {
+      const tunnel = tunnels.find((item) => item.node_id === nodeId) ?? null;
+      const connected = tunnel?.status === "connected";
+      return {
+        node_id: nodeId,
+        tunnel_id: tunnel?.id ?? null,
+        endpoint_ip: node.public_ipv4,
+        handshake_age_seconds: connected ? 5 : null,
+        rx_bytes: connected ? 12288 : null,
+        tx_bytes: connected ? 24576 : null,
+        external_ipv4: node.public_ipv4,
+        tunnel_status: connected ? "connected" : node.lifecycle_status,
+      };
+    };
+
+    const internals = {
+      invoke: async (command: string, args?: TauriArgs) => {
+        if (command === "list_vpn_nodes") {
+          return [{ ...node }];
+        }
+
+        if (command === "get_diagnostics_bundle") {
+          return {
+            generated_at: "2026-08-01T00:00:00Z",
+            providers: providers.map((provider) => ({ ...provider, token_ref: null })),
+            nodes: [{ ...node }],
+            tunnels: tunnels.map((tunnel) => ({ ...tunnel })),
+            redacted_notes: ["token_ref removed from diagnostics bundle"],
+          };
+        }
+
+        if (command === "list_providers") {
+          return providers.map((provider) => ({ ...provider }));
+        }
+
+        if (command === "validate_provider_token") {
+          return "Provider token valid for account provider-docker (active)";
+        }
+
+        if (command === "check_docker_readiness") {
+          return {
+            installed: true,
+            daemon_reachable: true,
+            cli_version: "Docker version 27.0.0, build test",
+            daemon_version: "27.0.0",
+            message: "Docker CLI and daemon are available for development emulation.",
+            action_guidance: "You can use Docker development mode workflows.",
+          };
+        }
+
+        if (command === "list_provider_regions") {
+          return ["docker-local"];
+        }
+
+        if (command === "list_provider_pricing") {
+          return {
+            provider_id: "provider-docker",
+            region: String(args?.region ?? "docker-local"),
+            plans: [
+              {
+                plan_key: "docker-small",
+                plan_label: "Docker Small",
+                size_slug: "docker-small",
+                region: "docker-local",
+                memory_mb: 1024,
+                vcpus: 1,
+                disk_gb: 25,
+                transfer_tb: 1,
+                transfer_note: "Synthetic plan estimate for local Docker runtime: up to 1.00 TB transfer equivalent.",
+                monthly_usd: 6,
+                hourly_usd: 0.009,
+                estimated: true,
+                source_timestamp: "2026-08-01T00:00:00Z",
+              },
+            ],
+          };
+        }
+
+        if (command === "create_vpn_node_to_ready") {
+          commandCounts.create_vpn_node_to_ready += 1;
+          lastCreateNodeRequest = {
+            nodeId: args?.nodeId,
+            providerId: args?.providerId,
+            nodeName: args?.nodeName,
+            region: args?.region,
+            planKey: args?.planKey,
+          };
+
+          node.lifecycle_status = "ready";
+          node.external_ref = "docker-wg-host-1";
+          node.public_ipv4 = "127.0.0.1";
+          node.server_public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          node.updated_at = "2026-08-01T00:10:00Z";
+
+          return `Create node complete: node_id=${node.id}, droplet_id=1001, endpoint_ip=${node.public_ipv4}, listen_port=51820, correlation_id=test-correlation, idempotent_reuse=false`;
+        }
+
+        if (command === "list_tunnels_for_node") {
+          const nodeId = String(args?.nodeId ?? "");
+          return tunnels.filter((tunnel) => tunnel.node_id === nodeId).map((tunnel) => ({ ...tunnel }));
+        }
+
+        if (command === "create_and_activate_client_tunnel") {
+          commandCounts.create_and_activate_client_tunnel += 1;
+          lastCreateTunnelRequest = {
+            tunnelId: args?.tunnelId,
+            nodeId: args?.nodeId,
+            tunnelName: args?.tunnelName,
+            clientAddressCidr: args?.clientAddressCidr,
+            dnsServer: args?.dnsServer,
+            allowedIps: args?.allowedIps,
+          };
+
+          const tunnelId = String(args?.tunnelId ?? "tunnel-host-1");
+          const tunnelName = String(args?.tunnelName ?? "wg-primary");
+          const nodeId = String(args?.nodeId ?? node.id);
+
+          const existingIndex = tunnels.findIndex((tunnel) => tunnel.id === tunnelId);
+          const tunnelRecord = {
+            id: tunnelId,
+            node_id: nodeId,
+            name: tunnelName,
+            status: "connected",
+            interface_name: tunnelName,
+            assigned_ipv4: "10.66.0.2",
+            last_handshake_age_seconds: 5,
+            rx_bytes: 12288,
+            tx_bytes: 24576,
+            stats_updated_at: "2026-08-01T00:12:00Z",
+            last_error: null,
+            created_at: "2026-08-01T00:12:00Z",
+            updated_at: "2026-08-01T00:12:00Z",
+          };
+
+          if (existingIndex >= 0) {
+            tunnels[existingIndex] = tunnelRecord;
+          } else {
+            tunnels.push(tunnelRecord);
+          }
+
+          node.lifecycle_status = "connected";
+          node.updated_at = "2026-08-01T00:12:00Z";
+
+          return `Tunnel connected: tunnel_id=${tunnelId}, tunnel_name=${tunnelName}, client_public_key=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=`;
+        }
+
+        if (command === "connect_tunnel") {
+          commandCounts.connect_tunnel += 1;
+          const tunnelId = String(args?.tunnelId ?? "");
+          const tunnel = tunnels.find((item) => item.id === tunnelId);
+          if (tunnel) {
+            tunnel.status = "connected";
+            tunnel.last_handshake_age_seconds = 5;
+            tunnel.rx_bytes = 12288;
+            tunnel.tx_bytes = 24576;
+            tunnel.updated_at = "2026-08-01T00:13:00Z";
+          }
+          node.lifecycle_status = "connected";
+          node.updated_at = "2026-08-01T00:13:00Z";
+          return;
+        }
+
+        if (command === "get_health_panel_data") {
+          commandCounts.get_health_panel_data += 1;
+          return makeHealth(String(args?.nodeId ?? node.id));
+        }
+
+        if (command === "disconnect_tunnel") {
+          const tunnelId = String(args?.tunnelId ?? "");
+          const tunnel = tunnels.find((item) => item.id === tunnelId);
+          if (tunnel) {
+            tunnel.status = "disconnected";
+            tunnel.last_handshake_age_seconds = null;
+            tunnel.rx_bytes = null;
+            tunnel.tx_bytes = null;
+          }
+          node.lifecycle_status = "ready";
+          node.updated_at = "2026-08-01T00:14:00Z";
+          return;
+        }
+
+        throw new Error(`Unhandled mocked command: ${command}`);
+      },
+    };
+
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = internals;
+
+    const syncState = () => {
+      (window as unknown as {
+        __TEST_DOCKER_HOST_CONNECT_COUNTS__?: {
+          create_vpn_node_to_ready: number;
+          create_and_activate_client_tunnel: number;
+          connect_tunnel: number;
+          get_health_panel_data: number;
+        };
+      }).__TEST_DOCKER_HOST_CONNECT_COUNTS__ = { ...commandCounts };
+
+      (window as unknown as { __TEST_DOCKER_HOST_CREATE_REQUEST__?: Record<string, unknown> | null }).__TEST_DOCKER_HOST_CREATE_REQUEST__ = lastCreateNodeRequest;
+      (window as unknown as { __TEST_DOCKER_TUNNEL_CREATE_REQUEST__?: Record<string, unknown> | null }).__TEST_DOCKER_TUNNEL_CREATE_REQUEST__ = lastCreateTunnelRequest;
+      (window as unknown as { __TEST_DOCKER_CURRENT_NODE_STATE__?: string }).__TEST_DOCKER_CURRENT_NODE_STATE__ = node.lifecycle_status;
+    };
+
+    const originalInvoke = internals.invoke;
+    internals.invoke = async (command: string, args?: TauriArgs) => {
+      const result = await originalInvoke(command, args);
+      syncState();
+      return result;
+    };
+
+    syncState();
+  }, dockerApiToken);
+}
