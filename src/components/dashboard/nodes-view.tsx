@@ -37,6 +37,7 @@ export function NodesView({
   onNavigateToCreate,
   onInstallHost,
   onUninstallHost,
+  onConnectNode,
   onConnectTunnel,
   onDisconnectTunnel,
   onForceCleanupSelectedNode,
@@ -79,6 +80,7 @@ export function NodesView({
   onNavigateToCreate: () => void;
   onInstallHost: (node: VpnNodeRecord) => Promise<void>;
   onUninstallHost: (node: VpnNodeRecord) => Promise<void>;
+  onConnectNode: (node: VpnNodeRecord) => Promise<void>;
   onConnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onDisconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onForceCleanupSelectedNode: () => Promise<void>;
@@ -167,9 +169,11 @@ export function NodesView({
                     const nodeLifecycle = node.lifecycle_status.toLowerCase();
                     const tunnelForNode = (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === node.id) ?? null;
                     const nodeCanConnect = !!tunnelForNode && tunnelForNode.status.toLowerCase() !== "connected";
+                    const nodeHostReady = nodeLifecycle === "ready" || nodeLifecycle === "connected";
                     const canInstallHost = nodeLifecycle === "new";
                     const hostInstallInProgress = nodeLifecycle === "provisioning" || nodeLifecycle === "bootstrapping";
                     const canUninstallHost = nodeLifecycle === "ready" || nodeLifecycle === "connected" || nodeLifecycle === "error";
+                    const canConnectNode = nodeHostReady && !tunnelForNode;
                     const nodePricing = getNodePricingDisplay(node, pricingByRegion);
                     return (
                       <tr key={node.id} className={`border-t border-[color:var(--outline-variant)] ${selectedNodeId === node.id ? "bg-[color:rgba(171,199,255,0.08)]" : "bg-transparent"}`}>
@@ -210,7 +214,23 @@ export function NodesView({
                                       : "Host Pending"}
                               </Button>
                             )}
-                            <Button tone={nodeCanConnect ? "primary" : tunnelForNode ? "danger" : "secondary"} onClick={() => (tunnelForNode ? (nodeCanConnect ? void onConnectTunnel(tunnelForNode) : void onDisconnectTunnel(tunnelForNode)) : undefined)} disabled={!tunnelForNode || busyAction !== null} className="px-3 py-2 text-xs">{nodeCanConnect ? "Connect" : tunnelForNode ? "Disconnect" : "No Tunnel"}</Button>
+                            <Button
+                              tone={nodeCanConnect || canConnectNode ? "primary" : tunnelForNode ? "danger" : "secondary"}
+                              onClick={() => {
+                                if (tunnelForNode) {
+                                  void (nodeCanConnect ? onConnectTunnel(tunnelForNode) : onDisconnectTunnel(tunnelForNode));
+                                  return;
+                                }
+
+                                if (canConnectNode) {
+                                  void onConnectNode(node);
+                                }
+                              }}
+                              disabled={busyAction !== null || (!tunnelForNode && !canConnectNode)}
+                              className="px-3 py-2 text-xs"
+                            >
+                              {nodeCanConnect || canConnectNode ? "Connect" : tunnelForNode ? "Disconnect" : "Host Pending"}
+                            </Button>
                             <Button tone="secondary" onClick={() => onOpenNodeDetails(node.id)} disabled={busyAction !== null} className="px-3 py-2 text-xs">View Details</Button>
                           </div>
                         </td>

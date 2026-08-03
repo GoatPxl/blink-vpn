@@ -24,7 +24,8 @@ test.describe("Dashboard Docker host install and connect", () => {
     await expect(page.getByText("Host installed")).toBeVisible();
     await expect(nodeRow).toContainText("ready");
     await expect(nodeRow).toContainText("127.0.0.1");
-    await expect(nodeRow.getByRole("button", { name: "No Tunnel", exact: true })).toBeVisible();
+    const connectNodeButton = nodeRow.getByRole("button", { name: "Connect", exact: true });
+    await expect(connectNodeButton).toBeVisible();
 
     const postInstallState = await page.evaluate(() => {
       return {
@@ -51,11 +52,7 @@ test.describe("Dashboard Docker host install and connect", () => {
       planKey: "docker-small",
     });
 
-    await page.getByRole("link", { name: /Dashboard Overview/i }).click();
-
-    const connectButton = page.getByRole("button", { name: "Connect", exact: true });
-    await expect(connectButton).toBeVisible();
-    await connectButton.click();
+    await connectNodeButton.click();
 
     await expect(page.getByText("Tunnel connected")).toBeVisible();
 

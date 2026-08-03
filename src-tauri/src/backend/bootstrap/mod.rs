@@ -227,9 +227,14 @@ fn build_cloud_init_user_data(params: &BootstrapParams) -> String {
     r#"#cloud-config
 package_update: true
 package_upgrade: false
+package_reboot_if_required: false
 packages:
   - wireguard
+  - wireguard-tools
+  - iptables
   - iptables-persistent
+  - resolvconf
+  - kmod
 write_files:
   - path: /etc/sysctl.d/99-goatstare-vpn.conf
     permissions: '0644'
@@ -261,6 +266,14 @@ fn render_bootstrap_script(params: &BootstrapParams) -> String {
     r#"#!/usr/bin/env bash
 set -euo pipefail
 
+log_stage() {{
+  local stage="$1"
+  shift || true
+  echo "goatstare.bootstrap.stage=${{stage}} $*"
+}}
+
+trap 'log_stage "failed" "line=${{LINENO}} exit_status=$?"' ERR
+
 WG_IFACE=\"{iface}\"
 WG_PORT=\"{port}\"
 SERVER_CIDR=\"{server_cidr}\"
@@ -270,12 +283,21 @@ MARKER_PATH=\"{marker}\"
 umask 077
 mkdir -p /etc/wireguard /var/lib/goatstare
 
+log_stage "start" "iface=${{WG_IFACE}} port=${{WG_PORT}} endpoint={endpoint}"
+log_stage "validate-tools" "checking WireGuard and firewall toolchain"
+command -v wg >/dev/null
+command -v iptables >/dev/null
+command -v systemctl >/dev/null
+
 if [ ! -f /etc/wireguard/server_private.key ] || [ ! -f /etc/wireguard/server_public.key ]; then
+  log_stage "generate-keypair" "writing server keypair"
   wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
 fi
 
 SERVER_PRIVATE_KEY=$(cat /etc/wireguard/server_private.key)
 SERVER_PUBLIC_KEY=$(cat /etc/wireguard/server_public.key)
+
+log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf"
 
 cat > /etc/wireguard/${{WG_IFACE}}.conf <<EOF
 [Interface]
@@ -288,8 +310,10 @@ PostUp = iptables -A FORWARD -i ${{WG_IFACE}} -j ACCEPT; iptables -A FORWARD -o 
 PostDown = iptables -D FORWARD -i ${{WG_IFACE}} -j ACCEPT; iptables -D FORWARD -o ${{WG_IFACE}} -j ACCEPT; iptables -t nat -D POSTROUTING -s ${{CLIENT_CIDR}} -j MASQUERADE
 EOF
 
+log_stage "sysctl" "enabling IPv4 forwarding"
 sysctl --system
 
+log_stage "firewall" "installing input chain rules"
 iptables -N GOATSTARE-INPUT 2>/dev/null || true
 iptables -F GOATSTARE-INPUT
 iptables -A GOATSTARE-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
@@ -299,18 +323,31 @@ iptables -A GOATSTARE-INPUT -p udp --dport ${{WG_PORT}} -j ACCEPT
 iptables -A GOATSTARE-INPUT -j DROP
 iptables -C INPUT -j GOATSTARE-INPUT 2>/dev/null || iptables -I INPUT 1 -j GOATSTARE-INPUT
 
+log_stage "service" "enabling wg-quick@${{WG_IFACE}}"
 systemctl enable --now wg-quick@${{WG_IFACE}}
 
+log_stage "marker" "writing readiness marker to ${{MARKER_PATH}}"
 cat > ${{MARKER_PATH}} <<EOF
 {{"status":"ready","server_public_key":"${{SERVER_PUBLIC_KEY}}","listen_port":${{WG_PORT}}}}
 EOF
 chmod 600 ${{MARKER_PATH}}
+
+log_stage "marker-validate" "verifying readiness marker contents"
+EXPECTED_MARKER="{{\"status\":\"ready\",\"server_public_key\":\"${{SERVER_PUBLIC_KEY}}\",\"listen_port\":${{WG_PORT}}}}"
+ACTUAL_MARKER=$(cat ${{MARKER_PATH}})
+if [ "$ACTUAL_MARKER" != "$EXPECTED_MARKER" ]; then
+  log_stage "marker-validate" "expected=$EXPECTED_MARKER actual=$ACTUAL_MARKER"
+  exit 1
+fi
+
+log_stage "complete" "bootstrap finished"
 "#,
     iface = params.interface_name,
     port = params.listen_port,
     server_cidr = params.server_interface_cidr,
     client_cidr = params.client_cidr,
     marker = READINESS_MARKER_PATH,
+    endpoint = params.server_endpoint_ip,
   )
 }
 
@@ -339,12 +376,21 @@ mod tests {
 
     assert!(artifact.cloud_init_user_data.contains("#cloud-config"));
     assert!(artifact.cloud_init_user_data.contains("- wireguard"));
+    assert!(artifact.cloud_init_user_data.contains("- wireguard-tools"));
+    assert!(artifact.cloud_init_user_data.contains("- iptables"));
     assert!(artifact.cloud_init_user_data.contains("net.ipv4.ip_forward=1"));
+    assert!(artifact.cloud_init_user_data.contains("goatstare.bootstrap.stage=${stage}"));
+    assert!(artifact.cloud_init_user_data.contains("log_stage \"start\""));
+    assert!(artifact.cloud_init_user_data.contains("log_stage \"complete\""));
+    assert!(artifact.cloud_init_user_data.contains("log_stage \"marker-validate\""));
+    assert!(artifact.cloud_init_user_data.contains("EXPECTED_MARKER"));
+    assert!(artifact.cloud_init_user_data.contains("ACTUAL_MARKER=$(cat ${MARKER_PATH})"));
     assert!(artifact.cloud_init_user_data.contains("iptables -t nat -A POSTROUTING"));
     assert!(artifact.cloud_init_user_data.contains("wg genkey"));
     assert!(artifact.cloud_init_user_data.contains("wg-quick@${WG_IFACE}"));
     assert!(artifact.cloud_init_user_data.contains(READINESS_MARKER_PATH));
     assert!(artifact.cloud_init_user_data.contains("--dport ${WG_PORT}"));
+    assert!(artifact.cloud_init_user_data.contains("package_reboot_if_required: false"));
   }
 
   #[test]

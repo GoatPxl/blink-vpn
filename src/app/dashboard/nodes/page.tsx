@@ -32,6 +32,7 @@ export default function DashboardNodesPage() {
     selectedNodeId,
     setSelectedNodeId,
     installHostForNode,
+    connectNode,
     uninstallHostForNode,
     connectTunnel,
     disconnectTunnel,
@@ -176,6 +177,7 @@ export default function DashboardNodesPage() {
       onNavigateToCreate={handleNavigateToCreate}
       onInstallHost={installHostForNode}
       onUninstallHost={uninstallHostForNode}
+      onConnectNode={connectNode}
       onConnectTunnel={connectTunnel}
       onDisconnectTunnel={disconnectTunnel}
       onForceCleanupSelectedNode={forceCleanupSelectedNode}

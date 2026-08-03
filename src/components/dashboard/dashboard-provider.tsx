@@ -109,6 +109,7 @@ type DashboardContextValue = {
   connectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   disconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   destroyNode: (node: VpnNodeRecord) => Promise<void>;
+  connectNode: (node: VpnNodeRecord) => Promise<void>;
   forceCleanupSelectedNode: () => Promise<void>;
   copyDiagnostics: () => Promise<void>;
   exportDiagnostics: () => Promise<void>;
@@ -565,20 +566,20 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, loadDashboard, pushToast]);
 
-  const connectPrimary = useCallback(async () => {
-    if (!activeNode) {
+  const connectNode = useCallback(async (node: VpnNodeRecord) => {
+    if (!node) {
       pushToast("warning", "No node selected", "Select a node before connecting.");
       return;
     }
 
     setBusyAction("connect-tunnel");
     try {
-      let tunnelForNode = tunnels.find((tunnel) => tunnel.node_id === activeNode.id) ?? null;
+      let tunnelForNode = tunnels.find((tunnel) => tunnel.node_id === node.id) ?? null;
 
       if (!tunnelForNode) {
         setBusyAction("create-tunnel");
         const tunnelId = `tunnel-${crypto.randomUUID()}`;
-        const sanitizedName = activeNode.name
+        const sanitizedName = node.name
           .trim()
           .replace(/[^A-Za-z0-9_-]+/g, "-")
           .replace(/-{2,}/g, "-")
@@ -587,14 +588,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
         await createAndActivateClientTunnel({
           tunnelId,
-          nodeId: activeNode.id,
+          nodeId: node.id,
           tunnelName: `${sanitizedName}-wg`,
           clientAddressCidr: "10.66.0.2/32",
           dnsServer: "1.1.1.1",
           allowedIps: ["0.0.0.0/0", "::/0"],
         });
 
-        const refreshedTunnels = await listTunnelsForNode(activeNode.id);
+        const refreshedTunnels = await listTunnelsForNode(node.id);
         tunnelForNode = refreshedTunnels[0] ?? null;
       }
 
@@ -604,19 +605,28 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
       if (tunnelForNode.status.toLowerCase() !== "connected") {
         setBusyAction("connect-tunnel");
-        await connectTunnelCommand(activeNode.id, tunnelForNode.id);
+        await connectTunnelCommand(node.id, tunnelForNode.id);
       }
 
       setRecovery(null);
       pushToast("success", "Tunnel connected", `${tunnelForNode.name} is now connected.`);
-      await loadDashboard(activeNode.id);
+      await loadDashboard(node.id);
       await refreshHealthSnapshot(true);
     } catch (error) {
       handleError(error);
     } finally {
       setBusyAction(null);
     }
-  }, [activeNode, handleError, loadDashboard, pushToast, refreshHealthSnapshot, tunnels]);
+  }, [handleError, loadDashboard, pushToast, refreshHealthSnapshot, tunnels]);
+
+  const connectPrimary = useCallback(async () => {
+    if (!activeNode) {
+      pushToast("warning", "No node selected", "Select a node before connecting.");
+      return;
+    }
+
+    void connectNode(activeNode);
+  }, [activeNode, connectNode, pushToast]);
 
   const connectTunnel = useCallback(async (tunnel: TunnelRecord) => {
     setBusyAction("connect-tunnel");
@@ -919,6 +929,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     createNode,
     installHostForNode,
     uninstallHostForNode,
+    connectNode,
     connectPrimary,
     connectTunnel,
     disconnectTunnel,
