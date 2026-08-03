@@ -3,7 +3,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use thiserror::Error;
@@ -11,6 +12,8 @@ use uuid::Uuid;
 
 pub const DEFAULT_CLIENT_ALLOWED_IPS: &[&str] = &["0.0.0.0/0", "::/0"];
 pub const DEFAULT_CLIENT_KEEPALIVE_SECONDS: u16 = 25;
+const ACTIVATE_POLL_ATTEMPTS: usize = 10;
+const ACTIVATE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 pub struct WireGuardManager {
@@ -298,6 +301,13 @@ impl WireGuardManager {
     self.ensure_installed()?;
     validate_tunnel_name(tunnel_name)?;
 
+    match self.probe_tunnel_service_state(tunnel_name)? {
+      TunnelActivationProbeState::Running | TunnelActivationProbeState::Starting => {
+        return self.wait_for_running_tunnel(tunnel_name)
+      }
+      TunnelActivationProbeState::Stopped | TunnelActivationProbeState::Unknown => {}
+    }
+
     let service_name = wireguard_service_name(tunnel_name);
     let start_result = self
       .runner
@@ -305,17 +315,86 @@ impl WireGuardManager {
       .map_err(|source| map_sc_tunnel_error(source, &service_name, "start"));
 
     match start_result {
-      Ok(_) => Ok(()),
+      Ok(_) => self.wait_for_running_tunnel(tunnel_name),
       Err(WireGuardError::Command {
         source: CommandExecError::NonZeroExit {
           code: Some(1056),
           ..
         },
         ..
-      }) => Ok(()),
-      Err(error) => Err(error),
+      }) => self.wait_for_running_tunnel(tunnel_name),
+      Err(WireGuardError::Command {
+        source: CommandExecError::NonZeroExit {
+          code: Some(1053),
+          ..
+        },
+        ..
+      }) => self.wait_for_running_tunnel(tunnel_name),
+      Err(start_error) => {
+        Err(start_error)
+      }
     }
   }
+
+  fn wait_for_running_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
+    let mut last_state = TunnelActivationProbeState::Unknown;
+
+    for _ in 0..ACTIVATE_POLL_ATTEMPTS {
+      match self.probe_tunnel_service_state(tunnel_name) {
+        Ok(TunnelActivationProbeState::Running) => return Ok(()),
+        Ok(state) => {
+          last_state = state;
+          thread::sleep(ACTIVATE_POLL_INTERVAL);
+        }
+        Err(_) => {
+          thread::sleep(ACTIVATE_POLL_INTERVAL);
+        }
+      }
+    }
+
+    Err(WireGuardError::InvalidOutput {
+      detail: format!(
+        "WireGuard tunnel '{tunnel_name}' did not reach Running after activation; last observed service state was {}. Check whether the tunnel is still starting, disabled, or blocked by a bad tunnel configuration.",
+        describe_tunnel_activation_probe_state(last_state)
+      ),
+    })
+  }
+
+  fn probe_tunnel_service_state(
+    &self,
+    tunnel_name: &str,
+  ) -> Result<TunnelActivationProbeState, WireGuardError> {
+    let service_name = wireguard_service_name(tunnel_name);
+    let service_out = self
+      .runner
+      .run("sc", &["query", &service_name], None)
+      .map_err(|source| map_sc_tunnel_error(source, &service_name, "query"))?;
+
+    for line in service_out.stdout.lines() {
+      let trimmed = line.trim();
+      if !trimmed.to_ascii_uppercase().starts_with("STATE") {
+        continue;
+      }
+
+      if trimmed.contains("RUNNING") {
+        return Ok(TunnelActivationProbeState::Running);
+      }
+
+      if trimmed.contains("START_PENDING") {
+        return Ok(TunnelActivationProbeState::Starting);
+      }
+
+      if trimmed.contains("STOPPED") {
+        return Ok(TunnelActivationProbeState::Stopped);
+      }
+
+      return Ok(TunnelActivationProbeState::Unknown);
+    }
+
+    Ok(TunnelActivationProbeState::Unknown)
+  }
+
+  
 
   pub fn deactivate_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
     self.ensure_installed()?;
@@ -496,6 +575,23 @@ pub struct TunnelRuntimeStatus {
   pub last_handshake_age_seconds: Option<u64>,
   pub rx_bytes: Option<u64>,
   pub tx_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TunnelActivationProbeState {
+  Running,
+  Starting,
+  Stopped,
+  Unknown,
+}
+
+fn describe_tunnel_activation_probe_state(state: TunnelActivationProbeState) -> &'static str {
+  match state {
+    TunnelActivationProbeState::Running => "running",
+    TunnelActivationProbeState::Starting => "start_pending",
+    TunnelActivationProbeState::Stopped => "stopped",
+    TunnelActivationProbeState::Unknown => "unknown",
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -992,9 +1088,22 @@ fn map_sc_tunnel_error(source: CommandExecError, service_name: &str, operation: 
     }
   }
 
+  let detail = match operation {
+    "start" => {
+      "Could not start the WireGuard tunnel service. If the tunnel was just imported, wait a few seconds and retry once. If it still fails, the tunnel configuration may be invalid, the service may require elevation, or the Windows WireGuard installation may be unhealthy.".to_string()
+    }
+    "stop" => {
+      "Could not stop the WireGuard tunnel service. If it is already stopped, retrying is safe. Otherwise confirm the service is still present and that WireGuard has permission to manage it.".to_string()
+    }
+    "query" => {
+      "Could not read the WireGuard tunnel service state. This usually means the tunnel service is still transitioning, missing, or Windows denied access to the service control manager.".to_string()
+    }
+    _ => "Could not complete WireGuard tunnel service operation.".to_string(),
+  };
+
   WireGuardError::Command {
     command: format!("sc {operation} {service_name}"),
-    detail: "Could not complete WireGuard tunnel service operation.".to_string(),
+    detail,
     source,
   }
 }
@@ -1366,6 +1475,29 @@ mod tests {
     }
   }
 
+  #[test]
+  fn map_sc_tunnel_error_uses_start_specific_guidance() {
+    let error = super::map_sc_tunnel_error(
+      CommandExecError::NonZeroExit {
+        program: "sc".to_string(),
+        code: Some(1053),
+        detail: "The service did not respond to the start or control request in a timely fashion."
+          .to_string(),
+      },
+      "WireGuardTunnel$Primary-Node-wg",
+      "start",
+    );
+
+    match error {
+      WireGuardError::Command { command, detail, .. } => {
+        assert!(command.contains("sc start"));
+        assert!(detail.contains("Could not start the WireGuard tunnel service"));
+        assert!(detail.contains("wait a few seconds and retry once"));
+      }
+      other => panic!("expected Command error, got {other}"),
+    }
+  }
+
   #[derive(Clone, Default)]
   struct MockStoppedServiceRunner;
 
@@ -1429,5 +1561,148 @@ mod tests {
     assert_eq!(status.last_handshake_age_seconds, None);
     assert_eq!(status.rx_bytes, None);
     assert_eq!(status.tx_bytes, None);
+  }
+
+  #[derive(Clone, Default)]
+  struct MockStartFailureButRunningRunner;
+
+  impl CommandRunner for MockStartFailureButRunningRunner {
+    fn run(
+      &self,
+      program: &str,
+      args: &[&str],
+      _stdin: Option<&str>,
+    ) -> Result<CommandOutput, CommandExecError> {
+      let program_name = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+
+      if program_name == "wg" && args == ["-v"] {
+        return Ok(CommandOutput {
+          stdout: "wireguard-tools v1".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wireguard" && args == ["/help"] {
+        return Ok(CommandOutput {
+          stdout: "WireGuard for Windows".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "sc" && args == ["start", "WireGuardTunnel$Primary-Node-wg"] {
+        return Err(CommandExecError::NonZeroExit {
+          program: "sc".to_string(),
+          code: Some(1),
+          detail: "The service did not respond to the start request in a timely fashion.".to_string(),
+        });
+      }
+
+      if program_name == "sc" && args == ["query", "WireGuardTunnel$Primary-Node-wg"] {
+        return Ok(CommandOutput {
+          stdout: "STATE              : 4  RUNNING".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wg" && args == ["show", "Primary-Node-wg", "dump"] {
+        return Ok(CommandOutput {
+          stdout: "interface\tpublic\t51820\toff\npeerpub\t(none)\t203.0.113.10:51820\t0.0.0.0/0\t1700000000\t128\t256\t25\n".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      Err(CommandExecError::NonZeroExit {
+        program: program.to_string(),
+        code: Some(1),
+        detail: "unsupported mock command".to_string(),
+      })
+    }
+  }
+
+  #[test]
+  fn activate_tunnel_treats_start_error_as_success_when_service_is_running() {
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockStartFailureButRunningRunner));
+
+    let result = wireguard.activate_tunnel("Primary-Node-wg");
+
+    assert!(result.is_ok());
+  }
+
+  #[derive(Clone, Default)]
+  struct MockDelayedStartRunner {
+    query_count: Arc<Mutex<usize>>,
+  }
+
+  impl CommandRunner for MockDelayedStartRunner {
+    fn run(
+      &self,
+      program: &str,
+      args: &[&str],
+      _stdin: Option<&str>,
+    ) -> Result<CommandOutput, CommandExecError> {
+      let program_name = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+
+      if program_name == "wg" && args == ["-v"] {
+        return Ok(CommandOutput {
+          stdout: "wireguard-tools v1".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wireguard" && args == ["/help"] {
+        return Ok(CommandOutput {
+          stdout: "WireGuard for Windows".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "sc" && args == ["query", "WireGuardTunnel$Primary-Node-wg"] {
+        let mut query_count = self.query_count.lock().expect("lock must work");
+        *query_count += 1;
+        if *query_count < 2 {
+          return Ok(CommandOutput {
+            stdout: "STATE              : 2  START_PENDING".to_string(),
+            stderr: String::new(),
+          });
+        }
+
+        return Ok(CommandOutput {
+          stdout: "STATE              : 4  RUNNING".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "sc" && args == ["start", "WireGuardTunnel$Primary-Node-wg"] {
+        panic!("activate_tunnel should not call sc start while service is already starting");
+      }
+
+      if program_name == "wg" && args == ["show", "Primary-Node-wg", "dump"] {
+        return Ok(CommandOutput {
+          stdout: "interface\tpublic\t51820\toff\npeerpub\t(none)\t203.0.113.10:51820\t0.0.0.0/0\t1700000000\t128\t256\t25\n".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      Err(CommandExecError::NonZeroExit {
+        program: program.to_string(),
+        code: Some(1),
+        detail: "unsupported mock command".to_string(),
+      })
+    }
+  }
+
+  #[test]
+  fn activate_tunnel_waits_for_service_to_report_running() {
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockDelayedStartRunner::default()));
+
+    let result = wireguard.activate_tunnel("Primary-Node-wg");
+
+    assert!(result.is_ok());
   }
 }

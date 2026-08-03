@@ -2375,6 +2375,28 @@ mod tests {
     let bundle_json = serde_json::to_string(&bundle).expect("bundle should serialize");
     assert!(!bundle_json.contains("token_ref"));
   }
+
+  #[test]
+  fn wireguard_start_timeout_maps_to_wait_then_retry_guidance() {
+    let error = OrchestratorError::WireGuard {
+      detail: "Could not start the WireGuard tunnel service. If the tunnel was just imported, wait a few seconds and retry once. If it still fails, the tunnel configuration may be invalid, the service may require elevation, or the Windows WireGuard installation may be unhealthy.".to_string(),
+      source: crate::backend::wireguard::WireGuardError::Command {
+        command: "sc start WireGuardTunnel$Primary-Node-wg".to_string(),
+        detail: "The service did not respond to the start request in a timely fashion.".to_string(),
+        source: crate::backend::wireguard::CommandExecError::NonZeroExit {
+          program: "sc".to_string(),
+          code: Some(1053),
+          detail: "The service did not respond to the start request in a timely fashion.".to_string(),
+        },
+      },
+    };
+
+    let user_facing = error.to_user_facing();
+
+    assert_eq!(user_facing.kind, UserFacingErrorKind::WireGuard);
+    assert!(user_facing.message.contains("did not respond to the start request in a timely fashion"));
+    assert!(user_facing.next_action.contains("Wait a few seconds, then retry Connect"));
+  }
 }
 
 fn select_plan_pricing<'a>(
@@ -2418,12 +2440,25 @@ impl OrchestratorError {
         kind: UserFacingErrorKind::WireGuard,
         message: format!("{detail}: {source}"),
         next_action: {
-          let lowered = source.to_string().to_ascii_lowercase();
-          if lowered.contains("access is denied")
-            || lowered.contains("requires elevation")
-            || lowered.contains("administrator")
+          let lowered_source = source.to_string().to_ascii_lowercase();
+          let lowered_detail = detail.to_ascii_lowercase();
+
+          if lowered_source.contains("access is denied")
+            || lowered_source.contains("requires elevation")
+            || lowered_source.contains("administrator")
           {
             "Approve the Windows UAC prompt for WireGuard tunnel operations, or run GoatStare as Administrator, then retry Connect.".to_string()
+          } else if lowered_detail.contains("did not reach running")
+            || lowered_detail.contains("did not report running")
+            || lowered_source.contains("timely fashion")
+            || lowered_source.contains("start pending")
+          {
+            "The tunnel service is still starting or timed out. Wait a few seconds, then retry Connect. If it keeps failing, open WireGuard logs and verify the tunnel configuration.".to_string()
+          } else if lowered_source.contains("does not exist")
+            || lowered_detail.contains("not found locally")
+            || lowered_detail.contains("re-import the tunnel configuration")
+          {
+            "Re-import the tunnel configuration, then retry Connect. If the service was removed manually, create or repair the tunnel first.".to_string()
           } else {
             "Repair WireGuard for Windows, then use Force Cleanup to remove stale tunnel artifacts."
               .to_string()
