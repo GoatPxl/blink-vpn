@@ -1,6 +1,7 @@
+use std::io::Write;
 use std::process::Command;
+use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 
 use crate::backend::bootstrap::{
   BootstrapOutputContract, DEFAULT_CLIENT_CIDR, DEFAULT_INTERFACE_NAME,
@@ -188,78 +189,247 @@ impl DockerProviderAdapter {
   }
 
   fn docker_exec(container_id: &str, script: &str, action: &str) -> Result<String, ProviderAdapterError> {
-    Self::run_docker(&["exec", container_id, "sh", "-c", script], action)
+    // On Windows Docker hosts, `docker exec` can return empty stdout unless stdin stays attached.
+    Self::run_docker(&["exec", "-i", container_id, "sh", "-c", script], action)
+  }
+
+  fn copy_container_file_to_host_text(
+    container_id: &str,
+    container_path: &str,
+    action: &str,
+  ) -> Result<String, ProviderAdapterError> {
+    let mut host_path = std::env::temp_dir();
+    let stamp = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_nanos())
+      .unwrap_or(0);
+    host_path.push(format!("goatstare-docker-copy-{stamp}.tmp"));
+
+    let source = format!("{container_id}:{container_path}");
+    let destination = host_path.to_string_lossy().to_string();
+
+    let copy_result = Self::run_docker(&["cp", &source, &destination], action);
+    if let Err(error) = copy_result {
+      let _ = std::fs::remove_file(&host_path);
+      return Err(error);
+    }
+
+    let content = std::fs::read_to_string(&host_path).map_err(|source| {
+      ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Docker copied '{}' to '{}' but host read failed: {}",
+          container_path,
+          host_path.display(),
+          source
+        ),
+      }
+    })?;
+
+    let _ = std::fs::remove_file(&host_path);
+
+    Ok(content)
+  }
+
+  fn copy_host_text_to_container(
+    container_id: &str,
+    content: &str,
+    container_path: &str,
+    action: &str,
+  ) -> Result<(), ProviderAdapterError> {
+    let mut host_path = std::env::temp_dir();
+    let stamp = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_nanos())
+      .unwrap_or(0);
+    host_path.push(format!("goatstare-docker-copy-in-{stamp}.tmp"));
+
+    std::fs::write(&host_path, content).map_err(|source| ProviderAdapterError::Unsupported {
+      detail: format!(
+        "Could not write temporary host file '{}' for Docker copy: {}",
+        host_path.display(),
+        source
+      ),
+    })?;
+
+    let source = host_path.to_string_lossy().to_string();
+    let destination = format!("{container_id}:{container_path}");
+    let copy_result = Self::run_docker(&["cp", &source, &destination], action);
+
+    let _ = std::fs::remove_file(&host_path);
+
+    copy_result.map(|_| ())
+  }
+
+  fn generate_host_wireguard_keypair() -> Result<(String, String), ProviderAdapterError> {
+    let private_out = Command::new("wg")
+      .arg("genkey")
+      .output()
+      .map_err(|error| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Could not execute host WireGuard key generation via 'wg genkey': {}",
+          error
+        ),
+      })?;
+
+    if !private_out.status.success() {
+      let stderr = String::from_utf8_lossy(&private_out.stderr).trim().to_string();
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Host WireGuard key generation failed via 'wg genkey' (exit {:?}): {}",
+          private_out.status.code(),
+          if stderr.is_empty() {
+            "unknown error".to_string()
+          } else {
+            stderr
+          }
+        ),
+      });
+    }
+
+    let private_key = String::from_utf8_lossy(&private_out.stdout).trim().to_string();
+    if private_key.is_empty() {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: "Host WireGuard key generation produced an empty private key.".to_string(),
+      });
+    }
+
+    let mut pub_cmd = Command::new("wg")
+      .arg("pubkey")
+      .stdin(Stdio::piped())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .map_err(|error| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Could not execute host WireGuard public key derivation via 'wg pubkey': {}",
+          error
+        ),
+      })?;
+
+    {
+      let stdin = pub_cmd
+        .stdin
+        .as_mut()
+        .ok_or_else(|| ProviderAdapterError::Unsupported {
+          detail: "Host WireGuard public key derivation could not open stdin pipe."
+            .to_string(),
+        })?;
+
+      stdin
+        .write_all(private_key.as_bytes())
+        .map_err(|error| ProviderAdapterError::Unsupported {
+          detail: format!(
+            "Could not send private key to host WireGuard public key derivation: {}",
+            error
+          ),
+        })?;
+    }
+
+    let public_out = pub_cmd
+      .wait_with_output()
+      .map_err(|error| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Host WireGuard public key derivation process failed while waiting for output: {}",
+          error
+        ),
+      })?;
+
+    if !public_out.status.success() {
+      let stderr = String::from_utf8_lossy(&public_out.stderr).trim().to_string();
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Host WireGuard public key derivation failed via 'wg pubkey' (exit {:?}): {}",
+          public_out.status.code(),
+          if stderr.is_empty() {
+            "unknown error".to_string()
+          } else {
+            stderr
+          }
+        ),
+      });
+    }
+
+    let public_key = String::from_utf8_lossy(&public_out.stdout).trim().to_string();
+    if public_key.is_empty() {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: "Host WireGuard public key derivation produced an empty public key.".to_string(),
+      });
+    }
+
+    Ok((private_key, public_key))
   }
 
   fn initialize_wireguard_server_in_container(
     container_id: &str,
     readiness_marker_path: &str,
   ) -> Result<String, ProviderAdapterError> {
-    let script = format!(
-      "set -eu; \
-if ! command -v wg >/dev/null 2>&1; then apk add --no-cache wireguard-tools >/dev/null 2>&1; fi; \
-mkdir -p /etc/wireguard; \
-umask 077; \
-if [ ! -s /etc/wireguard/server_private.key ] || [ ! -s /etc/wireguard/server_public.key ]; then \
-  private_key=\"\"; \
-  server_public_key=\"\"; \
-  if command -v wg >/dev/null 2>&1; then \
-    private_key=\"$(wg genkey 2>/dev/null || true)\"; \
-    if [ -n \"$private_key\" ]; then \
-      server_public_key=\"$(printf '%s' \"$private_key\" | wg pubkey 2>/dev/null || true)\"; \
-    fi; \
-  fi; \
-  if [ -z \"$private_key\" ] || [ -z \"$server_public_key\" ]; then \
-    private_key=\"$(head -c 32 /dev/urandom | base64 | tr -d '\\n')\"; \
-    server_public_key=\"$(head -c 32 /dev/urandom | base64 | tr -d '\\n')\"; \
-  fi; \
-  if [ -z \"$private_key\" ] || [ -z \"$server_public_key\" ]; then echo 'key generation failed' >&2; exit 1; fi; \
-  printf '%s\\n' \"$private_key\" > /etc/wireguard/server_private.key; \
-  printf '%s\\n' \"$server_public_key\" > /etc/wireguard/server_public.key; \
-fi; \
-server_public_key=\"$(cat /etc/wireguard/server_public.key)\"; \
-server_private_key=\"$(cat /etc/wireguard/server_private.key)\"; \
-printf '[Interface]\\nAddress = {server_cidr}\\nListenPort = {listen_port}\\nPrivateKey = %s\\nSaveConfig = false\\n\\nPostUp = iptables -A FORWARD -i {interface_name} -j ACCEPT; iptables -A FORWARD -o {interface_name} -j ACCEPT; iptables -t nat -A POSTROUTING -s {client_cidr} -j MASQUERADE\\nPostDown = iptables -D FORWARD -i {interface_name} -j ACCEPT; iptables -D FORWARD -o {interface_name} -j ACCEPT; iptables -t nat -D POSTROUTING -s {client_cidr} -j MASQUERADE\\n' \"$server_private_key\" > /etc/wireguard/{interface_name}.conf; \
-mkdir -p \"$(dirname '{readiness_marker_path}')\"; \
-printf '{{\"status\":\"ready\",\"server_public_key\":\"%s\",\"listen_port\":%d}}\\n' \"$server_public_key\" {listen_port} > '{readiness_marker_path}'; \
-true",
-      listen_port = DEFAULT_WIREGUARD_PORT,
-      interface_name = DEFAULT_INTERFACE_NAME,
+    let (server_private_key, server_public_key) = Self::generate_host_wireguard_keypair()?;
+
+    let _ = Self::docker_exec(
+      container_id,
+      "set -eu; if ! command -v wg >/dev/null 2>&1; then apk add --no-cache wireguard-tools >/dev/null 2>&1; fi; mkdir -p /etc/wireguard; umask 077;",
+      "prepare WireGuard tooling and directory in Docker container",
+    )?;
+
+    Self::copy_host_text_to_container(
+      container_id,
+      &format!("{}\n", server_private_key),
+      "/tmp/goatstare-server-private.key",
+      "copy WireGuard server private key to Docker container temp file",
+    )?;
+
+    Self::copy_host_text_to_container(
+      container_id,
+      &format!("{}\n", server_public_key),
+      "/tmp/goatstare-server-public.key",
+      "copy WireGuard server public key to Docker container temp file",
+    )?;
+
+    let _ = Self::docker_exec(
+      container_id,
+      "set -eu; mkdir -p /etc/wireguard; mv /tmp/goatstare-server-private.key /etc/wireguard/server_private.key; mv /tmp/goatstare-server-public.key /etc/wireguard/server_public.key;",
+      "place WireGuard key files in Docker container",
+    )?;
+
+    let server_conf = format!(
+      "[Interface]\nAddress = {server_cidr}\nListenPort = {listen_port}\nPrivateKey = {private_key}\nSaveConfig = false\n\nPostUp = iptables -A FORWARD -i {interface_name} -j ACCEPT; iptables -A FORWARD -o {interface_name} -j ACCEPT; iptables -t nat -A POSTROUTING -s {client_cidr} -j MASQUERADE\nPostDown = iptables -D FORWARD -i {interface_name} -j ACCEPT; iptables -D FORWARD -o {interface_name} -j ACCEPT; iptables -t nat -D POSTROUTING -s {client_cidr} -j MASQUERADE\n",
       server_cidr = DEFAULT_SERVER_INTERFACE_CIDR,
-      client_cidr = DEFAULT_CLIENT_CIDR
+      listen_port = DEFAULT_WIREGUARD_PORT,
+      private_key = server_private_key,
+      interface_name = DEFAULT_INTERFACE_NAME,
+      client_cidr = DEFAULT_CLIENT_CIDR,
+    );
+
+    Self::copy_host_text_to_container(
+      container_id,
+      &server_conf,
+      &format!("/tmp/goatstare-{}.conf", DEFAULT_INTERFACE_NAME),
+      "copy WireGuard server config to Docker container temp file",
+    )?;
+
+    let _ = Self::docker_exec(
+      container_id,
+      &format!(
+        "set -eu; mkdir -p /etc/wireguard; mv /tmp/goatstare-{iface}.conf /etc/wireguard/{iface}.conf;",
+        iface = DEFAULT_INTERFACE_NAME
+      ),
+      "place WireGuard server config in Docker container",
+    )?;
+
+    let marker_script = format!(
+      "set -eu; mkdir -p \"$(dirname '{readiness_marker_path}')\"; printf '{{\"status\":\"ready\",\"server_public_key\":\"%s\",\"listen_port\":%d}}\\n' '{server_public_key}' {listen_port} > '{readiness_marker_path}';",
+      readiness_marker_path = readiness_marker_path,
+      server_public_key = server_public_key,
+      listen_port = DEFAULT_WIREGUARD_PORT,
     );
 
     let _ = Self::docker_exec(
       container_id,
-      &script,
-      "initialize WireGuard server bootstrap in Docker container",
+      &marker_script,
+      "write Docker bootstrap readiness marker",
     )?;
 
-    let output = Self::docker_exec(
-      container_id,
-      "cat /etc/wireguard/server_public.key",
-      "read WireGuard server public key from Docker container",
-    )?;
-
-    let server_public_key = output
-      .lines()
-      .find_map(|line| {
-        let candidate = line.trim();
-        if candidate.is_empty() {
-          None
-        } else {
-          Some(candidate.to_string())
-        }
-      })
-      .unwrap_or_else(|| {
-        let fallback = format!("docker-init-fallback-key-{}", Uuid::new_v4().simple());
-        log::warn!(
-          "event=docker.init.empty_server_key detail='server key output empty after init; using fallback token'"
-        );
-        fallback
-      });
-
-    if server_public_key.len() < 24 {
+    if server_public_key.len() < 40 {
       return Err(ProviderAdapterError::Unsupported {
         detail: "Docker init script returned an invalid WireGuard server public key."
           .to_string(),
@@ -562,10 +732,10 @@ mod tests {
 
         let container_id = DockerProviderAdapter::container_id_for_droplet(provisioned.droplet_id)
           .expect("container id should resolve for provisioned droplet");
-        let server_conf = DockerProviderAdapter::docker_exec(
+        let server_conf = DockerProviderAdapter::copy_container_file_to_host_text(
           &container_id,
-          "cat /etc/wireguard/wg0.conf",
-          "read WireGuard server config from Docker container",
+          "/etc/wireguard/wg0.conf",
+          "copy WireGuard server config from Docker container",
         )
         .expect("server config should be readable from container");
 
@@ -660,4 +830,5 @@ mod tests {
     assert!(script.contains("AllowedIPs = 10.66.0.2/32"));
     assert!(script.contains("/etc/wireguard/wg0.conf"));
   }
+
 }

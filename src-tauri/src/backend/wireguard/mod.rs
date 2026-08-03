@@ -340,22 +340,6 @@ impl WireGuardManager {
       source,
     });
 
-    if let Err(err) = std::fs::remove_file(&file_path) {
-      log::warn!(
-        "Failed to clean up temporary WireGuard config file '{}': {}",
-        file_path.display(),
-        err
-      );
-    }
-
-    if let Err(err) = std::fs::remove_dir_all(&temp_dir) {
-      log::warn!(
-        "Failed to clean up temporary WireGuard config directory '{}': {}",
-        temp_dir.display(),
-        err
-      );
-    }
-
     import_result.map(|_| ())
   }
 
