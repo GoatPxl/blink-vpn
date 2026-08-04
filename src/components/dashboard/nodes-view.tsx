@@ -2,13 +2,12 @@
 
 import { useMemo } from "react";
 
-import { Button, Card, Field, MetricCard, PageChrome, type AppView, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type RecoveryState, type TunnelRecord, type VpnNodeRecord, type NodeSort, type PlanDisplayModel, type HealthPanelData } from "./shared";
+import { Button, Card, Field, MetricCard, PageChrome, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type RecoveryState, type TunnelRecord, type VpnNodeRecord, type NodeSort, type PlanDisplayModel, type HealthPanelData } from "./shared";
 import { formatCreatedTime, formatCurrency, formatMemory, formatRegionLabel, getNodePricingDisplay, statusBadge } from "./shared";
 
 export function NodesView({
   providerAccessState,
   providerBadge,
-  providerStatusMessage,
   providerId,
   providerName,
   configuredProvider,
@@ -41,7 +40,6 @@ export function NodesView({
   onConnectTunnel,
   onDisconnectTunnel,
   onForceCleanupSelectedNode,
-  onNavigateToView,
   nodeFeedback,
   nodeRegions,
   nodeStatuses,
@@ -51,7 +49,6 @@ export function NodesView({
 }: {
   providerAccessState: ProviderAccessState;
   providerBadge: { label: string; classes: string };
-  providerStatusMessage: string;
   providerId: string;
   providerName: string;
   configuredProvider: ProviderRecord | null;
@@ -84,7 +81,6 @@ export function NodesView({
   onConnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onDisconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onForceCleanupSelectedNode: () => Promise<void>;
-  onNavigateToView: (view: AppView) => void;
   nodeFeedback: string;
   nodeRegions: string[];
   nodeStatuses: string[];
@@ -109,16 +105,6 @@ export function NodesView({
             <Button tone="primary" onClick={onNavigateToCreate} disabled={busyAction !== null}><span className="text-lg leading-none">+</span> Create Node</Button>
           </div>
         </div>
-
-        {(providerAccessState === "missing" || providerAccessState === "invalid") ? (
-          <div className="flex flex-col gap-3 rounded-[20px] border border-[color:rgba(255,185,95,0.28)] bg-[color:rgba(255,185,95,0.08)] p-4 text-sm text-[var(--tertiary)] lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <div className="font-medium text-[var(--on-surface)]">Provider access will be checked on the create page.</div>
-              <div className="mt-1 text-[var(--on-surface-variant)]">{providerStatusMessage}</div>
-            </div>
-            <Button tone="secondary" onClick={() => onNavigateToView("settings")}>Open Settings</Button>
-          </div>
-        ) : null}
 
         <Card title="Fleet" description="Existing node records stay visible even if the provider key becomes invalid.">
           <div className="flex flex-col gap-3 border-b border-[color:var(--outline-variant)] pb-4 md:flex-row md:items-end">

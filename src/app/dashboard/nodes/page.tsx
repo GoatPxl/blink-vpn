@@ -6,7 +6,6 @@ import {
   getNodePricingDisplay,
   providerAccessBadge,
   type NodeSort,
-  VIEW_ROUTE,
 } from "@/components/dashboard/shared";
 import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
 import { type ProviderPlanPricing } from "@/lib/tauri";
@@ -25,7 +24,6 @@ export default function DashboardNodesPage() {
     providerAccessState,
     providerId,
     providerName,
-    providerStatusMessage,
     providers,
     selectProviderId,
     selectedNode,
@@ -127,10 +125,6 @@ export default function DashboardNodesPage() {
           : "Use View Details to inspect endpoint health, pricing snapshot, and recovery actions for this node."
     : "Select a node to inspect health, pricing, and recovery options.";
 
-  function handleNavigateToView(view: keyof typeof VIEW_ROUTE) {
-    router.push(VIEW_ROUTE[view]);
-  }
-
   function handleNavigateToCreate() {
     router.push("/dashboard/nodes/create");
   }
@@ -148,7 +142,6 @@ export default function DashboardNodesPage() {
     <NodesView
       providerAccessState={providerAccessState}
       providerBadge={providerBadge}
-      providerStatusMessage={providerStatusMessage}
       providerId={providerId}
       providerName={providerName}
       configuredProvider={configuredProvider}
@@ -181,7 +174,6 @@ export default function DashboardNodesPage() {
       onConnectTunnel={connectTunnel}
       onDisconnectTunnel={disconnectTunnel}
       onForceCleanupSelectedNode={forceCleanupSelectedNode}
-      onNavigateToView={handleNavigateToView}
       nodeFeedback={pricingError ?? "No node action yet."}
       nodeRegions={nodeRegions}
       nodeStatuses={nodeStatuses}

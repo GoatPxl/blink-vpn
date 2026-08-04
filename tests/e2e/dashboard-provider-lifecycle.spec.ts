@@ -19,8 +19,6 @@ test.describe("Dashboard provider lifecycle", () => {
     await expect(digitalOceanRow.getByRole("button", { name: "Resume" })).toBeVisible();
 
     await page.goto("/dashboard/nodes");
-    await expect(page.getByText("Provider access will be checked on the create page.")).toBeVisible();
-    await expect(page.getByText(/Provider DigitalOcean is suspended\./)).toBeVisible();
     await expect(page.getByText("Primary Node", { exact: true })).toBeVisible();
 
     await page.goto("/dashboard/nodes/create");
