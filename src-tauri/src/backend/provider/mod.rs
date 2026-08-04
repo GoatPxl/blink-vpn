@@ -47,8 +47,36 @@ pub trait ProviderAdapter: Send + Sync {
     endpoint_ip: &str,
     readiness_marker_path: &str,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError>;
+  fn droplet_status(
+    &self,
+    token: &str,
+    droplet_id: u64,
+  ) -> Result<ProviderDropletStatus, ProviderAdapterError>;
   fn droplet_exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError>;
   fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ProviderDropletStatus {
+  New,
+  Active,
+  Off,
+  Archive,
+  Deleted,
+  Unknown,
+}
+
+impl ProviderDropletStatus {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::New => "new",
+      Self::Active => "active",
+      Self::Off => "off",
+      Self::Archive => "archive",
+      Self::Deleted => "deleted",
+      Self::Unknown => "unknown",
+    }
+  }
 }
 
 #[derive(Clone)]
@@ -255,6 +283,23 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
       Err(DigitalOceanError::NotFound { .. }) => Ok(false),
       Err(source) => Err(ProviderAdapterError::Api {
         detail: "DigitalOcean droplet existence check failed.".to_string(),
+        source,
+      }),
+    }
+  }
+
+  fn droplet_status(&self, token: &str, droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError> {
+    match self.client.get_droplet(token, droplet_id) {
+      Ok(droplet) => Ok(match droplet.status.trim().to_ascii_lowercase().as_str() {
+        "new" => ProviderDropletStatus::New,
+        "active" => ProviderDropletStatus::Active,
+        "off" => ProviderDropletStatus::Off,
+        "archive" => ProviderDropletStatus::Archive,
+        _ => ProviderDropletStatus::Unknown,
+      }),
+      Err(DigitalOceanError::NotFound { .. }) => Ok(ProviderDropletStatus::Deleted),
+      Err(source) => Err(ProviderAdapterError::Api {
+        detail: "DigitalOcean droplet status check failed.".to_string(),
         source,
       }),
     }
@@ -618,7 +663,41 @@ impl ProviderRegistry {
       })
   }
 
+  pub fn provider_droplet_status(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    droplet_id: u64,
+  ) -> Result<ProviderDropletStatus, ProviderFlowError> {
+    let (provider, adapter) = self.load_provider_and_adapter_allow_suspended(db, provider_id)?;
+    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
+    adapter
+      .droplet_status(&token, droplet_id)
+      .map_err(|source| ProviderFlowError::Adapter {
+        detail: "Droplet status check through provider adapter failed.".to_string(),
+        source,
+      })
+  }
+
   fn load_provider_and_adapter(
+    &self,
+    db: &Database,
+    provider_id: &str,
+  ) -> Result<(ProviderRecord, &dyn ProviderAdapter), ProviderFlowError> {
+    let (provider, adapter) = self.load_provider_and_adapter_allow_suspended(db, provider_id)?;
+
+    if provider.status == ProviderStatus::Suspended {
+      return Err(ProviderFlowError::ProviderSuspended {
+        provider_id: provider.id.clone(),
+        detail: "Resume the provider from Settings before running this operation.".to_string(),
+      });
+    }
+
+    Ok((provider, adapter))
+  }
+
+  fn load_provider_and_adapter_allow_suspended(
     &self,
     db: &Database,
     provider_id: &str,
@@ -633,13 +712,6 @@ impl ProviderRegistry {
         provider_id: provider_id.to_string(),
         detail: "Cannot use provider because no DB row exists for this id.".to_string(),
       })?;
-
-    if provider.status == ProviderStatus::Suspended {
-      return Err(ProviderFlowError::ProviderSuspended {
-        provider_id: provider.id.clone(),
-        detail: "Resume the provider from Settings before running this operation.".to_string(),
-      });
-    }
 
     let adapter = self.adapter_for_slug(&provider.slug)?;
     Ok((provider, adapter))

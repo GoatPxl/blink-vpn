@@ -8,7 +8,10 @@ use crate::backend::bootstrap::{
   DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_WIREGUARD_PORT,
 };
 
-use super::{Account, ProviderAdapterError, ProviderPlanPricing, ProvisionedDroplet};
+use super::{
+  Account, ProviderAdapterError, ProviderDropletStatus, ProviderPlanPricing,
+  ProvisionedDroplet,
+};
 
 const DOCKER_REGION: &str = "docker-local";
 const DOCKER_IMAGE: &str = "alpine:3.20";
@@ -186,6 +189,14 @@ impl DockerProviderAdapter {
           droplet_id
         ),
       })
+  }
+
+  fn container_runtime_status(container_id: &str) -> Result<String, ProviderAdapterError> {
+    Self::run_docker(
+      &["inspect", "--format", "{{.State.Status}}", container_id],
+      "inspect Docker container runtime status",
+    )
+    .map(|value| value.trim().to_ascii_lowercase())
   }
 
   fn docker_exec(container_id: &str, script: &str, action: &str) -> Result<String, ProviderAdapterError> {
@@ -651,6 +662,42 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     let _ = Self::ensure_daemon_available()?;
 
     Ok(!Self::container_ids_for_droplet(droplet_id)?.is_empty())
+  }
+
+  fn droplet_status(&self, token: &str, droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError> {
+    Self::validate_faux_token(token)?;
+    let _ = Self::ensure_daemon_available()?;
+
+    let ids = Self::container_ids_for_droplet(droplet_id)?;
+    if ids.is_empty() {
+      return Ok(ProviderDropletStatus::Deleted);
+    }
+
+    let mut statuses = Vec::with_capacity(ids.len());
+    for container_id in ids {
+      statuses.push(Self::container_runtime_status(&container_id)?);
+    }
+
+    if statuses.iter().any(|status| status == "running") {
+      return Ok(ProviderDropletStatus::Active);
+    }
+
+    if statuses.iter().any(|status| status == "created" || status == "restarting") {
+      return Ok(ProviderDropletStatus::New);
+    }
+
+    if statuses.iter().any(|status| status == "removing") {
+      return Ok(ProviderDropletStatus::Archive);
+    }
+
+    if statuses
+      .iter()
+      .all(|status| status == "paused" || status == "exited" || status == "dead")
+    {
+      return Ok(ProviderDropletStatus::Off);
+    }
+
+    Ok(ProviderDropletStatus::Unknown)
   }
 
   fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError> {

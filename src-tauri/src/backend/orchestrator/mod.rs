@@ -12,8 +12,8 @@ use crate::backend::db::Database;
 use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus};
 use crate::backend::logging;
 use crate::backend::provider::{
-  ProvisionedDroplet, ProviderFlowError, ProviderPlanPricing, ProviderRegistry, DEFAULT_REGION,
-  DEFAULT_SIZE,
+  ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError, ProviderPlanPricing,
+  ProviderRegistry, DEFAULT_REGION, DEFAULT_SIZE,
 };
 use crate::backend::provider::docker::DockerProviderAdapter;
 use crate::backend::secure_storage::SecureStorage;
@@ -196,11 +196,57 @@ impl Orchestrator {
     "idle"
   }
 
-  pub fn list_nodes(&self, db: &Database) -> Result<Vec<crate::backend::db::VpnNodeRecord>, OrchestratorError> {
-    db.list_vpn_nodes().map_err(|source| OrchestratorError::Database {
+  pub fn list_nodes(
+    &self,
+    providers: &ProviderRegistry,
+    db: &Database,
+    secure_storage: &SecureStorage,
+  ) -> Result<Vec<crate::backend::db::VpnNodeRecord>, OrchestratorError> {
+    let mut nodes = db.list_vpn_nodes().map_err(|source| OrchestratorError::Database {
       detail: "Failed listing vpn nodes.".to_string(),
       source,
-    })
+    })?;
+
+    self.attach_live_provider_status(providers, db, secure_storage, &mut nodes);
+    Ok(nodes)
+  }
+
+  fn attach_live_provider_status(
+    &self,
+    providers: &ProviderRegistry,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    nodes: &mut [crate::backend::db::VpnNodeRecord],
+  ) {
+    for node in nodes {
+      let external_ref = match node.external_ref.as_deref() {
+        Some(value) => value,
+        None => {
+          node.provider_status = None;
+          continue;
+        }
+      };
+
+      let droplet_id = match external_ref.parse::<u64>() {
+        Ok(value) => value,
+        Err(_) => {
+          node.provider_status = Some(ProviderDropletStatus::Unknown.as_str().to_string());
+          continue;
+        }
+      };
+
+      let live_status = match providers.provider_droplet_status(
+        db,
+        secure_storage,
+        &node.provider_id,
+        droplet_id,
+      ) {
+        Ok(status) => status,
+        Err(_) => ProviderDropletStatus::Unknown,
+      };
+
+      node.provider_status = Some(live_status.as_str().to_string());
+    }
   }
 
   pub fn list_tunnels_for_node(&self, db: &Database, node_id: &str) -> Result<Vec<crate::backend::db::TunnelRecord>, OrchestratorError> {
@@ -1717,17 +1763,29 @@ mod tests {
   use std::time::{SystemTime, UNIX_EPOCH};
 
   use super::*;
-  use crate::backend::provider::{Account, ProviderAdapter, ProviderAdapterError};
+  use crate::backend::provider::{
+    Account, ProviderAdapter, ProviderAdapterError, ProviderDropletStatus,
+  };
   use crate::backend::secure_storage::SecureStorage;
   use crate::backend::provider::ProviderRegistry;
   use crate::backend::wireguard::{CommandExecError, CommandOutput, CommandRunner};
 
   const TEST_PROVIDER_ID: &str = "provider-1";
 
-  #[derive(Default)]
   struct MockAdapterState {
     delete_calls: usize,
     droplet_exists: bool,
+    droplet_status: ProviderDropletStatus,
+  }
+
+  impl Default for MockAdapterState {
+    fn default() -> Self {
+      Self {
+        delete_calls: 0,
+        droplet_exists: true,
+        droplet_status: ProviderDropletStatus::Active,
+      }
+    }
   }
 
   struct MockProviderAdapter {
@@ -1739,10 +1797,7 @@ mod tests {
     fn new(fail_bootstrap_wait: bool) -> Self {
       Self {
         fail_bootstrap_wait,
-        state: Arc::new(Mutex::new(MockAdapterState {
-          delete_calls: 0,
-          droplet_exists: true,
-        })),
+        state: Arc::new(Mutex::new(MockAdapterState::default())),
       }
     }
   }
@@ -1850,6 +1905,11 @@ mod tests {
     fn droplet_exists(&self, _token: &str, _droplet_id: u64) -> Result<bool, ProviderAdapterError> {
       let state = self.state.lock().expect("lock must work");
       Ok(state.droplet_exists)
+    }
+
+    fn droplet_status(&self, _token: &str, _droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError> {
+      let state = self.state.lock().expect("lock must work");
+      Ok(state.droplet_status)
     }
   }
 
@@ -2262,6 +2322,96 @@ mod tests {
 
     let delete_calls = state.lock().expect("lock should work").delete_calls;
     assert_eq!(delete_calls, 1);
+  }
+
+  #[test]
+  fn list_nodes_enriches_live_provider_status() {
+    let db = Database::new(test_db_path("list_nodes_live_status"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+
+    db
+      .create_vpn_node("node-1", TEST_PROVIDER_ID, "Node", "nyc1")
+      .expect("node should insert");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Provisioning, None)
+      .expect("transition should succeed");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Bootstrapping, None)
+      .expect("transition should succeed");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Ready, None)
+      .expect("transition should succeed");
+    db
+      .update_vpn_node_runtime_details(
+        "node-1",
+        Some("42"),
+        Some("203.0.113.10"),
+        Some("server-pub-key-123"),
+      )
+      .expect("runtime details should persist");
+
+    let adapter = Arc::new(MockProviderAdapter::new(false));
+    {
+      let mut state = adapter.state.lock().expect("lock should work");
+      state.droplet_status = ProviderDropletStatus::Active;
+    }
+    let providers = ProviderRegistry::from_adapter(adapter);
+    let orchestrator = Orchestrator::new();
+
+    let nodes = orchestrator
+      .list_nodes(&providers, &db, &secure_storage)
+      .expect("list nodes should succeed");
+
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].provider_status.as_deref(), Some("active"));
+  }
+
+  #[test]
+  fn list_nodes_marks_missing_remote_as_deleted() {
+    let db = Database::new(test_db_path("list_nodes_deleted_status"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+
+    db
+      .create_vpn_node("node-1", TEST_PROVIDER_ID, "Node", "nyc1")
+      .expect("node should insert");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Provisioning, None)
+      .expect("transition should succeed");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Bootstrapping, None)
+      .expect("transition should succeed");
+    db
+      .transition_vpn_node_status("node-1", NodeLifecycleStatus::Ready, None)
+      .expect("transition should succeed");
+    db
+      .update_vpn_node_runtime_details(
+        "node-1",
+        Some("42"),
+        Some("203.0.113.10"),
+        Some("server-pub-key-123"),
+      )
+      .expect("runtime details should persist");
+
+    let adapter = Arc::new(MockProviderAdapter::new(false));
+    {
+      let mut state = adapter.state.lock().expect("lock should work");
+      state.droplet_status = ProviderDropletStatus::Deleted;
+    }
+    let providers = ProviderRegistry::from_adapter(adapter);
+    let orchestrator = Orchestrator::new();
+
+    let nodes = orchestrator
+      .list_nodes(&providers, &db, &secure_storage)
+      .expect("list nodes should succeed");
+
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].provider_status.as_deref(), Some("deleted"));
   }
 
   #[test]

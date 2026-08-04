@@ -44,6 +44,7 @@ export interface VpnNodeRecord {
   price_hourly_usd: number | null;
   price_source_timestamp: string | null;
   lifecycle_status: NodeLifecycleStatus;
+  provider_status?: string;
   external_ref: string | null;
   public_ipv4: string | null;
   server_public_key: string | null;

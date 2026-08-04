@@ -207,6 +207,8 @@ pub struct VpnNodeRecord {
   pub price_hourly_usd: Option<f64>,
   pub price_source_timestamp: Option<String>,
   pub lifecycle_status: NodeLifecycleStatus,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub provider_status: Option<String>,
   pub external_ref: Option<String>,
   pub public_ipv4: Option<String>,
   pub server_public_key: Option<String>,
@@ -1137,6 +1139,7 @@ fn map_vpn_node_row(row: &Row<'_>) -> rusqlite::Result<VpnNodeRecord> {
     price_hourly_usd: row.get(7)?,
     price_source_timestamp: row.get(8)?,
     lifecycle_status,
+    provider_status: None,
     external_ref: row.get(10)?,
     public_ipv4: row.get(11)?,
     server_public_key: row.get(12)?,

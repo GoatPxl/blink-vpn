@@ -92,13 +92,19 @@ export const REGION_LABELS: Record<string, string> = {
 
 export function statusBadge(status: string) {
   const normalized = status.toLowerCase();
-  if (normalized === "ready" || normalized === "connected") {
+  if (normalized === "ready" || normalized === "connected" || normalized === "active") {
     return "border-[color:rgba(78,222,163,0.2)] bg-[color:rgba(78,222,163,0.08)] text-[var(--secondary)]";
   }
-  if (normalized === "bootstrapping" || normalized === "provisioning" || normalized === "deleting") {
+  if (
+    normalized === "bootstrapping"
+    || normalized === "provisioning"
+    || normalized === "deleting"
+    || normalized === "new"
+    || normalized === "archive"
+  ) {
     return "border-[color:rgba(255,185,95,0.2)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]";
   }
-  if (normalized === "error") {
+  if (normalized === "error" || normalized === "off" || normalized === "deleted") {
     return "border-[color:rgba(255,107,107,0.2)] bg-[color:rgba(255,107,107,0.08)] text-[#ffd5d5]";
   }
   return "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface-variant)]";

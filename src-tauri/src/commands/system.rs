@@ -318,7 +318,7 @@ pub fn list_provider_regions(
 pub fn list_vpn_nodes(backend: State<'_, Backend>) -> Result<Vec<VpnNodeRecord>, String> {
   backend
     .orchestrator
-    .list_nodes(&backend.db)
+    .list_nodes(&backend.provider, &backend.db, &backend.secure_storage)
     .map_err(|err| err.to_string())
 }
 

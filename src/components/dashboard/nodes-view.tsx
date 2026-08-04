@@ -153,9 +153,15 @@ export function NodesView({
                 <tbody>
                   {nodes.map((node) => {
                     const nodeLifecycle = node.lifecycle_status.toLowerCase();
+                    const liveProviderStatus = (node.provider_status ?? "").toLowerCase();
+                    const rowStatus = (node.provider_status ?? node.lifecycle_status).toLowerCase();
                     const tunnelForNode = (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === node.id) ?? null;
                     const nodeCanConnect = !!tunnelForNode && tunnelForNode.status.toLowerCase() !== "connected";
-                    const nodeHostReady = nodeLifecycle === "ready" || nodeLifecycle === "connected";
+                    const runtimeConnectable =
+                      liveProviderStatus === ""
+                      || liveProviderStatus === "active"
+                      || liveProviderStatus === "new";
+                    const nodeHostReady = (nodeLifecycle === "ready" || nodeLifecycle === "connected") && runtimeConnectable;
                     const canInstallHost = nodeLifecycle === "new";
                     const hostInstallInProgress = nodeLifecycle === "provisioning" || nodeLifecycle === "bootstrapping";
                     const canUninstallHost = nodeLifecycle === "ready" || nodeLifecycle === "connected" || nodeLifecycle === "error";
@@ -176,7 +182,7 @@ export function NodesView({
                         </td>
                         <td className="px-4 py-4 align-top text-[var(--on-surface)]">{nodePricing ? `${nodePricing.vcpus ?? "?"} vCPU · ${formatMemory(nodePricing.memoryMb)} · ${nodePricing.diskGb ?? "?"} GB` : "n/a"}</td>
                         <td className="px-4 py-4 align-top font-mono text-[12px] text-[var(--on-surface)]">{node.public_ipv4 ?? "n/a"}</td>
-                        <td className="px-4 py-4 align-top"><span className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.24em] ${statusBadge(node.lifecycle_status)}`}>{node.lifecycle_status}</span></td>
+                        <td className="px-4 py-4 align-top"><span className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.24em] ${statusBadge(rowStatus)}`}>{rowStatus}</span></td>
                         <td className="px-4 py-4 align-top text-[var(--on-surface-variant)]">{formatCreatedTime(node.created_at)}</td>
                         <td className="px-4 py-4 align-top">
                           <div className="flex flex-wrap justify-end gap-2">
