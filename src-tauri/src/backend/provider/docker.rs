@@ -378,8 +378,14 @@ impl DockerProviderAdapter {
 
     let _ = Self::docker_exec(
       container_id,
-      "set -eu; if ! command -v wg >/dev/null 2>&1; then apk add --no-cache wireguard-tools >/dev/null 2>&1; fi; mkdir -p /etc/wireguard; umask 077;",
+      "set -eu; apk add --no-cache wireguard-tools iproute2 iptables >/dev/null 2>&1; mkdir -p /etc/wireguard; umask 077;",
       "prepare WireGuard tooling and directory in Docker container",
+    )?;
+
+    let _ = Self::docker_exec(
+      container_id,
+      "set -eu; probe='gspw0'; ip link delete \"$probe\" >/dev/null 2>&1 || true; if ! ip link add \"$probe\" type wireguard >/tmp/goatstare-wg-prereq.err 2>&1; then cat /tmp/goatstare-wg-prereq.err >&2 || true; rm -f /tmp/goatstare-wg-prereq.err; exit 61; fi; rm -f /tmp/goatstare-wg-prereq.err; ip link delete \"$probe\" >/dev/null 2>&1 || true;",
+      "validate Docker container privileges for WireGuard interface operations",
     )?;
 
     Self::copy_host_text_to_container(
@@ -425,6 +431,26 @@ impl DockerProviderAdapter {
         iface = DEFAULT_INTERFACE_NAME
       ),
       "place WireGuard server config in Docker container",
+    )?;
+
+    let _ = Self::docker_exec(
+      container_id,
+      &format!(
+        "set -eu; iface='{iface}'; if command -v wg-quick >/dev/null 2>&1 && wg-quick up \"$iface\" >/tmp/goatstare-wg-up.log 2>&1; then rm -f /tmp/goatstare-wg-up.log; exit 0; fi; cat /tmp/goatstare-wg-up.log >&2 || true; rm -f /tmp/goatstare-wg-up.log; ip link delete \"$iface\" >/dev/null 2>&1 || true; ip link add \"$iface\" type wireguard; ip addr replace '{server_cidr}' dev \"$iface\"; wg set \"$iface\" private-key /etc/wireguard/server_private.key listen-port {listen_port}; ip link set up dev \"$iface\";",
+        iface = DEFAULT_INTERFACE_NAME,
+        server_cidr = DEFAULT_SERVER_INTERFACE_CIDR,
+        listen_port = DEFAULT_WIREGUARD_PORT,
+      ),
+      "activate WireGuard interface in Docker container",
+    )?;
+
+    let _ = Self::docker_exec(
+      container_id,
+      &format!(
+        "set -eu; iface='{iface}'; ip link show \"$iface\" >/dev/null 2>&1; ip -o link show \"$iface\" | grep -q 'UP'; wg show \"$iface\" >/dev/null 2>&1;",
+        iface = DEFAULT_INTERFACE_NAME
+      ),
+      "verify Docker WireGuard interface readiness",
     )?;
 
     let marker_script = format!(
@@ -478,7 +504,7 @@ impl DockerProviderAdapter {
     }
 
     Ok(format!(
-      "set -eu; mkdir -p /etc/wireguard /var/lib/goatstare; fragment=$(mktemp /tmp/goatstare-peer-XXXXXX.conf); printf '[Peer]\nPublicKey = {public_key}\nAllowedIPs = {client_cidr}\n' > \"$fragment\"; cat \"$fragment\" >> /etc/wireguard/{iface}.conf; cp \"$fragment\" /var/lib/goatstare/{iface}-client-peer.conf; rm -f \"$fragment\"; if command -v wg >/dev/null 2>&1 && ip link show {iface} >/dev/null 2>&1; then wg set {iface} peer {public_key} allowed-ips {client_cidr}; fi; true"
+      "set -eu; mkdir -p /etc/wireguard /var/lib/goatstare; fragment=$(mktemp /tmp/goatstare-peer-XXXXXX.conf); printf '[Peer]\nPublicKey = {public_key}\nAllowedIPs = {client_cidr}\n' > \"$fragment\"; cat \"$fragment\" >> /etc/wireguard/{iface}.conf; cp \"$fragment\" /var/lib/goatstare/{iface}-client-peer.conf; rm -f \"$fragment\"; ip link show {iface} >/dev/null 2>&1; wg set {iface} peer {public_key} allowed-ips {client_cidr};"
     ))
   }
 
@@ -596,6 +622,10 @@ impl super::ProviderAdapter for DockerProviderAdapter {
       &[
         "run",
         "-d",
+        "--cap-add",
+        "NET_ADMIN",
+        "--sysctl",
+        "net.ipv4.ip_forward=1",
         "--name",
         &container_name,
         "--label",
@@ -792,6 +822,23 @@ mod tests {
         assert!(server_conf.contains("PrivateKey = "));
         assert!(server_conf.contains("SaveConfig = false"));
 
+        DockerProviderAdapter::docker_exec(
+          &container_id,
+          "set -eu; ip link show wg0 >/dev/null 2>&1; ip -o link show wg0 | grep -q 'UP'; wg show wg0 >/dev/null 2>&1;",
+          "validate WireGuard interface is active after Docker init",
+        )
+        .expect("wg0 should exist and be active after bootstrap");
+
+        let marker_content = DockerProviderAdapter::copy_container_file_to_host_text(
+          &container_id,
+          READINESS_MARKER_PATH,
+          "copy Docker readiness marker from container",
+        )
+        .expect("readiness marker should be readable from container");
+        assert!(marker_content.contains("\"status\":\"ready\""));
+        assert!(marker_content.contains("\"listen_port\":51820"));
+        assert!(marker_content.contains(&contract.server_public_key));
+
         let exists = adapter
           .droplet_exists(token, provisioned.droplet_id)
           .expect("droplet existence check should succeed");
@@ -856,6 +903,13 @@ mod tests {
     )
     .expect("server config should be readable from container");
 
+    DockerProviderAdapter::docker_exec(
+      &container_id,
+      "set -eu; ip link show wg0 >/dev/null 2>&1; wg show wg0 peers | grep -qx 'client-pub-key';",
+      "validate client peer is active on Docker WireGuard interface",
+    )
+    .expect("client peer should be present on wg0");
+
     assert_eq!(contract.server_endpoint_ip, provisioned.public_ipv4);
 
     adapter
@@ -876,6 +930,7 @@ mod tests {
     assert!(script.contains("[Peer]"));
     assert!(script.contains("AllowedIPs = 10.66.0.2/32"));
     assert!(script.contains("/etc/wireguard/wg0.conf"));
+    assert!(!script.contains("if command -v wg"));
   }
 
 }
