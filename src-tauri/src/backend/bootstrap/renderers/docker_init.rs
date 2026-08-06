@@ -69,11 +69,14 @@ fi
 SERVER_PRIVATE_KEY=$(cat /etc/wireguard/server_private.key)
 SERVER_PUBLIC_KEY=$(cat /etc/wireguard/server_public.key)
 
+chmod 600 /etc/wireguard/server_private.key /etc/wireguard/server_public.key
+
 log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf"
 
 cat > /etc/wireguard/${{WG_IFACE}}.conf <<EOF
 {interface_config_fragment}
 EOF
+chmod 600 /etc/wireguard/${{WG_IFACE}}.conf
 
 log_stage "sysctl" "ensuring IPv4 forwarding is enabled"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
@@ -100,6 +103,12 @@ log_stage "verify-interface" "verifying WireGuard interface state"
 ip link show "${{WG_IFACE}}" >/dev/null 2>&1
 ip -o link show "${{WG_IFACE}}" | grep -q 'UP'
 wg show "${{WG_IFACE}}" >/dev/null 2>&1
+
+log_stage "verify-config" "ensuring /etc/wireguard/${{WG_IFACE}}.conf exists and is non-empty"
+if [ ! -s "/etc/wireguard/${{WG_IFACE}}.conf" ]; then
+  log_stage "verify-config" "missing or empty WireGuard config file"
+  exit 63
+fi
 
 log_stage "marker" "writing readiness marker to ${{MARKER_PATH}}"
 cat > ${{MARKER_PATH}} <<EOF

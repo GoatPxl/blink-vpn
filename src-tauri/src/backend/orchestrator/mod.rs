@@ -1105,7 +1105,19 @@ impl Orchestrator {
       }
     }
 
-    let connect_config = load_connect_config_for_tunnel(secure_storage, &node, &tunnel)?;
+    let provider = db
+      .get_provider(&node.provider_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading provider before connect flow.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "Connect flow requires an existing provider for the VPN node.".to_string(),
+      })?;
+
+    let connect_config =
+      load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, &tunnel)?;
 
     wireguard
       .import_tunnel(&tunnel.name, &connect_config)
@@ -1701,6 +1713,7 @@ fn parse_allowed_ips_csv(raw: Option<&str>) -> Vec<String> {
 
 fn load_connect_config_for_tunnel(
   secure_storage: &SecureStorage,
+  provider_slug: &str,
   node: &crate::backend::db::VpnNodeRecord,
   tunnel: &crate::backend::db::TunnelRecord,
 ) -> Result<String, OrchestratorError> {
@@ -1712,10 +1725,7 @@ fn load_connect_config_for_tunnel(
       detail: "VPN node is missing server public key; cannot connect tunnel.".to_string(),
     })?;
 
-  let endpoint_ip = node.public_ipv4.clone().ok_or_else(|| OrchestratorError::InvalidState {
-    node_id: node.id.clone(),
-    detail: "VPN node is missing public endpoint IP; cannot connect tunnel.".to_string(),
-  })?;
+  let endpoint_ip = resolve_server_endpoint_ip_for_connect(provider_slug, node)?;
 
   let private_key_ref = tunnel
     .client_private_key_ref
@@ -1762,6 +1772,20 @@ fn load_connect_config_for_tunnel(
       detail: "Could not render client WireGuard config during connect flow.".to_string(),
       source,
     })
+}
+
+fn resolve_server_endpoint_ip_for_connect(
+  provider_slug: &str,
+  node: &crate::backend::db::VpnNodeRecord,
+) -> Result<String, OrchestratorError> {
+  if provider_slug == "docker" {
+    return Ok("127.0.0.1".to_string());
+  }
+
+  node.public_ipv4.clone().ok_or_else(|| OrchestratorError::InvalidState {
+    node_id: node.id.clone(),
+    detail: "VPN node is missing public endpoint IP; cannot connect tunnel.".to_string(),
+  })
 }
 
 #[cfg(test)]
@@ -2538,6 +2562,61 @@ mod tests {
     let state = runner.state.lock().expect("lock should work");
     assert_eq!(state.install_calls, 1);
     assert_eq!(state.activate_calls, 0);
+  }
+
+  #[test]
+  fn connect_endpoint_uses_localhost_for_docker_provider() {
+    let node = crate::backend::db::VpnNodeRecord {
+      id: "node-docker".to_string(),
+      provider_id: TEST_PROVIDER_ID.to_string(),
+      name: "Docker Node".to_string(),
+      region: "docker-local".to_string(),
+      plan_key: None,
+      size_slug: None,
+      price_monthly_usd: None,
+      price_hourly_usd: None,
+      price_source_timestamp: None,
+      lifecycle_status: NodeLifecycleStatus::Ready,
+      provider_status: None,
+      external_ref: Some("42".to_string()),
+      public_ipv4: Some("172.18.0.11".to_string()),
+      server_public_key: Some("server-public-key".to_string()),
+      error_reason: None,
+      created_at: "now".to_string(),
+      updated_at: "now".to_string(),
+    };
+
+    let endpoint = resolve_server_endpoint_ip_for_connect("docker", &node)
+      .expect("docker endpoint resolution should succeed");
+
+    assert_eq!(endpoint, "127.0.0.1");
+  }
+
+  #[test]
+  fn connect_endpoint_requires_public_ip_for_non_docker_provider() {
+    let node = crate::backend::db::VpnNodeRecord {
+      id: "node-do".to_string(),
+      provider_id: TEST_PROVIDER_ID.to_string(),
+      name: "DO Node".to_string(),
+      region: "nyc1".to_string(),
+      plan_key: None,
+      size_slug: None,
+      price_monthly_usd: None,
+      price_hourly_usd: None,
+      price_source_timestamp: None,
+      lifecycle_status: NodeLifecycleStatus::Ready,
+      provider_status: None,
+      external_ref: Some("77".to_string()),
+      public_ipv4: None,
+      server_public_key: Some("server-public-key".to_string()),
+      error_reason: None,
+      created_at: "now".to_string(),
+      updated_at: "now".to_string(),
+    };
+
+    let result = resolve_server_endpoint_ip_for_connect("do", &node);
+
+    assert!(matches!(result, Err(OrchestratorError::InvalidState { .. })));
   }
 
   #[test]

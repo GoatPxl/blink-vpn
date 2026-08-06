@@ -16,6 +16,7 @@ use super::{
 const DOCKER_REGION: &str = "docker-local";
 const DOCKER_IMAGE: &str = "ubuntu:24.04";
 const DOCKER_INIT_SCRIPT_PATH: &str = "/usr/local/bin/goatstare-docker-init.sh";
+const DOCKER_WIREGUARD_PUBLISH: &str = "127.0.0.1:51820:51820/udp";
 
 #[derive(Clone, Copy)]
 struct DockerPlanSpec {
@@ -152,6 +153,42 @@ impl DockerProviderAdapter {
     };
 
     format!("{name}-{droplet_id}")
+  }
+
+  fn docker_public_endpoint() -> &'static str {
+    "127.0.0.1"
+  }
+
+  fn build_container_run_args(
+    container_name: &str,
+    droplet_label: &str,
+    cpus: &str,
+    memory: &str,
+  ) -> Vec<String> {
+    vec![
+      "run".to_string(),
+      "-d".to_string(),
+      "--cap-add".to_string(),
+      "NET_ADMIN".to_string(),
+      "--sysctl".to_string(),
+      "net.ipv4.ip_forward=1".to_string(),
+      "-p".to_string(),
+      DOCKER_WIREGUARD_PUBLISH.to_string(),
+      "--name".to_string(),
+      container_name.to_string(),
+      "--label".to_string(),
+      "goatstare.provider=docker".to_string(),
+      "--label".to_string(),
+      droplet_label.to_string(),
+      "--cpus".to_string(),
+      cpus.to_string(),
+      "--memory".to_string(),
+      memory.to_string(),
+      DOCKER_IMAGE.to_string(),
+      "sh".to_string(),
+      "-c".to_string(),
+      "while true; do sleep 3600; done".to_string(),
+    ]
   }
 
   fn container_ids_for_droplet(droplet_id: u64) -> Result<Vec<String>, ProviderAdapterError> {
@@ -697,50 +734,33 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     let cpus = plan.vcpus.to_string();
     let memory = format!("{}m", plan.memory_mb);
 
-    let container_id = Self::run_docker(
-      &[
-        "run",
-        "-d",
-        "--cap-add",
-        "NET_ADMIN",
-        "--sysctl",
-        "net.ipv4.ip_forward=1",
-        "--name",
-        &container_name,
-        "--label",
-        "goatstare.provider=docker",
-        "--label",
-        &droplet_label,
-        "--cpus",
-        &cpus,
-        "--memory",
-        &memory,
-        DOCKER_IMAGE,
-        "sh",
-        "-c",
-        "while true; do sleep 3600; done",
-      ],
-      "create Docker compute container",
-    )?;
+    let run_args = Self::build_container_run_args(&container_name, &droplet_label, &cpus, &memory);
+    let run_arg_refs = run_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let container_id = Self::run_docker(&run_arg_refs, "create Docker compute container").map_err(|source| {
+      match source {
+        ProviderAdapterError::Unsupported { detail } => {
+          let lower = detail.to_ascii_lowercase();
+          if lower.contains("port is already allocated")
+            || (lower.contains("51820") && lower.contains("bind"))
+          {
+            ProviderAdapterError::Unsupported {
+              detail: format!(
+                "{} Port 51820/udp on localhost is already in use. Stop the conflicting service/container, then retry Docker node provisioning.",
+                detail
+              ),
+            }
+          } else {
+            ProviderAdapterError::Unsupported { detail }
+          }
+        }
+        other => other,
+      }
+    })?;
 
     let docker_init_payload = Self::resolve_docker_init_payload(cloud_init_user_data)?;
     Self::stage_docker_init_script(&container_id, &docker_init_payload)?;
 
-    let endpoint_ip = Self::run_docker(
-      &[
-        "inspect",
-        "--format",
-        "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-        &container_name,
-      ],
-      "inspect Docker container endpoint",
-    )?;
-
-    let public_ipv4 = if endpoint_ip.trim().is_empty() {
-      "127.0.0.1".to_string()
-    } else {
-      endpoint_ip
-    };
+    let public_ipv4 = Self::docker_public_endpoint().to_string();
 
     Ok(ProvisionedDroplet {
       droplet_id,
@@ -761,7 +781,11 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     let container_id = Self::container_id_for_droplet(droplet_id)?;
     let mut contract =
       Self::initialize_wireguard_server_in_container(&container_id, readiness_marker_path)?;
-    contract.server_endpoint_ip = endpoint_ip.to_string();
+    contract.server_endpoint_ip = if endpoint_ip.trim().is_empty() {
+      Self::docker_public_endpoint().to_string()
+    } else {
+      endpoint_ip.to_string()
+    };
 
     Ok(contract)
   }
@@ -831,7 +855,9 @@ impl super::ProviderAdapter for DockerProviderAdapter {
 
 #[cfg(test)]
 mod tests {
-  use super::{DockerProviderAdapter, DOCKER_IMAGE, DOCKER_REGION};
+  use super::{
+    DockerProviderAdapter, DOCKER_IMAGE, DOCKER_REGION, DOCKER_WIREGUARD_PUBLISH,
+  };
   use crate::backend::bootstrap::{Bootstrap, BootstrapParams, READINESS_MARKER_PATH};
   use crate::backend::provider::ProviderAdapter;
   use std::time::{SystemTime, UNIX_EPOCH};
@@ -1023,6 +1049,24 @@ mod tests {
     assert!(script.contains("AllowedIPs = 10.66.0.2/32"));
     assert!(script.contains("/etc/wireguard/wg0.conf"));
     assert!(!script.contains("if command -v wg"));
+  }
+
+  #[test]
+  fn docker_container_run_args_publish_wireguard_udp_on_localhost() {
+    let args = DockerProviderAdapter::build_container_run_args(
+      "demo-container",
+      "goatstare.droplet_id=42",
+      "1",
+      "1024m",
+    );
+
+    assert!(args.contains(&"-p".to_string()));
+    assert!(args.contains(&DOCKER_WIREGUARD_PUBLISH.to_string()));
+  }
+
+  #[test]
+  fn docker_public_endpoint_is_localhost() {
+    assert_eq!(DockerProviderAdapter::docker_public_endpoint(), "127.0.0.1");
   }
 
 }
