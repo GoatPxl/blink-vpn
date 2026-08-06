@@ -1,11 +1,11 @@
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::backend::bootstrap::{
-  BootstrapOutputContract, DEFAULT_CLIENT_CIDR, DEFAULT_INTERFACE_NAME,
-  DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_WIREGUARD_PORT,
+  Bootstrap, BootstrapOutputContract, BootstrapParams, ReadinessMarker,
+  DEFAULT_INTERFACE_NAME, DEFAULT_WIREGUARD_PORT,
 };
 
 use super::{
@@ -14,7 +14,8 @@ use super::{
 };
 
 const DOCKER_REGION: &str = "docker-local";
-const DOCKER_IMAGE: &str = "alpine:3.20";
+const DOCKER_IMAGE: &str = "ubuntu:24.04";
+const DOCKER_INIT_SCRIPT_PATH: &str = "/usr/local/bin/goatstare-docker-init.sh";
 
 #[derive(Clone, Copy)]
 struct DockerPlanSpec {
@@ -241,6 +242,65 @@ impl DockerProviderAdapter {
     Ok(content)
   }
 
+  fn copy_container_file_to_host_text_with_retries(
+    container_id: &str,
+    container_path: &str,
+    action: &str,
+    attempts: usize,
+  ) -> Result<String, ProviderAdapterError> {
+    let total_attempts = attempts.max(1);
+    let mut last_error: Option<ProviderAdapterError> = None;
+
+    for attempt in 0..total_attempts {
+      match Self::copy_container_file_to_host_text(container_id, container_path, action) {
+        Ok(content) => return Ok(content),
+        Err(error) => {
+          last_error = Some(error);
+          if attempt + 1 < total_attempts {
+            let delay_ms = 150 * (attempt as u64 + 1);
+            std::thread::sleep(Duration::from_millis(delay_ms));
+          }
+        }
+      }
+    }
+
+    Err(last_error.unwrap_or_else(|| ProviderAdapterError::Unsupported {
+      detail: format!(
+        "Docker copy from '{}' failed without returning a concrete error.",
+        container_path
+      ),
+    }))
+  }
+
+  fn read_container_text_with_fallback(
+    container_id: &str,
+    container_path: &str,
+    copy_action: &str,
+    exec_action: &str,
+  ) -> Result<String, ProviderAdapterError> {
+    match Self::copy_container_file_to_host_text_with_retries(
+      container_id,
+      container_path,
+      copy_action,
+      5,
+    ) {
+      Ok(content) => Ok(content),
+      Err(copy_error) => {
+        let content = Self::docker_exec(
+          container_id,
+          &format!("set -eu; test -f '{container_path}'; cat '{container_path}';"),
+          exec_action,
+        )?;
+
+        if content.trim().is_empty() {
+          return Err(copy_error);
+        }
+
+        Ok(content)
+      }
+    }
+  }
+
   fn copy_host_text_to_container(
     container_id: &str,
     content: &str,
@@ -269,6 +329,33 @@ impl DockerProviderAdapter {
     let _ = std::fs::remove_file(&host_path);
 
     copy_result.map(|_| ())
+  }
+
+  fn stage_docker_init_script(
+    container_id: &str,
+    init_script: &str,
+  ) -> Result<(), ProviderAdapterError> {
+    if init_script.trim().is_empty() {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: "Docker init payload was empty; bootstrap render must provide a non-empty init script."
+          .to_string(),
+      });
+    }
+
+    Self::copy_host_text_to_container(
+      container_id,
+      init_script,
+      DOCKER_INIT_SCRIPT_PATH,
+      "copy Docker init script into container",
+    )?;
+
+    let _ = Self::docker_exec(
+      container_id,
+      &format!("set -eu; chmod 700 {DOCKER_INIT_SCRIPT_PATH};"),
+      "set Docker init script permissions",
+    )?;
+
+    Ok(())
   }
 
   fn generate_host_wireguard_keypair() -> Result<(String, String), ProviderAdapterError> {
@@ -370,88 +457,67 @@ impl DockerProviderAdapter {
     Ok((private_key, public_key))
   }
 
+  fn resolve_docker_init_payload(init_script: &str) -> Result<String, ProviderAdapterError> {
+    if !init_script.trim().is_empty() {
+      return Ok(init_script.to_string());
+    }
+
+    Bootstrap::new()
+      .render_docker_init(&BootstrapParams::default())
+      .map(|artifact| artifact.cloud_init_user_data)
+      .map_err(|source| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Could not render default Docker init payload for direct Docker adapter provisioning: {}",
+          source
+        ),
+      })
+  }
+
   fn initialize_wireguard_server_in_container(
     container_id: &str,
     readiness_marker_path: &str,
-  ) -> Result<String, ProviderAdapterError> {
+  ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
     let (server_private_key, server_public_key) = Self::generate_host_wireguard_keypair()?;
 
     let _ = Self::docker_exec(
       container_id,
-      "set -eu; apk add --no-cache wireguard-tools iproute2 iptables >/dev/null 2>&1; mkdir -p /etc/wireguard; umask 077;",
-      "prepare WireGuard tooling and directory in Docker container",
-    )?;
-
-    let _ = Self::docker_exec(
-      container_id,
-      "set -eu; probe='gspw0'; ip link delete \"$probe\" >/dev/null 2>&1 || true; if ! ip link add \"$probe\" type wireguard >/tmp/goatstare-wg-prereq.err 2>&1; then cat /tmp/goatstare-wg-prereq.err >&2 || true; rm -f /tmp/goatstare-wg-prereq.err; exit 61; fi; rm -f /tmp/goatstare-wg-prereq.err; ip link delete \"$probe\" >/dev/null 2>&1 || true;",
-      "validate Docker container privileges for WireGuard interface operations",
+      "set -eu; mkdir -p /etc/wireguard;",
+      "prepare Docker WireGuard directory before init script",
     )?;
 
     Self::copy_host_text_to_container(
       container_id,
       &format!("{}\n", server_private_key),
-      "/tmp/goatstare-server-private.key",
-      "copy WireGuard server private key to Docker container temp file",
+      "/etc/wireguard/server_private.key",
+      "copy Docker server private key into container",
     )?;
 
     Self::copy_host_text_to_container(
       container_id,
       &format!("{}\n", server_public_key),
-      "/tmp/goatstare-server-public.key",
-      "copy WireGuard server public key to Docker container temp file",
+      "/etc/wireguard/server_public.key",
+      "copy Docker server public key into container",
     )?;
 
-    let _ = Self::docker_exec(
-      container_id,
-      "set -eu; mkdir -p /etc/wireguard; mv /tmp/goatstare-server-private.key /etc/wireguard/server_private.key; mv /tmp/goatstare-server-public.key /etc/wireguard/server_public.key;",
-      "place WireGuard key files in Docker container",
-    )?;
+    let execute_init_script = |action: &str| {
+      Self::docker_exec(
+        container_id,
+        &format!(
+          "set -eu; {script}; for attempt in 1 2 3 4 5; do if [ -f '{marker}' ]; then exit 0; fi; sleep 1; done; exit 62;",
+          script = DOCKER_INIT_SCRIPT_PATH,
+          marker = readiness_marker_path,
+        ),
+        action,
+      )
+    };
 
-    let server_conf = format!(
-      "[Interface]\nAddress = {server_cidr}\nListenPort = {listen_port}\nPrivateKey = {private_key}\nSaveConfig = false\n\nPostUp = iptables -A FORWARD -i {interface_name} -j ACCEPT; iptables -A FORWARD -o {interface_name} -j ACCEPT; iptables -t nat -A POSTROUTING -s {client_cidr} -j MASQUERADE\nPostDown = iptables -D FORWARD -i {interface_name} -j ACCEPT; iptables -D FORWARD -o {interface_name} -j ACCEPT; iptables -t nat -D POSTROUTING -s {client_cidr} -j MASQUERADE\n",
-      server_cidr = DEFAULT_SERVER_INTERFACE_CIDR,
-      listen_port = DEFAULT_WIREGUARD_PORT,
-      private_key = server_private_key,
-      interface_name = DEFAULT_INTERFACE_NAME,
-      client_cidr = DEFAULT_CLIENT_CIDR,
-    );
-
-    Self::copy_host_text_to_container(
-      container_id,
-      &server_conf,
-      &format!("/tmp/goatstare-{}.conf", DEFAULT_INTERFACE_NAME),
-      "copy WireGuard server config to Docker container temp file",
-    )?;
-
-    let _ = Self::docker_exec(
-      container_id,
-      &format!(
-        "set -eu; mkdir -p /etc/wireguard; mv /tmp/goatstare-{iface}.conf /etc/wireguard/{iface}.conf;",
-        iface = DEFAULT_INTERFACE_NAME
-      ),
-      "place WireGuard server config in Docker container",
-    )?;
-
-    let _ = Self::docker_exec(
-      container_id,
-      &format!(
-        "set -eu; iface='{iface}'; if command -v wg-quick >/dev/null 2>&1 && wg-quick up \"$iface\" >/tmp/goatstare-wg-up.log 2>&1; then rm -f /tmp/goatstare-wg-up.log; exit 0; fi; cat /tmp/goatstare-wg-up.log >&2 || true; rm -f /tmp/goatstare-wg-up.log; ip link delete \"$iface\" >/dev/null 2>&1 || true; ip link add \"$iface\" type wireguard; ip addr replace '{server_cidr}' dev \"$iface\"; wg set \"$iface\" private-key /etc/wireguard/server_private.key listen-port {listen_port}; ip link set up dev \"$iface\";",
-        iface = DEFAULT_INTERFACE_NAME,
-        server_cidr = DEFAULT_SERVER_INTERFACE_CIDR,
-        listen_port = DEFAULT_WIREGUARD_PORT,
-      ),
-      "activate WireGuard interface in Docker container",
-    )?;
-
-    let _ = Self::docker_exec(
-      container_id,
-      &format!(
-        "set -eu; iface='{iface}'; ip link show \"$iface\" >/dev/null 2>&1; ip -o link show \"$iface\" | grep -q 'UP'; wg show \"$iface\" >/dev/null 2>&1;",
-        iface = DEFAULT_INTERFACE_NAME
-      ),
-      "verify Docker WireGuard interface readiness",
-    )?;
+    let _ = execute_init_script("execute Docker init script")?;
+    if server_public_key.len() < 40 {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: "Docker init script returned an invalid WireGuard server public key."
+          .to_string(),
+      });
+    }
 
     let marker_script = format!(
       "set -eu; mkdir -p \"$(dirname '{readiness_marker_path}')\"; printf '{{\"status\":\"ready\",\"server_public_key\":\"%s\",\"listen_port\":%d}}\\n' '{server_public_key}' {listen_port} > '{readiness_marker_path}';",
@@ -466,14 +532,27 @@ impl DockerProviderAdapter {
       "write Docker bootstrap readiness marker",
     )?;
 
-    if server_public_key.len() < 40 {
-      return Err(ProviderAdapterError::Unsupported {
-        detail: "Docker init script returned an invalid WireGuard server public key."
-          .to_string(),
-      });
-    }
+    let marker_content = Self::copy_container_file_to_host_text_with_retries(
+      container_id,
+      readiness_marker_path,
+      "copy Docker readiness marker from container",
+      5,
+    )?;
 
-    Ok(server_public_key)
+    let marker: ReadinessMarker = serde_json::from_str(&marker_content).map_err(|source| {
+      ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Docker bootstrap readiness marker JSON was invalid at '{}': {}",
+          readiness_marker_path, source
+        ),
+      }
+    })?;
+
+    Ok(BootstrapOutputContract {
+      server_endpoint_ip: String::new(),
+      server_public_key: marker.server_public_key,
+      listen_port: marker.listen_port,
+    })
   }
 
   fn build_client_peer_update_script(
@@ -599,7 +678,7 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     droplet_name: &str,
     _region: &str,
     size_slug: &str,
-    _cloud_init_user_data: &str,
+    cloud_init_user_data: &str,
   ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let _ = Self::ensure_daemon_available()?;
@@ -618,7 +697,7 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     let cpus = plan.vcpus.to_string();
     let memory = format!("{}m", plan.memory_mb);
 
-    let _container_id = Self::run_docker(
+    let container_id = Self::run_docker(
       &[
         "run",
         "-d",
@@ -643,6 +722,9 @@ impl super::ProviderAdapter for DockerProviderAdapter {
       ],
       "create Docker compute container",
     )?;
+
+    let docker_init_payload = Self::resolve_docker_init_payload(cloud_init_user_data)?;
+    Self::stage_docker_init_script(&container_id, &docker_init_payload)?;
 
     let endpoint_ip = Self::run_docker(
       &[
@@ -677,14 +759,11 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     let _ = Self::ensure_daemon_available()?;
 
     let container_id = Self::container_id_for_droplet(droplet_id)?;
-    let server_public_key =
+    let mut contract =
       Self::initialize_wireguard_server_in_container(&container_id, readiness_marker_path)?;
+    contract.server_endpoint_ip = endpoint_ip.to_string();
 
-    Ok(BootstrapOutputContract {
-      server_endpoint_ip: endpoint_ip.to_string(),
-      server_public_key,
-      listen_port: DEFAULT_WIREGUARD_PORT,
-    })
+    Ok(contract)
   }
 
   fn droplet_exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError> {
@@ -752,10 +831,23 @@ impl super::ProviderAdapter for DockerProviderAdapter {
 
 #[cfg(test)]
 mod tests {
-  use super::{DockerProviderAdapter, DOCKER_REGION};
-  use crate::backend::bootstrap::READINESS_MARKER_PATH;
-  use std::time::{SystemTime, UNIX_EPOCH};
+  use super::{DockerProviderAdapter, DOCKER_IMAGE, DOCKER_REGION};
+  use crate::backend::bootstrap::{Bootstrap, BootstrapParams, READINESS_MARKER_PATH};
   use crate::backend::provider::ProviderAdapter;
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  #[test]
+  fn docker_provider_uses_ubuntu_24_base_image() {
+    assert_eq!(DOCKER_IMAGE, "ubuntu:24.04");
+
+    let install_script = Bootstrap::new()
+      .render_docker_init(&BootstrapParams::default())
+      .expect("docker init render should succeed")
+      .cloud_init_user_data;
+    assert!(install_script.contains("apt-get update"));
+    assert!(install_script.contains("apt-get install -y --no-install-recommends wireguard-tools iproute2 iptables"));
+    assert!(!install_script.contains("apk add"));
+  }
 
   #[test]
   fn lists_static_region_without_docker_daemon() {

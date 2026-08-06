@@ -543,18 +543,27 @@ impl Orchestrator {
         source,
       })?;
 
-    let bootstrap_artifact = bootstrap
-      .render_cloud_init(&BootstrapParams {
-        server_endpoint_ip: "0.0.0.0".to_string(),
-        listen_port: DEFAULT_WIREGUARD_PORT,
-        server_interface_cidr: DEFAULT_SERVER_INTERFACE_CIDR.to_string(),
-        client_cidr: DEFAULT_CLIENT_CIDR.to_string(),
-        interface_name: DEFAULT_INTERFACE_NAME.to_string(),
-      })
-      .map_err(|source| OrchestratorError::Bootstrap {
-        detail: "Failed rendering cloud-init user-data for node bootstrap.".to_string(),
-        source,
-      })?;
+    let bootstrap_params = BootstrapParams {
+      server_endpoint_ip: "0.0.0.0".to_string(),
+      listen_port: DEFAULT_WIREGUARD_PORT,
+      server_interface_cidr: DEFAULT_SERVER_INTERFACE_CIDR.to_string(),
+      client_cidr: DEFAULT_CLIENT_CIDR.to_string(),
+      interface_name: DEFAULT_INTERFACE_NAME.to_string(),
+    };
+
+    let bootstrap_artifact = if provider_slug == "docker" {
+      bootstrap.render_docker_init(&bootstrap_params)
+    } else {
+      bootstrap.render_cloud_init(&bootstrap_params)
+    }
+    .map_err(|source| OrchestratorError::Bootstrap {
+      detail: if provider_slug == "docker" {
+        "Failed rendering Docker init script for node bootstrap.".to_string()
+      } else {
+        "Failed rendering cloud-init user-data for node bootstrap.".to_string()
+      },
+      source,
+    })?;
 
     record_init(
       "bootstrap.render",
