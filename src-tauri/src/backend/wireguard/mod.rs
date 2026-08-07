@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
+use std::fs;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -979,24 +980,126 @@ fn parse_interface_config_from_wg_text(
   })
 }
 
-fn wireguard_dll_path() -> &'static str {
+fn wireguard_dll_name() -> &'static str {
   #[cfg(target_arch = "aarch64")]
   {
-    "resources-windows/binaries/wireguard-arm64.dll"
+    "wireguard-arm64.dll"
   }
   #[cfg(target_arch = "x86_64")]
   {
-    "resources-windows/binaries/wireguard-amd64.dll"
+    "wireguard-amd64.dll"
   }
 }
 
+fn candidate_wireguard_dll_paths() -> Vec<PathBuf> {
+  let mut candidates = Vec::new();
+
+  if let Ok(exe) = std::env::current_exe() {
+    if let Some(parent) = exe.parent() {
+      candidates.push(parent.join("resources-windows").join("binaries").join(wireguard_dll_name()));
+      candidates.push(parent.join("resources-windows").join(wireguard_dll_name()));
+      candidates.push(parent.join(wireguard_dll_name()));
+    }
+  }
+
+  if let Ok(cwd) = std::env::current_dir() {
+    candidates.push(cwd.join("resources-windows").join("binaries").join(wireguard_dll_name()));
+    candidates.push(cwd.join("resources-windows").join(wireguard_dll_name()));
+    candidates.push(cwd.join(wireguard_dll_name()));
+  }
+
+  let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap_or_else(|| Path::new("."));
+  candidates.push(repo_root.join("src-tauri").join("resources-windows").join("binaries").join(wireguard_dll_name()));
+  candidates.push(repo_root.join("src-tauri").join("resources-windows").join(wireguard_dll_name()));
+
+  candidates.push(PathBuf::from(r"C:\Program Files\WireGuard\").join(wireguard_dll_name()));
+  candidates.push(PathBuf::from(r"C:\Program Files (x86)\WireGuard\").join(wireguard_dll_name()));
+
+  candidates
+}
+
+fn bootstrap_wireguard_dll_from_download() -> Result<PathBuf, WireGuardError> {
+  let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap_or_else(|| Path::new("."));
+  let bundled_dir = repo_root.join("src-tauri").join("resources-windows").join("binaries");
+  let target_path = bundled_dir.join(wireguard_dll_name());
+
+  if let Some(parent) = target_path.parent() {
+    let _ = fs::create_dir_all(parent);
+  }
+
+  let temp_dir = bundled_dir.join(".tmp-wireguard-nt");
+  let _ = fs::remove_dir_all(&temp_dir);
+
+  let powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+  let script = format!(
+    r#"$ErrorActionPreference = "Stop"; $zip = '{}'; $dest = '{}'; $out = '{}'; Invoke-WebRequest -Uri 'https://download.wireguard.com/wireguard-nt/wireguard-nt-1.1.zip' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dest -Force; $dll = if (Test-Path "$dest\bin\amd64\wireguard.dll") {{ "$dest\bin\amd64\wireguard.dll" }} elseif (Test-Path "$dest\bin\arm64\wireguard.dll") {{ "$dest\bin\arm64\wireguard.dll" }} elseif (Test-Path "$dest\bin\x86\wireguard.dll") {{ "$dest\bin\x86\wireguard.dll" }} else {{ $null }}; if ($dll) {{ Copy-Item $dll -Destination $out -Force }}"#,
+    bundled_dir.join("wireguard-nt-1.1.zip").display(),
+    temp_dir.display(),
+    target_path.display()
+  );
+
+  let output = Command::new(powershell)
+    .arg("-NoProfile")
+    .arg("-ExecutionPolicy")
+    .arg("Bypass")
+    .arg("-Command")
+    .arg(&script)
+    .output()
+    .map_err(|source| WireGuardError::Runtime {
+      detail: format!("Failed to invoke PowerShell for WireGuard runtime bootstrap: {source}"),
+    })?;
+
+  if !output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    return Err(WireGuardError::Runtime {
+      detail: format!(
+        "WireGuard runtime bootstrap failed: {}",
+        stderr.trim()
+      ),
+    });
+  }
+
+  if target_path.exists() {
+    Ok(target_path)
+  } else {
+    Err(WireGuardError::Runtime {
+      detail: format!(
+        "WireGuard runtime DLL was not found after bootstrap. Checked: {}",
+        target_path.display()
+      ),
+    })
+  }
+}
+
+fn ensure_wireguard_dll_available() -> Result<PathBuf, WireGuardError> {
+  let mut seen = std::collections::HashSet::new();
+  let mut candidate_paths = candidate_wireguard_dll_paths();
+  candidate_paths.retain(|path| seen.insert(path.clone()));
+
+  for path in &candidate_paths {
+    if path.exists() {
+      return Ok(path.clone());
+    }
+  }
+
+  let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap_or_else(|| Path::new("."));
+  let bundled_dir = repo_root.join("src-tauri").join("resources-windows").join("binaries");
+  let target_path = bundled_dir.join(wireguard_dll_name());
+
+  if target_path.exists() {
+    return Ok(target_path);
+  }
+
+  bootstrap_wireguard_dll_from_download()
+}
 fn load_wireguard_nt_runtime() -> Result<WireguardNtRuntime, WireGuardError> {
+  let dll_path = ensure_wireguard_dll_available()?;
   // Loading a signed system WireGuard runtime DLL from application resources.
-  unsafe { wireguard_nt::load_from_path(wireguard_dll_path()) }.map_err(|source| {
+  unsafe { wireguard_nt::load_from_path(dll_path.to_string_lossy().as_ref()) }.map_err(|source| {
     WireGuardError::Runtime {
       detail: format!(
         "Could not load WireGuard-NT runtime DLL at '{}': {}",
-        wireguard_dll_path(), source
+        dll_path.display(), source
       ),
     }
   })
