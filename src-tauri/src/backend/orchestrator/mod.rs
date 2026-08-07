@@ -1098,13 +1098,6 @@ impl Orchestrator {
       });
     }
 
-    if tunnel.status == TunnelStatus::Connected && node.lifecycle_status == NodeLifecycleStatus::Connected {
-      let runtime = self.read_client_tunnel_status(wireguard, db, &request.tunnel_id)?;
-      if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
-        return Ok(());
-      }
-    }
-
     let provider = db
       .get_provider(&node.provider_id)
       .map_err(|source| OrchestratorError::Database {
@@ -1119,6 +1112,16 @@ impl Orchestrator {
     let connect_config =
       load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, &tunnel)?;
 
+    // Always capture the latest connect config in diagnostics, even when connect is idempotent.
+    wireguard.record_connect_trace_snapshot(&tunnel.name, &connect_config);
+
+    if tunnel.status == TunnelStatus::Connected && node.lifecycle_status == NodeLifecycleStatus::Connected {
+      let runtime = self.read_client_tunnel_status(wireguard, db, &request.tunnel_id)?;
+      if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
+        return Ok(());
+      }
+    }
+
     wireguard
       .import_tunnel(&tunnel.name, &connect_config)
       .map_err(|source| OrchestratorError::WireGuard {
@@ -1128,6 +1131,7 @@ impl Orchestrator {
       })?;
 
     if let Err(source) = wireguard.activate_tunnel(&tunnel.name) {
+      let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
       let _ = wireguard.unregister_tunnel(&tunnel.name);
       let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel activation failed; service was removed."));
       return Err(OrchestratorError::WireGuard {
@@ -1136,12 +1140,16 @@ impl Orchestrator {
       });
     }
 
-    let runtime = wireguard
-      .read_tunnel_status(&tunnel.name)
-      .map_err(|source| OrchestratorError::WireGuard {
-        detail: "Could not verify tunnel runtime state after connect.".to_string(),
-        source,
-      })?;
+    let runtime = match wireguard.read_tunnel_status(&tunnel.name) {
+      Ok(runtime) => runtime,
+      Err(source) => {
+        let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
+        return Err(OrchestratorError::WireGuard {
+          detail: "Could not verify tunnel runtime state after connect.".to_string(),
+          source,
+        });
+      }
+    };
 
     persist_tunnel_stats_snapshot(db, &request.tunnel_id, &runtime)?;
 
@@ -1163,6 +1171,7 @@ impl Orchestrator {
       return Ok(());
     }
 
+    let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
     let _ = wireguard.unregister_tunnel(&tunnel.name);
     let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel runtime did not report Running; service was removed."));
 
@@ -1303,6 +1312,7 @@ impl Orchestrator {
     &self,
     wireguard: &WireGuardManager,
     db: &Database,
+    secure_storage: &SecureStorage,
     node_id: &str,
     tunnel_id: Option<&str>,
   ) -> Result<HealthSummary, OrchestratorError> {
@@ -1331,6 +1341,23 @@ impl Orchestrator {
         .into_iter()
         .next(),
     };
+
+    if let Some(tunnel) = selected_tunnel.as_ref() {
+      if let Ok(provider) = db.get_provider(&node.provider_id) {
+        if let Some(provider) = provider {
+          if let Ok(config) = load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, tunnel) {
+            // Populate diagnostics trace even when only health polling occurs.
+            wireguard.record_connect_trace_snapshot(&tunnel.name, &config);
+          } else {
+            let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
+          }
+        } else {
+          let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
+        }
+      } else {
+        let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
+      }
+    }
 
     let runtime = if let Some(tunnel) = selected_tunnel.as_ref() {
       Some(

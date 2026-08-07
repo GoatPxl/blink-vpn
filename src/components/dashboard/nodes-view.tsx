@@ -156,7 +156,9 @@ export function NodesView({
                     const liveProviderStatus = (node.provider_status ?? "").toLowerCase();
                     const rowStatus = (node.provider_status ?? node.lifecycle_status).toLowerCase();
                     const tunnelForNode = (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === node.id) ?? null;
-                    const nodeCanConnect = !!tunnelForNode && tunnelForNode.status.toLowerCase() !== "connected";
+                    const tunnelConnected = tunnelForNode?.status.toLowerCase() === "connected";
+                    const nodeWantsDisconnect = !!tunnelForNode && (tunnelConnected || nodeLifecycle === "connected");
+                    const nodeCanConnect = !!tunnelForNode && !nodeWantsDisconnect;
                     const runtimeConnectable =
                       liveProviderStatus === ""
                       || liveProviderStatus === "active"
@@ -210,7 +212,7 @@ export function NodesView({
                               tone={nodeCanConnect || canConnectNode ? "primary" : tunnelForNode ? "danger" : "secondary"}
                               onClick={() => {
                                 if (tunnelForNode) {
-                                  void (nodeCanConnect ? onConnectTunnel(tunnelForNode) : onDisconnectTunnel(tunnelForNode));
+                                  void (nodeWantsDisconnect ? onDisconnectTunnel(tunnelForNode) : onConnectTunnel(tunnelForNode));
                                   return;
                                 }
 

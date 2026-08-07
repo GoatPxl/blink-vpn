@@ -548,7 +548,13 @@ pub fn connect_tunnel(
   ) -> Result<HealthPanelData, String> {
     let summary = backend
       .orchestrator
-      .get_health_summary(&backend.wireguard, &backend.db, &node_id, tunnel_id.as_deref())
+      .get_health_summary(
+        &backend.wireguard,
+        &backend.db,
+        &backend.secure_storage,
+        &node_id,
+        tunnel_id.as_deref(),
+      )
       .map_err(|err| err.to_string())?;
 
     Ok(HealthPanelData {

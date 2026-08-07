@@ -176,7 +176,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
   const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
   const noServerConfigured = nodes.length === 0;
-  const canConnect = !!activeNode && (!connectedTunnel || connectedTunnel.status.toLowerCase() !== "connected");
+  const activeNodeIsConnected = activeNode?.lifecycle_status.toLowerCase() === "connected";
+  const canConnect = !!activeNode
+    && (!connectedTunnel
+      || (connectedTunnel.status.toLowerCase() !== "connected" && !activeNodeIsConnected));
 
   useEffect(() => {
     providerIdRef.current = providerId;

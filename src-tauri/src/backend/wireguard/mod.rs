@@ -82,6 +82,56 @@ impl WireGuardManager {
     guard.last_import_config_redacted = Some(logging::redact_sensitive_text(config_text));
   }
 
+  pub fn record_connect_trace_snapshot(&self, tunnel_name: &str, config_text: &str) {
+    self.record_last_import_snapshot(
+      tunnel_name,
+      "in-memory://connect_tunnel_config",
+      config_text,
+    );
+  }
+
+  pub fn capture_runtime_connect_trace_snapshot(
+    &self,
+    tunnel_name: &str,
+  ) -> Result<(), WireGuardError> {
+    self.ensure_installed()?;
+    validate_tunnel_name(tunnel_name)?;
+    let wg_program = self.resolve_wg_program()?;
+
+    self.record_command(&format!("{} showconf {}", wg_program, tunnel_name));
+    let showconf = self.runner.run(&wg_program, &["showconf", tunnel_name], None);
+
+    if let Ok(output) = &showconf {
+      let text = output.stdout.trim();
+      if !text.is_empty() {
+        self.record_last_import_snapshot(tunnel_name, "runtime://wg_showconf", text);
+        return Ok(());
+      }
+    }
+
+    self.record_command(&format!("{} show {} dump", wg_program, tunnel_name));
+    if let Ok(output) = self
+      .runner
+      .run(&wg_program, &["show", tunnel_name, "dump"], None)
+    {
+      let text = output.stdout.trim();
+      if !text.is_empty() {
+        self.record_last_import_snapshot(tunnel_name, "runtime://wg_show_dump", text);
+        return Ok(());
+      }
+    }
+
+    if let Err(source) = showconf {
+      return Err(WireGuardError::Command {
+        command: format!("wg showconf {tunnel_name}"),
+        detail: "Could not read active WireGuard runtime config for debug trace capture.".to_string(),
+        source,
+      });
+    }
+
+    Ok(())
+  }
+
   pub fn ensure_installed(&self) -> Result<(), WireGuardError> {
     if !cfg!(target_os = "windows") {
       return Err(WireGuardError::UnsupportedPlatform {
@@ -1768,6 +1818,89 @@ mod tests {
     assert_eq!(status.last_handshake_age_seconds, None);
     assert_eq!(status.rx_bytes, None);
     assert_eq!(status.tx_bytes, None);
+  }
+
+  #[derive(Clone, Default)]
+  struct MockCaptureFallbackRunner;
+
+  impl CommandRunner for MockCaptureFallbackRunner {
+    fn run(
+      &self,
+      program: &str,
+      args: &[&str],
+      _stdin: Option<&str>,
+    ) -> Result<CommandOutput, CommandExecError> {
+      let program_name = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+
+      if program_name == "wg" && args == ["-v"] {
+        return Ok(CommandOutput {
+          stdout: "wireguard-tools v1".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wireguard" && args == ["/help"] {
+        return Ok(CommandOutput {
+          stdout: "WireGuard for Windows".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      if program_name == "wg" && args == ["showconf", "Primary-Node-wg"] {
+        return Err(CommandExecError::NonZeroExit {
+          program: "wg".to_string(),
+          code: Some(1),
+          detail: "showconf unavailable for tunnel".to_string(),
+        });
+      }
+
+      if program_name == "wg" && args == ["show", "Primary-Node-wg", "dump"] {
+        return Ok(CommandOutput {
+          stdout: "interface\tpub\t51820\toff\npeerpub\t(none)\t127.0.0.1:51820\t0.0.0.0/0\t1700000050\t10\t20\t25\n".to_string(),
+          stderr: String::new(),
+        });
+      }
+
+      Err(CommandExecError::NonZeroExit {
+        program: program.to_string(),
+        code: Some(1),
+        detail: "unsupported mock command".to_string(),
+      })
+    }
+  }
+
+  #[test]
+  fn capture_runtime_trace_falls_back_to_wg_dump_when_showconf_fails() {
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockCaptureFallbackRunner));
+
+    wireguard
+      .capture_runtime_connect_trace_snapshot("Primary-Node-wg")
+      .expect("runtime capture should fall back to wg dump");
+
+    let snapshot = wireguard.debug_snapshot();
+    assert_eq!(
+      snapshot.last_import_tunnel_name.as_deref(),
+      Some("Primary-Node-wg")
+    );
+    assert_eq!(
+      snapshot.last_import_config_temp_path.as_deref(),
+      Some("runtime://wg_show_dump")
+    );
+    assert!(snapshot
+      .last_import_config_redacted
+      .as_deref()
+      .is_some_and(|value| value.contains("peerpub")));
+    assert!(snapshot
+      .commands
+      .iter()
+      .any(|entry| entry.contains("showconf Primary-Node-wg")));
+    assert!(snapshot
+      .commands
+      .iter()
+      .any(|entry| entry.contains("show Primary-Node-wg dump")));
   }
 
   #[derive(Clone, Default)]
