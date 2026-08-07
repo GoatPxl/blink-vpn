@@ -267,6 +267,82 @@ impl DockerProviderAdapter {
     .map(|value| value.trim().to_ascii_lowercase())
   }
 
+  fn is_wireguard_port_allocation_error(detail: &str) -> bool {
+    let lowered = detail.to_ascii_lowercase();
+    lowered.contains("port is already allocated")
+      || (lowered.contains("bind") && lowered.contains("51820"))
+  }
+
+  fn list_goatstare_containers_on_wireguard_port() -> Result<Vec<String>, ProviderAdapterError> {
+    let output = Self::run_docker(
+      &[
+        "ps",
+        "-a",
+        "--filter",
+        "label=goatstare.provider=docker",
+        "--filter",
+        "publish=51820/udp",
+        "--format",
+        "{{.ID}}",
+      ],
+      "list GoatStare Docker containers publishing WireGuard UDP port",
+    )?;
+
+    Ok(
+      output
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect(),
+    )
+  }
+
+  fn remove_containers(container_ids: &[String], action: &str) -> Result<(), ProviderAdapterError> {
+    if container_ids.is_empty() {
+      return Ok(());
+    }
+
+    let mut args = vec!["rm", "-f"];
+    for id in container_ids {
+      args.push(id.as_str());
+    }
+
+    let _ = Self::run_docker(&args, action)?;
+    Ok(())
+  }
+
+  fn remove_container_by_exact_name(container_name: &str) -> Result<(), ProviderAdapterError> {
+    let output = Self::run_docker(
+      &[
+        "ps",
+        "-a",
+        "--filter",
+        &format!("name=^/{container_name}$"),
+        "--format",
+        "{{.ID}}",
+      ],
+      "find Docker container by exact name",
+    )?;
+
+    let ids = output
+      .lines()
+      .map(|line| line.trim().to_string())
+      .filter(|line| !line.is_empty())
+      .collect::<Vec<_>>();
+
+    Self::remove_containers(&ids, "remove stale Docker container by exact name")
+  }
+
+  fn try_cleanup_stale_wireguard_port_containers() -> Result<bool, ProviderAdapterError> {
+    let ids = Self::list_goatstare_containers_on_wireguard_port()?;
+    if ids.is_empty() {
+      return Ok(false);
+    }
+
+    Self::remove_containers(&ids, "remove stale GoatStare Docker containers blocking WireGuard UDP port")?;
+    Ok(true)
+  }
+
   fn docker_exec(container_id: &str, script: &str, action: &str) -> Result<String, ProviderAdapterError> {
     // On Windows Docker hosts, `docker exec` can return empty stdout unless stdin stays attached.
     Self::run_docker(&["exec", "-i", container_id, "sh", "-c", script], action)
@@ -771,26 +847,43 @@ impl super::ProviderAdapter for DockerProviderAdapter {
 
     let run_args = Self::build_container_run_args(&container_name, &droplet_label, &cpus, &memory);
     let run_arg_refs = run_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let container_id = Self::run_docker(&run_arg_refs, "create Docker compute container").map_err(|source| {
-      match source {
-        ProviderAdapterError::Unsupported { detail } => {
-          let lower = detail.to_ascii_lowercase();
-          if lower.contains("port is already allocated")
-            || (lower.contains("51820") && lower.contains("bind"))
-          {
-            ProviderAdapterError::Unsupported {
-              detail: format!(
-                "{} Port 51820/udp on localhost is already in use. Stop the conflicting service/container, then retry Docker node provisioning.",
-                detail
-              ),
-            }
-          } else {
-            ProviderAdapterError::Unsupported { detail }
+    Self::remove_container_by_exact_name(&container_name)?;
+    let container_id = match Self::run_docker(&run_arg_refs, "create Docker compute container") {
+      Ok(container_id) => container_id,
+      Err(ProviderAdapterError::Unsupported { detail }) if Self::is_wireguard_port_allocation_error(&detail) => {
+        let cleaned = Self::try_cleanup_stale_wireguard_port_containers().map_err(|cleanup_error| {
+          ProviderAdapterError::Unsupported {
+            detail: format!(
+              "{} Also failed to clean stale GoatStare Docker containers that may hold 127.0.0.1:51820/udp: {}",
+              detail,
+              cleanup_error
+            ),
           }
+        })?;
+
+        if cleaned {
+          Self::remove_container_by_exact_name(&container_name)?;
+          Self::run_docker(&run_arg_refs, "create Docker compute container after stale-port cleanup")
+            .map_err(|source| ProviderAdapterError::Unsupported {
+              detail: format!(
+                "{} Retry after stale GoatStare container cleanup also failed: {}",
+                detail,
+                source
+              ),
+            })?
+        } else {
+          return Err(ProviderAdapterError::Unsupported {
+            detail: format!(
+              "{} Port 51820/udp on localhost is already in use by a non-GoatStare container/service. Stop the conflicting process, then retry Docker node provisioning.",
+              detail
+            ),
+          });
         }
-        other => other,
       }
-    })?;
+      Err(source) => {
+        return Err(source);
+      }
+    };
 
     let docker_init_payload = Self::resolve_docker_init_payload(cloud_init_user_data)?;
     Self::stage_docker_init_script(&container_id, &docker_init_payload)?;
@@ -877,13 +970,7 @@ impl super::ProviderAdapter for DockerProviderAdapter {
       return Ok(());
     }
 
-    let mut args = vec!["rm", "-f"];
-    let dynamic_ids: Vec<String> = ids;
-    for id in &dynamic_ids {
-      args.push(id.as_str());
-    }
-
-    let _ = Self::run_docker(&args, "remove Docker compute container")?;
+    Self::remove_containers(&ids, "remove Docker compute container")?;
     Ok(())
   }
 }

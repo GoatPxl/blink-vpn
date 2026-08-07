@@ -6,6 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::panic::{self, AssertUnwindSafe};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -312,11 +313,11 @@ impl WireGuardManager {
   }
 
   pub fn import_tunnel(&self, tunnel_name: &str, config_text: &str) -> Result<(), WireGuardError> {
-    self.import_tunnel_defguard(tunnel_name, config_text)
+    self.import_tunnel_legacy(tunnel_name, config_text)
   }
 
   pub fn activate_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.activate_tunnel_defguard(tunnel_name)
+    self.activate_tunnel_legacy(tunnel_name)
   }
 
   fn wait_for_running_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
@@ -391,11 +392,118 @@ impl WireGuardManager {
   
 
   pub fn deactivate_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.deactivate_tunnel_defguard(tunnel_name)
+    self.deactivate_tunnel_legacy(tunnel_name)
   }
 
   pub fn unregister_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.unregister_tunnel_defguard(tunnel_name)
+    self.unregister_tunnel_legacy(tunnel_name)
+  }
+
+  fn import_tunnel_legacy(&self, tunnel_name: &str, config_text: &str) -> Result<(), WireGuardError> {
+    self.ensure_installed()?;
+    validate_tunnel_name(tunnel_name)?;
+
+    let wireguard_program = self.resolve_wireguard_program()?;
+    if self.tunnel_service_exists(tunnel_name)? {
+      self.unregister_legacy_tunnel_service_with_program(tunnel_name, &wireguard_program)?;
+    }
+
+    let mut config_path = std::env::temp_dir();
+    let stamp = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_nanos())
+      .unwrap_or(0);
+    config_path.push(format!("{tunnel_name}-{stamp}.conf"));
+    fs::write(&config_path, config_text).map_err(|source| WireGuardError::Io {
+      action: "write_temp_config",
+      detail: format!(
+        "Could not write temporary WireGuard config '{}'.",
+        config_path.display()
+      ),
+      source,
+    })?;
+
+    self.record_last_import_snapshot(tunnel_name, &config_path.to_string_lossy(), config_text);
+
+    let config_path_string = config_path.to_string_lossy().to_string();
+    let install_args = ["/installtunnelservice", config_path_string.as_str()];
+
+    self.record_command(&format!(
+      "{} /installtunnelservice {}",
+      wireguard_program, config_path_string
+    ));
+    let result = match self.runner.run(&wireguard_program, &install_args, None) {
+      Ok(output) => Ok(output),
+      Err(source) => {
+        let should_retry_elevated = matches!(
+          &source,
+          CommandExecError::NonZeroExit { detail, .. }
+            if is_windows_access_denied_detail(detail)
+        );
+
+        if should_retry_elevated {
+          self.record_command(&format!(
+            "{} /installtunnelservice {} (retry via UAC)",
+            wireguard_program, config_path_string
+          ));
+          run_wireguard_via_uac(&wireguard_program, &install_args)
+        } else {
+          Err(source)
+        }
+      }
+    }
+    .map_err(|source| WireGuardError::Command {
+      command: format!("wireguard /installtunnelservice {config_path_string}"),
+      detail:
+        "Could not import WireGuard tunnel service. If prompted, approve administrator elevation."
+          .to_string(),
+      source,
+    });
+
+    let _ = fs::remove_file(&config_path);
+    result.map(|_| ())
+  }
+
+  fn activate_tunnel_legacy(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
+    self.ensure_installed()?;
+    validate_tunnel_name(tunnel_name)?;
+
+    let service_name = wireguard_service_name(tunnel_name);
+    self.record_command(&format!("sc start {}", service_name));
+    let start_result = self.runner.run("sc", &["start", &service_name], None);
+
+    match start_result {
+      Ok(_) => self.wait_for_running_tunnel(tunnel_name),
+      Err(source) => {
+        if self.wait_for_running_tunnel(tunnel_name).is_ok() {
+          return Ok(());
+        }
+
+        Err(map_sc_tunnel_error(source, &service_name, "start"))
+      }
+    }
+  }
+
+  fn deactivate_tunnel_legacy(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
+    self.ensure_installed()?;
+    validate_tunnel_name(tunnel_name)?;
+
+    let service_name = wireguard_service_name(tunnel_name);
+    self.record_command(&format!("sc stop {}", service_name));
+    let stop_result = self.runner.run("sc", &["stop", &service_name], None);
+
+    match stop_result {
+      Ok(_) => Ok(()),
+      Err(CommandExecError::NonZeroExit { code: Some(1060), .. }) => Ok(()),
+      Err(CommandExecError::NonZeroExit { code: Some(1062), .. }) => Ok(()),
+      Err(CommandExecError::NonZeroExit { detail, .. }) if is_windows_service_missing_detail(&detail) => Ok(()),
+      Err(source) => Err(map_sc_tunnel_error(source, &service_name, "stop")),
+    }
+  }
+
+  fn unregister_tunnel_legacy(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
+    self.deactivate_tunnel_legacy(tunnel_name)?;
+    self.unregister_legacy_tunnel_service(tunnel_name)
   }
 
   fn tunnel_service_exists(&self, tunnel_name: &str) -> Result<bool, WireGuardError> {
@@ -479,6 +587,7 @@ impl WireGuardManager {
   fn import_tunnel_defguard(&self, tunnel_name: &str, config_text: &str) -> Result<(), WireGuardError> {
     self.ensure_installed()?;
     validate_tunnel_name(tunnel_name)?;
+    ensure_defguard_runtime_dll_path()?;
 
     let parsed = parse_interface_config_from_wg_text(tunnel_name, config_text)?;
     self.record_last_import_snapshot(
@@ -486,22 +595,32 @@ impl WireGuardManager {
       "runtime://defguard_wireguard_rs.configure_interface",
       config_text,
     );
-    self.record_command("defguard_wireguard_rs::WGApi::create_interface");
+    let invocation = panic::catch_unwind(AssertUnwindSafe(|| {
+      self.record_command("defguard_wireguard_rs::WGApi::create_interface");
 
-    let mut api = WireguardApi::<WireguardKernel>::new(tunnel_name).map_err(map_defguard_error)?;
-    api.create_interface().map_err(map_defguard_error)?;
+      let mut api = WireguardApi::<WireguardKernel>::new(tunnel_name).map_err(map_defguard_error)?;
+      api.create_interface().map_err(map_defguard_error)?;
 
-    self.record_command("defguard_wireguard_rs::WGApi::configure_interface");
-    api.configure_interface(&parsed.interface)
-      .map_err(map_defguard_error)?;
-
-    if !parsed.dns_servers.is_empty() {
-      self.record_command("defguard_wireguard_rs::WGApi::configure_dns");
-      api.configure_dns(&parsed.dns_servers, &[])
+      self.record_command("defguard_wireguard_rs::WGApi::configure_interface");
+      api.configure_interface(&parsed.interface)
         .map_err(map_defguard_error)?;
-    }
 
-    Ok(())
+      if !parsed.dns_servers.is_empty() {
+        self.record_command("defguard_wireguard_rs::WGApi::configure_dns");
+        api.configure_dns(&parsed.dns_servers, &[])
+          .map_err(map_defguard_error)?;
+      }
+
+      Ok(())
+    }));
+
+    match invocation {
+      Ok(result) => result,
+      Err(_) => Err(WireGuardError::Runtime {
+        detail: "WireGuard runtime crashed while importing the tunnel interface. Verify WireGuard for Windows runtime files are installed and retry."
+          .to_string(),
+      }),
+    }
   }
 
   fn activate_tunnel_defguard(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
@@ -1019,21 +1138,29 @@ fn candidate_wireguard_dll_paths() -> Vec<PathBuf> {
 }
 
 fn bootstrap_wireguard_dll_from_download() -> Result<PathBuf, WireGuardError> {
-  let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap_or_else(|| Path::new("."));
-  let bundled_dir = repo_root.join("src-tauri").join("resources-windows").join("binaries");
-  let target_path = bundled_dir.join(wireguard_dll_name());
+  let cwd = std::env::current_dir().map_err(|source| WireGuardError::Io {
+    action: "resolve_current_dir",
+    detail: "Could not resolve process current directory while bootstrapping WireGuard runtime DLL."
+      .to_string(),
+    source,
+  })?;
+  let runtime_dir = cwd.join("resources-windows").join("binaries");
+  let target_path = runtime_dir.join(wireguard_dll_name());
 
   if let Some(parent) = target_path.parent() {
     let _ = fs::create_dir_all(parent);
   }
 
-  let temp_dir = bundled_dir.join(".tmp-wireguard-nt");
+  let temp_base = std::env::temp_dir().join("goatstare-wireguard-nt");
+  let temp_dir = temp_base.join("extract");
   let _ = fs::remove_dir_all(&temp_dir);
+  let _ = fs::create_dir_all(&temp_base);
+  let zip_path = temp_base.join("wireguard-nt-1.1.zip");
 
   let powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
   let script = format!(
     r#"$ErrorActionPreference = "Stop"; $zip = '{}'; $dest = '{}'; $out = '{}'; Invoke-WebRequest -Uri 'https://download.wireguard.com/wireguard-nt/wireguard-nt-1.1.zip' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dest -Force; $dll = if (Test-Path "$dest\bin\amd64\wireguard.dll") {{ "$dest\bin\amd64\wireguard.dll" }} elseif (Test-Path "$dest\bin\arm64\wireguard.dll") {{ "$dest\bin\arm64\wireguard.dll" }} elseif (Test-Path "$dest\bin\x86\wireguard.dll") {{ "$dest\bin\x86\wireguard.dll" }} else {{ $null }}; if ($dll) {{ Copy-Item $dll -Destination $out -Force }}"#,
-    bundled_dir.join("wireguard-nt-1.1.zip").display(),
+    zip_path.display(),
     temp_dir.display(),
     target_path.display()
   );
@@ -1082,9 +1209,14 @@ fn ensure_wireguard_dll_available() -> Result<PathBuf, WireGuardError> {
     }
   }
 
-  let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap_or_else(|| Path::new("."));
-  let bundled_dir = repo_root.join("src-tauri").join("resources-windows").join("binaries");
-  let target_path = bundled_dir.join(wireguard_dll_name());
+  let cwd = std::env::current_dir().map_err(|source| WireGuardError::Io {
+    action: "resolve_current_dir",
+    detail: "Could not resolve process current directory while searching for WireGuard runtime DLL."
+      .to_string(),
+    source,
+  })?;
+  let runtime_dir = cwd.join("resources-windows").join("binaries");
+  let target_path = runtime_dir.join(wireguard_dll_name());
 
   if target_path.exists() {
     return Ok(target_path);
@@ -1092,6 +1224,51 @@ fn ensure_wireguard_dll_available() -> Result<PathBuf, WireGuardError> {
 
   bootstrap_wireguard_dll_from_download()
 }
+
+fn ensure_defguard_runtime_dll_path() -> Result<PathBuf, WireGuardError> {
+  let source_dll = ensure_wireguard_dll_available()?;
+  let cwd = std::env::current_dir().map_err(|source| WireGuardError::Io {
+    action: "resolve_current_dir",
+    detail: "Could not resolve process current directory while preparing WireGuard runtime DLL."
+      .to_string(),
+    source,
+  })?;
+
+  let defguard_path = cwd
+    .join("resources-windows")
+    .join("binaries")
+    .join(wireguard_dll_name());
+
+  if defguard_path.exists() {
+    return Ok(defguard_path);
+  }
+
+  if let Some(parent) = defguard_path.parent() {
+    fs::create_dir_all(parent).map_err(|source| WireGuardError::Io {
+      action: "create_runtime_dir",
+      detail: format!(
+        "Could not create DefGuard runtime directory at '{}'.",
+        parent.display()
+      ),
+      source,
+    })?;
+  }
+
+  if source_dll != defguard_path {
+    fs::copy(&source_dll, &defguard_path).map_err(|source| WireGuardError::Io {
+      action: "copy_runtime_dll",
+      detail: format!(
+        "Could not copy WireGuard runtime DLL from '{}' to '{}'.",
+        source_dll.display(),
+        defguard_path.display()
+      ),
+      source,
+    })?;
+  }
+
+  Ok(defguard_path)
+}
+
 fn load_wireguard_nt_runtime() -> Result<WireguardNtRuntime, WireGuardError> {
   let dll_path = ensure_wireguard_dll_available()?;
   // Loading a signed system WireGuard runtime DLL from application resources.

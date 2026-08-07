@@ -2,7 +2,7 @@ import { createTauriTest } from "../../../node_modules/@srsholmes/tauri-playwrig
 
 export const { test, expect } = createTauriTest({
   devUrl: "http://localhost:3000",
-  tauriCommand: "cmd /c npm run tauri:dev:e2e",
+  tauriCommand: "cmd /c scripts\\tauri-dev-e2e-wrapper.cmd",
   tauriCwd: process.cwd(),
   startTimeout: 180,
 });
