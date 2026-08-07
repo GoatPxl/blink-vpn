@@ -1253,6 +1253,41 @@ impl Orchestrator {
     Ok(())
   }
 
+  pub fn force_disconnect_node_service(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    node_id: &str,
+  ) -> Result<(), OrchestratorError> {
+    let node = db
+      .get_vpn_node(node_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading vpn node before force-disconnect flow.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: node_id.to_string(),
+        detail: "Force disconnect requested for a vpn node that does not exist.".to_string(),
+      })?;
+
+    let tunnels = db
+      .list_tunnels_for_node(node_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed listing tunnels before force-disconnect flow.".to_string(),
+        source,
+      })?;
+
+    for tunnel in tunnels {
+      let _ = wireguard.deactivate_tunnel(&tunnel.name);
+      let _ = wireguard.unregister_tunnel(&tunnel.name);
+      let _ = db.update_tunnel_stats_snapshot(&tunnel.id, None, None, None);
+      let _ = db.update_tunnel_status(&tunnel.id, TunnelStatus::Disconnected, Some("Best-effort force disconnect requested from dashboard."));
+    }
+
+    let _ = db.transition_vpn_node_status(&node.id, NodeLifecycleStatus::Ready, Some("Best-effort force disconnect requested from dashboard."));
+    Ok(())
+  }
+
   pub fn read_client_tunnel_status(
     &self,
     wireguard: &WireGuardManager,

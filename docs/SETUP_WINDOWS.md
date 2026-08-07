@@ -83,6 +83,22 @@ The current Phase 1 app keeps runtime configuration intentionally small:
 - Diagnostics exports are written under the app data diagnostics folder.
 - Optional dev Docker mode is controlled by `GOATSTARE_DEV_DOCKER` (backend) and `NEXT_PUBLIC_DEV_DOCKER` (frontend).
 
+### WireGuard Runtime Mode
+
+- `GOATSTARE_WG_RUNTIME` is retained for operational compatibility but is no longer required for normal operation.
+- Current behavior: DefGuard/wireguard-nt runtime path is the default for tunnel import/connect/disconnect/unregister flows.
+- Recommended value if explicitly set: `GOATSTARE_WG_RUNTIME=defguard`.
+- Legacy values are treated as compatibility hints and should not be relied on for branching behavior in this phase.
+
+### Required WireGuard DLL Path
+
+The runtime requires the WireGuard-NT DLL in app resources relative to the binary.
+
+- x64 path: `resources-windows/binaries/wireguard-amd64.dll`
+- ARM64 path: `resources-windows/binaries/wireguard-arm64.dll`
+
+If the DLL is missing, tunnel runtime operations will fail during adapter initialization.
+
 ### Known config points
 
 - `src-tauri/tauri.conf.json` currently bundles to NSIS.

@@ -18,6 +18,19 @@
 - Use force cleanup after interrupted provisioning, app restart mid-provision, or stale local WireGuard artifacts.
 - In Docker dev mode, confirm Docker readiness before create/destroy operations.
 
+### Runtime Mode Notes
+
+- DefGuard/wireguard-nt runtime is the default execution path for tunnel lifecycle operations.
+- `GOATSTARE_WG_RUNTIME` is a compatibility environment knob and should be set to `defguard` only if explicitly required by local scripts.
+- Do not rely on runtime mode switching for incident response in Phase 1; use normal recovery actions instead.
+
+### WireGuard DLL Requirement
+
+- Ensure the WireGuard DLL resource exists next to packaged resources:
+   - `resources-windows/binaries/wireguard-amd64.dll` on x64 hosts
+   - `resources-windows/binaries/wireguard-arm64.dll` on ARM64 hosts
+- Missing DLL manifests as runtime adapter initialization failures during import/connect.
+
 ## Troubleshooting Flow
 
 1. Identify the error class shown in the UI.
@@ -37,6 +50,7 @@
 | Provider node creation timed out | Wait briefly, then reconcile or force cleanup | Local node state matches remote reality |
 | App restart mid-provision | Force cleanup the partially created node | Local tunnels removed, remote delete attempted |
 | WireGuard service missing | Repair/reinstall WireGuard for Windows | Local tunnel operations become available |
+| Runtime adapter init fails with DLL/load errors | Verify required DLL exists under resources-windows/binaries for host architecture | Tunnel lifecycle operations can initialize adapter runtime |
 | Tunnel status stale | Refresh health | Status snapshot updates from runtime |
 | Node stuck in error state | Force cleanup, then retry provisioning if needed | Partial state is removed |
 | Docker readiness fails in dev mode | Start Docker Desktop and re-run readiness check | Dev adapter operations become available |

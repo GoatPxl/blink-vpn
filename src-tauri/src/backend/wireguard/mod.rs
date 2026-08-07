@@ -1,15 +1,20 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::Write;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use defguard_wireguard_rs::key::Key as WireguardKey;
+use defguard_wireguard_rs::net::IpAddrMask as WireguardIpAddrMask;
+use defguard_wireguard_rs::peer::Peer as WireguardPeer;
+use defguard_wireguard_rs::{InterfaceConfiguration as WireguardInterfaceConfiguration, Kernel as WireguardKernel, WGApi as WireguardApi, WireguardInterfaceApi};
 use serde::Serialize;
 use thiserror::Error;
-use uuid::Uuid;
+use wireguard_nt::{Adapter as WireguardNtAdapter, Error as WireguardNtError, Wireguard as WireguardNtRuntime};
 
 use crate::backend::logging;
 
@@ -276,40 +281,10 @@ impl WireGuardManager {
 
   pub fn generate_client_keypair(&self) -> Result<ClientKeyPair, WireGuardError> {
     self.ensure_installed()?;
-    let wg_program = self.resolve_wg_program()?;
-    self.record_command(&format!("{} genkey", wg_program));
+    self.record_command("defguard_wireguard_rs::key::Key::generate");
 
-    let private_out = self
-      .runner
-      .run(&wg_program, &["genkey"], None)
-      .map_err(|source| WireGuardError::Command {
-        command: "wg genkey".to_string(),
-        detail: "WireGuard key generation failed locally.".to_string(),
-        source,
-      })?;
-    let private_key = private_out.stdout.trim().to_string();
-
-    if private_key.is_empty() {
-      return Err(WireGuardError::InvalidOutput {
-        detail: "WireGuard generated an empty private key output.".to_string(),
-      });
-    }
-
-    let public_out = self
-      .runner
-      .run(&wg_program, &["pubkey"], Some(&private_key))
-      .map_err(|source| WireGuardError::Command {
-        command: "wg pubkey".to_string(),
-        detail: "WireGuard public key derivation failed locally.".to_string(),
-        source,
-      })?;
-    let public_key = public_out.stdout.trim().to_string();
-
-    if public_key.is_empty() {
-      return Err(WireGuardError::InvalidOutput {
-        detail: "WireGuard generated an empty public key output.".to_string(),
-      });
-    }
+    let private_key = WireguardKey::generate().to_string();
+    let public_key = self.derive_public_key(&private_key)?;
 
     Ok(ClientKeyPair {
       private_key,
@@ -318,23 +293,17 @@ impl WireGuardManager {
   }
 
   pub fn derive_public_key(&self, private_key: &str) -> Result<String, WireGuardError> {
-    self.ensure_installed()?;
-    let wg_program = self.resolve_wg_program()?;
-    self.record_command(&format!("{} pubkey", wg_program));
+    self.record_command("defguard_wireguard_rs::key::Key::public_key");
 
-    let public_out = self
-      .runner
-      .run(&wg_program, &["pubkey"], Some(private_key))
-      .map_err(|source| WireGuardError::Command {
-        command: "wg pubkey".to_string(),
-        detail: "WireGuard public key derivation failed locally.".to_string(),
-        source,
-      })?;
+    let private_key = WireguardKey::try_from(private_key).map_err(|_| WireGuardError::InvalidOutput {
+      detail: "WireGuard private key is invalid; expected base64 or hexadecimal 32-byte key material."
+        .to_string(),
+    })?;
 
-    let public_key = public_out.stdout.trim().to_string();
-    if public_key.is_empty() {
+    let public_key = private_key.public_key().to_string();
+    if public_key.trim().is_empty() {
       return Err(WireGuardError::InvalidOutput {
-        detail: "WireGuard generated an empty public key output.".to_string(),
+        detail: "WireGuard key derivation produced an empty public key output.".to_string(),
       });
     }
 
@@ -342,119 +311,11 @@ impl WireGuardManager {
   }
 
   pub fn import_tunnel(&self, tunnel_name: &str, config_text: &str) -> Result<(), WireGuardError> {
-    self.ensure_installed()?;
-    let wireguard_program = self.resolve_wireguard_program()?;
-    validate_tunnel_name(tunnel_name)?;
-
-    match self.unregister_tunnel(tunnel_name) {
-      Ok(_) => {}
-      Err(WireGuardError::TunnelNotFound { .. }) => {}
-      Err(error) => return Err(error),
-    }
-
-    let mut temp_dir = std::env::temp_dir();
-    temp_dir.push(format!("goatstare-wireguard-{}", Uuid::new_v4()));
-
-    std::fs::create_dir_all(&temp_dir).map_err(|source| WireGuardError::Io {
-      action: "create_tunnel_config_temp_dir",
-      detail: "Could not create temporary directory for WireGuard tunnel import.".to_string(),
-      source,
-    })?;
-
-    let mut file_path = temp_dir.clone();
-    file_path.push(format!("{tunnel_name}.conf"));
-    let path_arg = file_path.as_os_str().to_string_lossy().to_string();
-
-    self.record_last_import_snapshot(tunnel_name, &path_arg, config_text);
-    self.record_command(&format!(
-      "wireguard /installtunnelservice {}",
-      path_arg
-    ));
-
-    let mut file = std::fs::File::create(&file_path).map_err(|source| WireGuardError::Io {
-      action: "create_tunnel_config_temp_file",
-      detail: "Could not create temporary WireGuard config file for import.".to_string(),
-      source,
-    })?;
-
-    file
-      .write_all(config_text.as_bytes())
-      .map_err(|source| WireGuardError::Io {
-        action: "write_tunnel_config_temp_file",
-        detail: "Could not write WireGuard config file for import.".to_string(),
-        source,
-      })?;
-
-    let install_args = ["/installtunnelservice", path_arg.as_str()];
-    let import_result = match self.runner.run(&wireguard_program, &install_args, None) {
-      Ok(output) => Ok(output),
-      Err(source) => {
-        let should_retry_elevated = matches!(
-          &source,
-          CommandExecError::NonZeroExit { detail, .. }
-            if is_windows_access_denied_detail(detail)
-        );
-
-        if should_retry_elevated {
-          self.record_command(&format!(
-            "wireguard /installtunnelservice {} (retry via UAC)",
-            path_arg
-          ));
-          run_wireguard_via_uac(&wireguard_program, &install_args)
-        } else {
-          Err(source)
-        }
-      }
-    }
-    .map_err(|source| WireGuardError::Command {
-      command: "wireguard /installtunnelservice <config>".to_string(),
-      detail:
-        "Could not register tunnel service in WireGuard for Windows. If prompted, approve administrator elevation for tunnel import."
-          .to_string(),
-      source,
-    });
-
-    let _ = std::fs::remove_file(&file_path);
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    import_result.map(|_| ())
+    self.import_tunnel_defguard(tunnel_name, config_text)
   }
 
   pub fn activate_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.ensure_installed()?;
-    validate_tunnel_name(tunnel_name)?;
-
-    match self.probe_tunnel_service_state(tunnel_name)? {
-      TunnelActivationProbeState::Running | TunnelActivationProbeState::Starting => {
-        return self.wait_for_running_tunnel(tunnel_name)
-      }
-      TunnelActivationProbeState::Stopped | TunnelActivationProbeState::Unknown => {}
-    }
-
-    let service_name = wireguard_service_name(tunnel_name);
-  self.record_command(&format!("sc start {}", service_name));
-    let start_result = run_sc_with_uac_fallback(&*self.runner, "start", &service_name);
-
-    match start_result {
-      Ok(_) => self.wait_for_running_tunnel(tunnel_name),
-      Err(WireGuardError::Command {
-        source: CommandExecError::NonZeroExit {
-          code: Some(1056),
-          ..
-        },
-        ..
-      }) => self.wait_for_running_tunnel(tunnel_name),
-      Err(WireGuardError::Command {
-        source: CommandExecError::NonZeroExit {
-          code: Some(1053),
-          ..
-        },
-        ..
-      }) => self.wait_for_running_tunnel(tunnel_name),
-      Err(start_error) => {
-        Err(start_error)
-      }
-    }
+    self.activate_tunnel_defguard(tunnel_name)
   }
 
   fn wait_for_running_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
@@ -529,78 +390,11 @@ impl WireGuardManager {
   
 
   pub fn deactivate_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.ensure_installed()?;
-    validate_tunnel_name(tunnel_name)?;
-
-    let service_name = wireguard_service_name(tunnel_name);
-    self.record_command(&format!("sc stop {}", service_name));
-    let stop_result = run_sc_with_uac_fallback(&*self.runner, "stop", &service_name);
-
-    match stop_result {
-      Ok(_) => Ok(()),
-      Err(WireGuardError::Command {
-        source: CommandExecError::NonZeroExit {
-          code: Some(1062),
-          ..
-        },
-        ..
-      }) => Ok(()),
-      Err(WireGuardError::TunnelNotFound { .. }) => Ok(()),
-      Err(error) => Err(error),
-    }
+    self.deactivate_tunnel_defguard(tunnel_name)
   }
 
   pub fn unregister_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.ensure_installed()?;
-    let wireguard_program = self.resolve_wireguard_program()?;
-    validate_tunnel_name(tunnel_name)?;
-
-    if !self.tunnel_service_exists(tunnel_name)? {
-      return Ok(());
-    }
-
-    let uninstall_args = ["/uninstalltunnelservice", tunnel_name];
-    self.record_command(&format!("{} /uninstalltunnelservice {}", wireguard_program, tunnel_name));
-    let result = match self.runner.run(&wireguard_program, &uninstall_args, None) {
-      Ok(output) => Ok(output),
-      Err(source) => {
-        let should_retry_elevated = matches!(
-          &source,
-          CommandExecError::NonZeroExit { detail, .. }
-            if is_windows_access_denied_detail(detail)
-        );
-
-        if should_retry_elevated {
-          self.record_command(&format!(
-            "{} /uninstalltunnelservice {} (retry via UAC)",
-            wireguard_program, tunnel_name
-          ));
-          run_wireguard_via_uac(&wireguard_program, &uninstall_args)
-        } else {
-          Err(source)
-        }
-      }
-    }
-    .map_err(|source| WireGuardError::Command {
-      command: format!("wireguard /uninstalltunnelservice {tunnel_name}"),
-      detail:
-        "Could not unregister WireGuard tunnel service. If prompted, approve administrator elevation for cleanup."
-          .to_string(),
-      source,
-    });
-
-    match result {
-      Ok(_) => Ok(()),
-      Err(WireGuardError::Command {
-        source: CommandExecError::NonZeroExit { code: Some(1060), .. },
-        ..
-      }) => Ok(()),
-      Err(WireGuardError::Command {
-        source: CommandExecError::NonZeroExit { detail, .. },
-        ..
-      }) if is_windows_service_missing_detail(&detail) => Ok(()),
-      Err(error) => Err(error),
-    }
+    self.unregister_tunnel_defguard(tunnel_name)
   }
 
   fn tunnel_service_exists(&self, tunnel_name: &str) -> Result<bool, WireGuardError> {
@@ -679,6 +473,145 @@ impl WireGuardManager {
     params: &ClientConfigParams,
   ) -> Result<String, WireGuardError> {
     build_client_config(params)
+  }
+
+  fn import_tunnel_defguard(&self, tunnel_name: &str, config_text: &str) -> Result<(), WireGuardError> {
+    self.ensure_installed()?;
+    validate_tunnel_name(tunnel_name)?;
+
+    let parsed = parse_interface_config_from_wg_text(tunnel_name, config_text)?;
+    self.record_last_import_snapshot(
+      tunnel_name,
+      "runtime://defguard_wireguard_rs.configure_interface",
+      config_text,
+    );
+    self.record_command("defguard_wireguard_rs::WGApi::create_interface");
+
+    let mut api = WireguardApi::<WireguardKernel>::new(tunnel_name).map_err(map_defguard_error)?;
+    api.create_interface().map_err(map_defguard_error)?;
+
+    self.record_command("defguard_wireguard_rs::WGApi::configure_interface");
+    api.configure_interface(&parsed.interface)
+      .map_err(map_defguard_error)?;
+
+    if !parsed.dns_servers.is_empty() {
+      self.record_command("defguard_wireguard_rs::WGApi::configure_dns");
+      api.configure_dns(&parsed.dns_servers, &[])
+        .map_err(map_defguard_error)?;
+    }
+
+    Ok(())
+  }
+
+  fn activate_tunnel_defguard(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
+    self.ensure_installed()?;
+    validate_tunnel_name(tunnel_name)?;
+
+    let adapter = open_existing_adapter(tunnel_name)?;
+    self.record_command(&format!("wireguard_nt::Adapter::up {}", tunnel_name));
+    adapter.up().map_err(map_wireguard_nt_error)?;
+
+    for _ in 0..ACTIVATE_POLL_ATTEMPTS {
+      if adapter.is_up().map_err(map_wireguard_nt_error)? {
+        return Ok(());
+      }
+      thread::sleep(ACTIVATE_POLL_INTERVAL);
+    }
+
+    Err(WireGuardError::Runtime {
+      detail: format!(
+        "WireGuard adapter '{}' did not report Up after activation.",
+        tunnel_name
+      ),
+    })
+  }
+
+  fn deactivate_tunnel_defguard(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
+    self.ensure_installed()?;
+    validate_tunnel_name(tunnel_name)?;
+
+    let adapter = match open_existing_adapter(tunnel_name) {
+      Ok(adapter) => adapter,
+      Err(WireGuardError::TunnelNotFound { .. }) => return Ok(()),
+      Err(error) => return Err(error),
+    };
+
+    self.record_command(&format!("wireguard_nt::Adapter::down {}", tunnel_name));
+    adapter.down().map_err(map_wireguard_nt_error)?;
+    Ok(())
+  }
+
+  fn unregister_tunnel_defguard(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
+    self.ensure_installed()?;
+    validate_tunnel_name(tunnel_name)?;
+
+    // wireguard-nt exposes up/down and close but no single-adapter deletion API.
+    // Keep parity with previous uninstall behavior by applying a legacy cleanup attempt
+    // for service-managed tunnels after bringing the adapter down.
+    self.deactivate_tunnel_defguard(tunnel_name)?;
+    self.unregister_legacy_tunnel_service(tunnel_name)
+  }
+
+  fn unregister_legacy_tunnel_service(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
+    let wireguard_program = self.resolve_wireguard_program()?;
+    self.unregister_legacy_tunnel_service_with_program(tunnel_name, &wireguard_program)
+  }
+
+  fn unregister_legacy_tunnel_service_with_program(
+    &self,
+    tunnel_name: &str,
+    wireguard_program: &str,
+  ) -> Result<(), WireGuardError> {
+
+    if !self.tunnel_service_exists(tunnel_name)? {
+      return Ok(());
+    }
+
+    let uninstall_args = ["/uninstalltunnelservice", tunnel_name];
+    self.record_command(&format!(
+      "{} /uninstalltunnelservice {}",
+      wireguard_program, tunnel_name
+    ));
+    let result = match self.runner.run(&wireguard_program, &uninstall_args, None) {
+      Ok(output) => Ok(output),
+      Err(source) => {
+        let should_retry_elevated = matches!(
+          &source,
+          CommandExecError::NonZeroExit { detail, .. }
+            if is_windows_access_denied_detail(detail)
+        );
+
+        if should_retry_elevated {
+          self.record_command(&format!(
+            "{} /uninstalltunnelservice {} (retry via UAC)",
+            wireguard_program, tunnel_name
+          ));
+          run_wireguard_via_uac(&wireguard_program, &uninstall_args)
+        } else {
+          Err(source)
+        }
+      }
+    }
+    .map_err(|source| WireGuardError::Command {
+      command: format!("wireguard /uninstalltunnelservice {tunnel_name}"),
+      detail:
+        "Could not unregister WireGuard tunnel service. If prompted, approve administrator elevation for cleanup."
+          .to_string(),
+      source,
+    });
+
+    match result {
+      Ok(_) => Ok(()),
+      Err(WireGuardError::Command {
+        source: CommandExecError::NonZeroExit { code: Some(1060), .. },
+        ..
+      }) => Ok(()),
+      Err(WireGuardError::Command {
+        source: CommandExecError::NonZeroExit { detail, .. },
+        ..
+      }) if is_windows_service_missing_detail(&detail) => Ok(()),
+      Err(error) => Err(error),
+    }
   }
 }
 
@@ -924,6 +857,182 @@ pub enum WireGuardError {
     #[source]
     source: std::io::Error,
   },
+  #[error("WireGuard runtime API failed: {detail}")]
+  Runtime { detail: String },
+}
+
+#[derive(Debug, Clone)]
+struct ParsedInterfaceConfig {
+  interface: WireguardInterfaceConfiguration,
+  dns_servers: Vec<IpAddr>,
+}
+
+fn parse_interface_config_from_wg_text(
+  tunnel_name: &str,
+  config_text: &str,
+) -> Result<ParsedInterfaceConfig, WireGuardError> {
+  let mut section = String::new();
+  let mut private_key: Option<String> = None;
+  let mut addresses: Vec<WireguardIpAddrMask> = Vec::new();
+  let mut dns_servers: Vec<IpAddr> = Vec::new();
+  let mut peer_public_key: Option<String> = None;
+  let mut peer_endpoint: Option<SocketAddr> = None;
+  let mut peer_allowed_ips: Vec<WireguardIpAddrMask> = Vec::new();
+  let mut keepalive: Option<u16> = None;
+
+  for raw_line in config_text.lines() {
+    let line = raw_line.trim();
+    if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+      continue;
+    }
+
+    if line.starts_with('[') && line.ends_with(']') {
+      section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+      continue;
+    }
+
+    let Some((key_raw, value_raw)) = line.split_once('=') else {
+      continue;
+    };
+    let key = key_raw.trim().to_ascii_lowercase();
+    let value = value_raw.trim();
+
+    match (section.as_str(), key.as_str()) {
+      ("interface", "privatekey") => private_key = Some(value.to_string()),
+      ("interface", "address") => {
+        for entry in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+          let ip_mask = entry
+            .parse::<WireguardIpAddrMask>()
+            .map_err(|_| WireGuardError::InvalidOutput {
+              detail: format!("Could not parse interface address '{}'.", entry),
+            })?;
+          addresses.push(ip_mask);
+        }
+      }
+      ("interface", "dns") => {
+        for entry in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+          let ip = entry.parse::<IpAddr>().map_err(|_| WireGuardError::InvalidOutput {
+            detail: format!("Could not parse DNS address '{}'.", entry),
+          })?;
+          dns_servers.push(ip);
+        }
+      }
+      ("peer", "publickey") => peer_public_key = Some(value.to_string()),
+      ("peer", "endpoint") => {
+        let endpoint = value.parse::<SocketAddr>().map_err(|_| WireGuardError::InvalidOutput {
+          detail: format!("Could not parse peer endpoint '{}'.", value),
+        })?;
+        peer_endpoint = Some(endpoint);
+      }
+      ("peer", "allowedips") => {
+        for entry in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+          let ip_mask = entry
+            .parse::<WireguardIpAddrMask>()
+            .map_err(|_| WireGuardError::InvalidOutput {
+              detail: format!("Could not parse peer allowed IP '{}'.", entry),
+            })?;
+          peer_allowed_ips.push(ip_mask);
+        }
+      }
+      ("peer", "persistentkeepalive") => {
+        let seconds = value.parse::<u16>().map_err(|_| WireGuardError::InvalidOutput {
+          detail: format!("Could not parse persistent keepalive '{}'.", value),
+        })?;
+        keepalive = Some(seconds);
+      }
+      _ => {}
+    }
+  }
+
+  let private_key = private_key.ok_or_else(|| WireGuardError::InvalidOutput {
+    detail: "Tunnel config is missing [Interface] PrivateKey.".to_string(),
+  })?;
+  let public_key = peer_public_key.ok_or_else(|| WireGuardError::InvalidOutput {
+    detail: "Tunnel config is missing [Peer] PublicKey.".to_string(),
+  })?;
+  let endpoint = peer_endpoint.ok_or_else(|| WireGuardError::InvalidOutput {
+    detail: "Tunnel config is missing [Peer] Endpoint.".to_string(),
+  })?;
+
+  let mut peer = WireguardPeer::new(
+    WireguardKey::try_from(public_key.as_str()).map_err(|_| WireGuardError::InvalidOutput {
+      detail: "Tunnel config contains an invalid peer public key value.".to_string(),
+    })?,
+  );
+  peer.endpoint = Some(endpoint);
+  peer.allowed_ips = peer_allowed_ips;
+  peer.persistent_keepalive_interval = keepalive;
+
+  let interface = WireguardInterfaceConfiguration {
+    name: tunnel_name.to_string(),
+    prvkey: private_key,
+    addresses,
+    port: 0,
+    peers: vec![peer],
+    mtu: None,
+    fwmark: None,
+  };
+
+  Ok(ParsedInterfaceConfig {
+    interface,
+    dns_servers,
+  })
+}
+
+fn wireguard_dll_path() -> &'static str {
+  #[cfg(target_arch = "aarch64")]
+  {
+    "resources-windows/binaries/wireguard-arm64.dll"
+  }
+  #[cfg(target_arch = "x86_64")]
+  {
+    "resources-windows/binaries/wireguard-amd64.dll"
+  }
+}
+
+fn load_wireguard_nt_runtime() -> Result<WireguardNtRuntime, WireGuardError> {
+  // Loading a signed system WireGuard runtime DLL from application resources.
+  unsafe { wireguard_nt::load_from_path(wireguard_dll_path()) }.map_err(|source| {
+    WireGuardError::Runtime {
+      detail: format!(
+        "Could not load WireGuard-NT runtime DLL at '{}': {}",
+        wireguard_dll_path(), source
+      ),
+    }
+  })
+}
+
+fn open_existing_adapter(tunnel_name: &str) -> Result<WireguardNtAdapter, WireGuardError> {
+  let runtime = load_wireguard_nt_runtime()?;
+  WireguardNtAdapter::open(&runtime, tunnel_name).map_err(|source| match source {
+    WireguardNtError::Driver(io_error) if is_adapter_not_found_error(&io_error) => {
+      WireGuardError::TunnelNotFound {
+        tunnel_name: tunnel_name.to_string(),
+        detail: "WireGuard adapter is not present locally.".to_string(),
+      }
+    }
+    other => map_wireguard_nt_error(other),
+  })
+}
+
+fn map_defguard_error(source: defguard_wireguard_rs::error::WireguardInterfaceError) -> WireGuardError {
+  WireGuardError::Runtime {
+    detail: format!("defguard_wireguard_rs runtime error: {source}"),
+  }
+}
+
+fn map_wireguard_nt_error(source: WireguardNtError) -> WireGuardError {
+  WireGuardError::Runtime {
+    detail: format!("wireguard-nt runtime error: {source}"),
+  }
+}
+
+fn is_adapter_not_found_error(io_error: &std::io::Error) -> bool {
+  io_error.raw_os_error() == Some(2)
+    || io_error
+      .to_string()
+      .to_ascii_lowercase()
+      .contains("cannot find")
 }
 
 pub fn build_client_config(params: &ClientConfigParams) -> Result<String, WireGuardError> {
@@ -1368,10 +1477,12 @@ mod tests {
   use super::{
     ClientConfigParams, CommandExecError, CommandOutput, CommandRunner,
     DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS, TunnelServiceState,
-    WireGuardError, WireGuardManager, build_client_config, is_windows_access_denied_detail,
+    WireGuardError, WireGuardManager, build_client_config, is_adapter_not_found_error,
+    is_windows_access_denied_detail,
     is_windows_service_missing_detail, parse_sc_state,
-    parse_wg_dump_metrics, parse_wg_version_output,
+    parse_interface_config_from_wg_text, parse_wg_dump_metrics, parse_wg_version_output,
   };
+  use std::io;
   use std::sync::{Arc, Mutex};
 
   #[derive(Clone, Default)]
@@ -2044,5 +2155,128 @@ mod tests {
     let result = wireguard.activate_tunnel("Primary-Node-wg");
 
     assert!(result.is_ok());
+  }
+
+  #[test]
+  fn derive_public_key_rejects_invalid_private_key_input() {
+    let wireguard = WireGuardManager::new();
+    let result = wireguard.derive_public_key("not-a-key");
+
+    assert!(matches!(result, Err(WireGuardError::InvalidOutput { .. })));
+  }
+
+  #[test]
+  fn generate_client_keypair_returns_non_empty_keys() {
+    let runner = MockImportRunner::with_service_exists(false);
+    let wireguard = WireGuardManager::with_runner(Arc::new(runner));
+
+    let keypair = wireguard
+      .generate_client_keypair()
+      .expect("key generation should succeed when wireguard runtime is present");
+
+    assert!(!keypair.private_key.trim().is_empty());
+    assert!(!keypair.public_key.trim().is_empty());
+  }
+
+  #[test]
+  fn runtime_parser_extracts_interface_and_peer_fields() {
+    let manager = WireGuardManager::with_runner(Arc::new(MockImportRunner::with_service_exists(false)));
+    let keypair = manager.generate_client_keypair().expect("key generation should succeed");
+    let peer_public = manager
+      .derive_public_key(&keypair.private_key)
+      .expect("public key derivation should succeed");
+    let config = format!(
+      "[Interface]\nPrivateKey = {}\nAddress = 10.66.0.2/32, 2001:db8::2/128\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = {}\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 203.0.113.10:51820\nPersistentKeepalive = 25\n",
+      keypair.private_key, peer_public
+    );
+    let parsed = parse_interface_config_from_wg_text(
+      "wg-node-1",
+      &config,
+    )
+    .expect("parser should succeed");
+
+    assert_eq!(parsed.interface.name, "wg-node-1");
+    assert_eq!(parsed.interface.addresses.len(), 2);
+    assert_eq!(parsed.interface.peers.len(), 1);
+    assert_eq!(parsed.interface.peers[0].allowed_ips.len(), 2);
+    assert_eq!(parsed.interface.peers[0].persistent_keepalive_interval, Some(25));
+    assert_eq!(parsed.dns_servers.len(), 1);
+  }
+
+  #[test]
+  fn runtime_parser_rejects_missing_peer_endpoint() {
+    let manager = WireGuardManager::with_runner(Arc::new(MockImportRunner::with_service_exists(false)));
+    let keypair = manager.generate_client_keypair().expect("key generation should succeed");
+    let peer_public = manager
+      .derive_public_key(&keypair.private_key)
+      .expect("public key derivation should succeed");
+    let config = format!(
+      "[Interface]\nPrivateKey = {}\nAddress = 10.66.0.2/32\n\n[Peer]\nPublicKey = {}\nAllowedIPs = 0.0.0.0/0\n",
+      keypair.private_key, peer_public
+    );
+    let result = parse_interface_config_from_wg_text(
+      "wg-node-1",
+      &config,
+    );
+
+    assert!(matches!(result, Err(WireGuardError::InvalidOutput { .. })));
+  }
+
+  #[test]
+  fn runtime_parser_rejects_invalid_dns_value() {
+    let manager = WireGuardManager::with_runner(Arc::new(MockImportRunner::with_service_exists(false)));
+    let keypair = manager.generate_client_keypair().expect("key generation should succeed");
+    let peer_public = manager
+      .derive_public_key(&keypair.private_key)
+      .expect("public key derivation should succeed");
+    let config = format!(
+      "[Interface]\nPrivateKey = {}\nAddress = 10.66.0.2/32\nDNS = not-an-ip\n\n[Peer]\nPublicKey = {}\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:51820\n",
+      keypair.private_key, peer_public
+    );
+    let result = parse_interface_config_from_wg_text(
+      "wg-node-1",
+      &config,
+    );
+
+    assert!(matches!(result, Err(WireGuardError::InvalidOutput { .. })));
+  }
+
+  #[test]
+  fn legacy_unregister_cleanup_skips_when_service_missing() {
+    let runner = MockImportRunner::with_service_exists(false);
+    let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
+
+    let result = wireguard.unregister_legacy_tunnel_service_with_program("wg-node-1", "wireguard");
+    assert!(result.is_ok());
+
+    let calls = runner.calls();
+    assert!(!calls.iter().any(|(_, args)| {
+      args.first().is_some_and(|arg| arg == "/uninstalltunnelservice")
+    }));
+  }
+
+  #[test]
+  fn legacy_unregister_cleanup_uninstalls_when_service_exists() {
+    let runner = MockImportRunner::with_service_exists(true);
+    let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
+
+    let result = wireguard.unregister_legacy_tunnel_service_with_program("wg-node-1", "wireguard");
+    assert!(result.is_ok());
+
+    let calls = runner.calls();
+    assert!(calls.iter().any(|(_, args)| {
+      args == &["/uninstalltunnelservice".to_string(), "wg-node-1".to_string()]
+    }));
+  }
+
+  #[test]
+  fn adapter_not_found_detector_matches_expected_io_patterns() {
+    let explicit_not_found = io::Error::new(io::ErrorKind::NotFound, "The system cannot find the file specified.");
+    let text_hint = io::Error::other("cannot find requested adapter");
+    let unrelated = io::Error::other("permission denied");
+
+    assert!(is_adapter_not_found_error(&explicit_not_found));
+    assert!(is_adapter_not_found_error(&text_hint));
+    assert!(!is_adapter_not_found_error(&unrelated));
   }
 }
