@@ -109,6 +109,7 @@ pub fn run() {
       commands::system::deactivate_client_tunnel,
       commands::system::connect_tunnel,
       commands::system::disconnect_tunnel,
+      commands::system::force_disconnect_node_service,
       commands::system::get_health_panel_data,
       commands::system::get_diagnostics_bundle,
       commands::system::export_diagnostics_bundle,

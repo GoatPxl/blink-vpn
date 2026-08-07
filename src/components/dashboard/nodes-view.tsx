@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { Button, Card, Field, MetricCard, PageChrome, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type RecoveryState, type TunnelRecord, type VpnNodeRecord, type NodeSort, type PlanDisplayModel, type HealthPanelData } from "./shared";
 import { formatCreatedTime, formatCurrency, formatMemory, formatRegionLabel, getNodePricingDisplay, statusBadge } from "./shared";
@@ -39,6 +39,7 @@ export function NodesView({
   onConnectNode,
   onConnectTunnel,
   onDisconnectTunnel,
+  onForceDisconnectNodeService,
   onForceCleanupSelectedNode,
   nodeFeedback,
   nodeRegions,
@@ -80,6 +81,7 @@ export function NodesView({
   onConnectNode: (node: VpnNodeRecord) => Promise<void>;
   onConnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onDisconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
+  onForceDisconnectNodeService: (node: VpnNodeRecord) => Promise<void>;
   onForceCleanupSelectedNode: () => Promise<void>;
   nodeFeedback: string;
   nodeRegions: string[];
@@ -92,6 +94,7 @@ export function NodesView({
     () => new Map(providers.map((provider) => [provider.id, provider.name])),
     [providers],
   );
+  const [optimisticConnectedByNodeId, setOptimisticConnectedByNodeId] = useState<Record<string, boolean>>({});
 
   return (
     <PageChrome>
@@ -155,10 +158,15 @@ export function NodesView({
                     const nodeLifecycle = node.lifecycle_status.toLowerCase();
                     const liveProviderStatus = (node.provider_status ?? "").toLowerCase();
                     const rowStatus = (node.provider_status ?? node.lifecycle_status).toLowerCase();
-                    const tunnelForNode = (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === node.id) ?? null;
-                    const tunnelConnected = tunnelForNode?.status.toLowerCase() === "connected";
-                    const nodeWantsDisconnect = !!tunnelForNode && (tunnelConnected || nodeLifecycle === "connected");
-                    const nodeCanConnect = !!tunnelForNode && !nodeWantsDisconnect;
+                    const diagnosticsTunnelForNode = (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === node.id) ?? null;
+                    const liveSelectedTunnelForNode = node.id === selectedNodeId ? selectedNodeTunnel : null;
+                    const tunnelForNode = liveSelectedTunnelForNode ?? diagnosticsTunnelForNode;
+                    const healthIndicatesConnected = node.id === selectedNodeId
+                      && health?.tunnel_status?.toLowerCase() === "connected";
+                    const tunnelConnected = tunnelForNode?.status.toLowerCase() === "connected" || healthIndicatesConnected;
+                    const connectedByRuntime = !!tunnelForNode && (tunnelConnected || nodeLifecycle === "connected");
+                    const optimisticConnected = optimisticConnectedByNodeId[node.id] ?? connectedByRuntime;
+                    const nodeCanConnect = !!tunnelForNode && !optimisticConnected;
                     const runtimeConnectable =
                       liveProviderStatus === ""
                       || liveProviderStatus === "active"
@@ -167,7 +175,8 @@ export function NodesView({
                     const canInstallHost = nodeLifecycle === "new";
                     const hostInstallInProgress = nodeLifecycle === "provisioning" || nodeLifecycle === "bootstrapping";
                     const canUninstallHost = nodeLifecycle === "ready" || nodeLifecycle === "connected" || nodeLifecycle === "error";
-                    const canConnectNode = nodeHostReady && !tunnelForNode;
+                    const canConnectNode = nodeHostReady && !tunnelForNode && !optimisticConnected;
+                    const canToggleTunnel = nodeHostReady || !!tunnelForNode || optimisticConnected;
                     const nodePricing = getNodePricingDisplay(node, pricingByRegion);
                     return (
                       <tr key={node.id} className={`border-t border-[color:var(--outline-variant)] ${selectedNodeId === node.id ? "bg-[color:rgba(171,199,255,0.08)]" : "bg-transparent"}`}>
@@ -209,21 +218,48 @@ export function NodesView({
                               </Button>
                             )}
                             <Button
-                              tone={nodeCanConnect || canConnectNode ? "primary" : tunnelForNode ? "danger" : "secondary"}
+                              tone={optimisticConnected ? "danger" : (nodeCanConnect || canConnectNode ? "primary" : "secondary")}
                               onClick={() => {
-                                if (tunnelForNode) {
-                                  void (nodeWantsDisconnect ? onDisconnectTunnel(tunnelForNode) : onConnectTunnel(tunnelForNode));
+                                const previous = optimisticConnected;
+                                if (previous) {
+                                  setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: false }));
+                                  void (async () => {
+                                    try {
+                                      if (tunnelForNode) {
+                                        await onDisconnectTunnel(tunnelForNode);
+                                      } else {
+                                        await onForceDisconnectNodeService(node);
+                                      }
+                                    } catch {
+                                      setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: true }));
+                                    }
+                                  })();
                                   return;
                                 }
 
-                                if (canConnectNode) {
-                                  void onConnectNode(node);
-                                }
+                                setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: true }));
+                                void (async () => {
+                                  try {
+                                    if (tunnelForNode) {
+                                      await onConnectTunnel(tunnelForNode);
+                                      return;
+                                    }
+
+                                    if (canConnectNode) {
+                                      await onConnectNode(node);
+                                      return;
+                                    }
+
+                                    setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: previous }));
+                                  } catch {
+                                    setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: false }));
+                                  }
+                                })();
                               }}
-                              disabled={busyAction !== null || (!tunnelForNode && !canConnectNode)}
+                              disabled={busyAction !== null || !canToggleTunnel}
                               className="px-3 py-2 text-xs"
                             >
-                              {nodeCanConnect || canConnectNode ? "Connect" : tunnelForNode ? "Disconnect" : "Host Pending"}
+                              {optimisticConnected ? "Disconnect" : (nodeCanConnect || canConnectNode ? "Connect" : "Host Pending")}
                             </Button>
                             <Button tone="secondary" onClick={() => onOpenNodeDetails(node.id)} disabled={busyAction !== null} className="px-3 py-2 text-xs">View Details</Button>
                           </div>

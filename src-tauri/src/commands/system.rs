@@ -636,6 +636,20 @@ pub fn disconnect_tunnel(
 }
 
 #[tauri::command]
+pub fn force_disconnect_node_service(
+  node_id: String,
+  backend: State<'_, Backend>,
+) -> Result<(), String> {
+  backend
+    .orchestrator
+    .force_disconnect_node_service(&backend.wireguard, &backend.db, &node_id)
+    .map_err(|err| {
+      let user_error = err.to_user_facing();
+      format!("{} Next: {}", user_error.message, user_error.next_action)
+    })
+}
+
+#[tauri::command]
 pub fn check_wireguard_readiness(backend: State<'_, Backend>) -> WireGuardReadinessResponse {
   let readiness: WireGuardReadiness = backend.wireguard.check_readiness();
   WireGuardReadinessResponse {

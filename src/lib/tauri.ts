@@ -299,6 +299,10 @@ export async function disconnectTunnel(nodeId: string, tunnelId: string): Promis
   await invokeCommand<void>("disconnect_tunnel", { nodeId, tunnelId });
 }
 
+export async function forceDisconnectNodeService(nodeId: string): Promise<void> {
+  await invokeCommand<void>("force_disconnect_node_service", { nodeId });
+}
+
 export async function getHealthPanelData(nodeId: string, tunnelId?: string | null): Promise<HealthPanelData> {
   return invokeCommand<HealthPanelData>("get_health_panel_data", {
     nodeId,

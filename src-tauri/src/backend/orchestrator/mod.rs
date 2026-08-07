@@ -1131,7 +1131,6 @@ impl Orchestrator {
       })?;
 
     if let Err(source) = wireguard.activate_tunnel(&tunnel.name) {
-      let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
       let _ = wireguard.unregister_tunnel(&tunnel.name);
       let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel activation failed; service was removed."));
       return Err(OrchestratorError::WireGuard {
@@ -1140,16 +1139,12 @@ impl Orchestrator {
       });
     }
 
-    let runtime = match wireguard.read_tunnel_status(&tunnel.name) {
-      Ok(runtime) => runtime,
-      Err(source) => {
-        let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
-        return Err(OrchestratorError::WireGuard {
-          detail: "Could not verify tunnel runtime state after connect.".to_string(),
-          source,
-        });
-      }
-    };
+    let runtime = wireguard
+      .read_tunnel_status(&tunnel.name)
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not verify tunnel runtime state after connect.".to_string(),
+        source,
+      })?;
 
     persist_tunnel_stats_snapshot(db, &request.tunnel_id, &runtime)?;
 
@@ -1171,7 +1166,6 @@ impl Orchestrator {
       return Ok(());
     }
 
-    let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
     let _ = wireguard.unregister_tunnel(&tunnel.name);
     let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel runtime did not report Running; service was removed."));
 

@@ -34,6 +34,8 @@ export default function DashboardNodesPage() {
     uninstallHostForNode,
     connectTunnel,
     disconnectTunnel,
+    forceDisconnectNodeService,
+    tunnels,
   } = useDashboard();
   const [nodeStatusFilter, setNodeStatusFilter] = useState<string>("all");
   const [nodeRegionFilter, setNodeRegionFilter] = useState<string>("all");
@@ -114,7 +116,17 @@ export default function DashboardNodesPage() {
   const nodeRegions = useMemo(() => Array.from(new Set(nodes.map((node) => node.region).filter(Boolean))).sort(), [nodes]);
   const nodeStatuses = useMemo(() => Array.from(new Set(nodes.map((node) => node.lifecycle_status))).sort(), [nodes]);
   const selectedNodePricing = selectedNode ? getNodePricingDisplay(selectedNode, pricingByRegion) : null;
-  const selectedNodeTunnel = (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === selectedNodeId) ?? null;
+  const selectedNodeTunnel = useMemo(() => {
+    const liveTunnel = selectedNodeId
+      ? (tunnels.find((tunnel) => tunnel.node_id === selectedNodeId) ?? null)
+      : null;
+
+    if (liveTunnel) {
+      return liveTunnel;
+    }
+
+    return (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === selectedNodeId) ?? null;
+  }, [diagnostics?.tunnels, selectedNodeId, tunnels]);
   const selectedNodeActionMessage = selectedNode
     ? selectedNode.lifecycle_status === "error"
       ? `${selectedNode.error_reason ?? "Provisioning failed."} Next: retry validation, recreate the node, or use force cleanup if partial resources remain.`
@@ -173,6 +185,7 @@ export default function DashboardNodesPage() {
       onConnectNode={connectNode}
       onConnectTunnel={connectTunnel}
       onDisconnectTunnel={disconnectTunnel}
+      onForceDisconnectNodeService={forceDisconnectNodeService}
       onForceCleanupSelectedNode={forceCleanupSelectedNode}
       nodeFeedback={pricingError ?? "No node action yet."}
       nodeRegions={nodeRegions}

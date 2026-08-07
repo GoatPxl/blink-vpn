@@ -71,6 +71,36 @@ impl DockerProviderAdapter {
     Self
   }
 
+  fn shell_single_quote(value: &str) -> String {
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{}'", escaped)
+  }
+
+  fn validate_wireguard_interface_name(
+    interface_name: &str,
+  ) -> Result<&str, ProviderAdapterError> {
+    let value = interface_name.trim();
+    if value.is_empty() {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: "Docker client peer update needs a non-empty interface name.".to_string(),
+      });
+    }
+
+    if !value
+      .chars()
+      .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Docker client peer update interface name '{}' contains unsupported characters.",
+          value
+        ),
+      });
+    }
+
+    Ok(value)
+  }
+
   fn validate_faux_token(token: &str) -> Result<(), ProviderAdapterError> {
     let value = token.trim();
     if value.is_empty() {
@@ -557,9 +587,9 @@ impl DockerProviderAdapter {
     }
 
     let marker_script = format!(
-      "set -eu; mkdir -p \"$(dirname '{readiness_marker_path}')\"; printf '{{\"status\":\"ready\",\"server_public_key\":\"%s\",\"listen_port\":%d}}\\n' '{server_public_key}' {listen_port} > '{readiness_marker_path}';",
-      readiness_marker_path = readiness_marker_path,
-      server_public_key = server_public_key,
+      "set -eu; mkdir -p \"$(dirname {readiness_marker_path})\"; printf '{{\"status\":\"ready\",\"server_public_key\":\"%s\",\"listen_port\":%d}}\\n' {server_public_key} {listen_port} > {readiness_marker_path};",
+      readiness_marker_path = Self::shell_single_quote(readiness_marker_path),
+      server_public_key = Self::shell_single_quote(&server_public_key),
       listen_port = DEFAULT_WIREGUARD_PORT,
     );
 
@@ -599,7 +629,7 @@ impl DockerProviderAdapter {
   ) -> Result<String, ProviderAdapterError> {
     let public_key = client_public_key.trim();
     let client_cidr = client_address_cidr.trim();
-    let iface = interface_name.trim();
+    let iface = Self::validate_wireguard_interface_name(interface_name)?;
 
     if public_key.is_empty() {
       return Err(ProviderAdapterError::Unsupported {
@@ -619,8 +649,13 @@ impl DockerProviderAdapter {
       });
     }
 
+    let public_key = Self::shell_single_quote(public_key);
+    let client_cidr = Self::shell_single_quote(client_cidr);
+
     Ok(format!(
-      "set -eu; mkdir -p /etc/wireguard /var/lib/goatstare; fragment=$(mktemp /tmp/goatstare-peer-XXXXXX.conf); printf '[Peer]\nPublicKey = {public_key}\nAllowedIPs = {client_cidr}\n' > \"$fragment\"; cat \"$fragment\" >> /etc/wireguard/{iface}.conf; cp \"$fragment\" /var/lib/goatstare/{iface}-client-peer.conf; rm -f \"$fragment\"; ip link show {iface} >/dev/null 2>&1; wg set {iface} peer {public_key} allowed-ips {client_cidr};"
+      "set -eu; mkdir -p /etc/wireguard /var/lib/goatstare; fragment=$(mktemp /tmp/goatstare-peer-XXXXXX.conf); printf '[Peer]\nPublicKey = %s\nAllowedIPs = %s\n' {public_key} {client_cidr} > \"$fragment\"; cat \"$fragment\" >> /etc/wireguard/{iface}.conf; cp \"$fragment\" /var/lib/goatstare/{iface}-client-peer.conf; rm -f \"$fragment\"; ip link show {iface} >/dev/null 2>&1; wg set {iface} peer {public_key} allowed-ips {client_cidr};",
+      public_key = public_key,
+      client_cidr = client_cidr,
     ))
   }
 
@@ -1044,11 +1079,22 @@ mod tests {
     )
     .expect("peer update script should build");
 
-    assert!(script.contains("wg set wg0 peer client-pub-key allowed-ips 10.66.0.2/32"));
+    assert!(script.contains("wg set wg0 peer 'client-pub-key' allowed-ips '10.66.0.2/32'"));
     assert!(script.contains("[Peer]"));
-    assert!(script.contains("AllowedIPs = 10.66.0.2/32"));
+    assert!(script.contains("AllowedIPs = %s"));
     assert!(script.contains("/etc/wireguard/wg0.conf"));
     assert!(!script.contains("if command -v wg"));
+  }
+
+  #[test]
+  fn client_peer_update_script_rejects_invalid_interface_names() {
+    let result = DockerProviderAdapter::build_client_peer_update_script(
+      "client-pub-key",
+      "10.66.0.2/32",
+      "wg0;rm -rf /",
+    );
+
+    assert!(result.is_err());
   }
 
   #[test]

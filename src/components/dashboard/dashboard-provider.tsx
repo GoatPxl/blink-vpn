@@ -8,6 +8,7 @@ import {
   createVpnNode,
   destroyVpnNode,
   disconnectTunnel as disconnectTunnelCommand,
+  forceDisconnectNodeService as forceDisconnectNodeServiceCommand,
   exportDiagnosticsBundle,
   forceCleanupVpnNode,
   getDiagnosticsBundle,
@@ -108,6 +109,7 @@ type DashboardContextValue = {
   connectPrimary: () => Promise<void>;
   connectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   disconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
+  forceDisconnectNodeService: (node: VpnNodeRecord) => Promise<void>;
   destroyNode: (node: VpnNodeRecord) => Promise<void>;
   connectNode: (node: VpnNodeRecord) => Promise<void>;
   forceCleanupSelectedNode: () => Promise<void>;
@@ -762,6 +764,21 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, loadDashboard, pushToast, refreshHealth]);
 
+  const forceDisconnectNodeService = useCallback(async (node: VpnNodeRecord) => {
+    setBusyAction("disconnect-tunnel");
+    try {
+      await forceDisconnectNodeServiceCommand(node.id);
+      setRecovery(null);
+      pushToast("success", "Tunnel disconnect signal sent", `Best-effort service stop sent for ${node.name}.`);
+      await loadDashboard(node.id);
+      await refreshHealthSnapshot(true);
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [handleError, loadDashboard, pushToast, refreshHealthSnapshot]);
+
   const destroyNode = useCallback(async (node: VpnNodeRecord) => {
     const confirmed = window.confirm(`Destroy node ${node.name} (${node.id})? This removes local state and attempts droplet cleanup.`);
     if (!confirmed) {
@@ -1011,6 +1028,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     connectPrimary,
     connectTunnel,
     disconnectTunnel,
+    forceDisconnectNodeService,
     destroyNode,
     forceCleanupSelectedNode,
     copyDiagnostics,
