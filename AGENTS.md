@@ -55,6 +55,7 @@ When requirements are incomplete, ask focused questions in these areas:
 
 ### Testing and tooling
 - Playwright: https://playwright.dev/docs/intro
+- tauri-playwright (Playwright bridge for Tauri native webviews): https://github.com/srsholmes/tauri-playwright
 - Node.js and npm: https://nodejs.org/docs/latest-v20.x/api/
 - SQLite: https://www.sqlite.org/docs.html
 
