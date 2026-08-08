@@ -32,14 +32,17 @@ async function connectWithRetry(endpoint: string, timeoutMs: number): Promise<Br
 }
 
 function startTauriProcess(cwd: string): ChildProcessWithoutNullStreams {
-  const command = "npm run tauri:dev:e2e";
-  const child = spawn(command, {
+  const command = process.platform === "win32" ? "cmd.exe" : "npm";
+  const args = process.platform === "win32"
+    ? ["/d", "/s", "/c", "npm run tauri:dev:e2e"]
+    : ["run", "tauri:dev:e2e"];
+
+  const child = spawn(command, args, {
     cwd,
     env: {
       ...process.env,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9222",
     },
-    shell: true,
     stdio: "pipe",
   });
 
@@ -58,7 +61,6 @@ async function stopTauriProcess(child: ChildProcessWithoutNullStreams | null): P
 
   await new Promise<void>((resolve) => {
     const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
-      shell: true,
       stdio: "ignore",
     });
 
