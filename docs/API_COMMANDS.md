@@ -2,7 +2,7 @@
 
 ## Overview
 
-The frontend calls Rust through a typed Tauri command surface. Commands route through a provider registry and a shared orchestration layer so UI behavior stays consistent across adapters.
+The frontend calls Rust through a typed Tauri command surface. Commands route through a provider registry, a unified NodeProvider interface, and a shared orchestration layer so UI behavior stays consistent across adapters.
 
 Provider adapters currently included:
 
@@ -20,7 +20,7 @@ Provider adapters currently included:
 
 | Logical operation | Intent | Current mapping |
 | --- | --- | --- |
-| `create` | Provision node and persist endpoint metadata | `create_vpn_node_to_ready` |
+| `create` | Provision node and persist endpoint metadata through the shared NodeProvider contract | `create_vpn_node_to_ready` |
 | `edit` | Update mutable node metadata/settings | Implemented through provider/state flows and ready for expansion |
 | `suspend` | Pause provider or node operations | `suspend_provider` |
 | `resume` | Resume provider or node operations | `resume_provider` |

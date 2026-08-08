@@ -2,7 +2,7 @@
 
 ## Overview
 
-GoatStare is a desktop control plane for running user-owned WireGuard VPN infrastructure through provider adapters.
+GoatStare is a desktop control plane for running user-owned WireGuard VPN infrastructure through provider adapters and a unified NodeProvider interface.
 
 Stack:
 
@@ -24,8 +24,9 @@ flowchart LR
   UI[Next.js dashboard] -->|invoke| CMD[Tauri commands]
   CMD --> ORCH[Orchestrator]
   ORCH --> REG[Provider registry]
-  REG --> DO[DigitalOcean adapter]
-  REG --> DKR[Docker adapter]
+  REG --> NP[Unified NodeProvider]
+  NP --> DO[DigitalOcean adapter]
+  NP --> DKR[Docker adapter]
   ORCH --> DB[(SQLite)]
   ORCH --> SEC[Credential Manager]
   ORCH --> WG[WireGuard runtime]
@@ -38,9 +39,24 @@ flowchart LR
 - Frontend: user workflows for provider, node, tunnel, health, and diagnostics.
 - Command layer: typed boundary and error mapping.
 - Orchestrator: lifecycle transitions, idempotency, reconciliation, cleanup.
-- Provider registry: adapter resolution by provider slug.
-- Provider adapters: unified contract for validate, catalog, create, wait, delete.
+- Provider registry: adapter resolution by provider slug and NodeProvider construction.
+- NodeProvider: provider-neutral lifecycle contract for init, bootstrap readiness, status, existence checks, and delete.
+- Provider adapters: low-level provider implementation details for validate, catalog, create, wait, and delete.
 - WireGuard manager: import, activate, deactivate, remove local tunnel interfaces.
+
+## Unified NodeProvider Contract
+
+The orchestrator and command layer operate against a shared NodeProvider abstraction instead of reaching directly into provider-specific execution paths.
+
+The contract covers:
+
+- `init`: provision a node, persist the bootstrapping context, and return a bootstrap contract preview.
+- `wait_for_bootstrap_ready`: wait for provider-specific readiness markers and resolve the bootstrap output contract.
+- `get_status`: report the provider-level node status in a normalized form.
+- `exists`: check whether the node still exists.
+- `delete`: tear down the provider-side node resource.
+
+The registry resolves the correct provider adapter, loads the provider token from secure storage, and presents that provider through the shared NodeProvider interface to the orchestrator.
 
 ## Lifecycle Model
 
