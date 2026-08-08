@@ -1,18 +1,19 @@
 import { expect, test } from "./fixtures/tauri-real";
 
 const DOCKER_TOKEN = "dkr_v1_local_dev_mock_token_2026";
+const APP_URL = "http://localhost:3000";
 
-test.use({ mode: "tauri" });
+test.use({ mode: "cdp" });
 
 test.describe("Docker real tauri flow", () => {
   test("saves docker key, provisions host, records init, and connects tunnel", async ({ mode, tauriPage }) => {
-    test.skip(mode !== "tauri", "This test must run in tauri mode against the real backend.");
+    test.skip(mode !== "cdp", "This test must run in cdp mode against the real backend.");
 
     const suffix = Date.now();
     const nodeId = `node-docker-real-${suffix}`;
     const nodeName = `Docker Real Node ${suffix}`;
 
-    await tauriPage.goto("/dashboard/settings");
+    await tauriPage.goto(`${APP_URL}/dashboard/settings`);
 
     await tauriPage.getByRole("button", { name: "Open Key Entry Modal" }).click();
     await tauriPage.locator("select").first().selectOption("provider-docker");
@@ -23,7 +24,7 @@ test.describe("Docker real tauri flow", () => {
     await tauriPage.getByRole("button", { name: "Validate Key" }).click();
     await expect(tauriPage.getByText("Docker readiness checked")).toBeVisible({ timeout: 30000 });
 
-    await tauriPage.goto("/dashboard/nodes/create");
+    await tauriPage.goto(`${APP_URL}/dashboard/nodes/create`);
 
     const providerSelect = tauriPage.locator("select").first();
     await providerSelect.selectOption("provider-docker");
@@ -34,7 +35,7 @@ test.describe("Docker real tauri flow", () => {
     await tauriPage.getByRole("button", { name: "Create Node" }).click();
     await expect(tauriPage.getByText("Node created")).toBeVisible({ timeout: 60000 });
 
-    await tauriPage.goto("/dashboard/nodes");
+    await tauriPage.goto(`${APP_URL}/dashboard/nodes`);
 
     const nodeRow = tauriPage.getByRole("row", { name: nodeName });
     await expect(nodeRow).toBeVisible({ timeout: 60000 });

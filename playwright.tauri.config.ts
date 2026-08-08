@@ -5,6 +5,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  timeout: 180000,
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
     trace: "on-first-retry",
@@ -12,7 +13,7 @@ export default defineConfig({
   projects: [
     {
       name: "tauri-real",
-      testMatch: /dashboard-docker-real-tauri\.spec\.ts/,
+      testMatch: /dashboard-.*-tauri\.spec\.ts/,
     },
   ],
 });

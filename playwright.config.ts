@@ -12,7 +12,7 @@ export default defineConfig({
   projects: [
     {
       name: "tauri-real",
-      testMatch: /dashboard-docker-real-tauri\.spec\.ts/,
+      testMatch: /dashboard-.*-tauri\.spec\.ts/,
     },
   ],
 });

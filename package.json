@@ -13,7 +13,7 @@
     "frontend:e2e:docker:preflight": "docker version",
     "frontend:e2e:docker:lane": "npm run tauri:e2e:docker:real",
     "frontend:e2e:docker:lane:headed": "npm run tauri:e2e:docker:real",
-    "tauri:e2e:docker:real": "playwright test --config=playwright.tauri.config.ts --project=tauri-real tests/e2e/dashboard-docker-real-tauri.spec.ts",
+    "tauri:e2e:docker:real": "playwright test --config=playwright.tauri.config.ts --project=tauri-real",
     "backend:test:docker:real": "cargo test --manifest-path src-tauri/Cargo.toml real_docker_create_init_and_delete_roundtrip -- --ignored --nocapture",
     "e2e": "npm run tauri:e2e:docker:real",
     "e2e:headed": "npm run tauri:e2e:docker:real",
