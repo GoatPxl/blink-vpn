@@ -4,6 +4,38 @@
 - Always respect the project documentation in this repository and use it as the source of truth for implementation decisions.
 - Prefer the documented architecture, workflows, and conventions over assumptions.
 
+## Required execution protocol
+- Start every non-trivial task by restating scope, constraints, and affected components.
+- Ask clarifying questions before editing when behavior, state transitions, security posture, or release risk is ambiguous.
+- Define a verification plan before changes: list exact commands and expected pass criteria.
+- Run verification after changes and report real results, not assumptions.
+- If checks cannot run, state exactly why and what risk remains.
+
+## Clarification gate (ask before coding)
+When requirements are incomplete, ask focused questions in these areas:
+- Product behavior: expected user-visible behavior and edge cases.
+- Safety and security: secret handling, privileged operations, and destructive actions.
+- Compatibility: contract or schema constraints that must remain stable.
+- Test acceptance: minimum tests required for this change.
+
+## Minimum validation matrix
+- Frontend-only changes:
+	- `npm run typecheck`
+	- `npm run lint`
+- Rust backend-only changes:
+	- `cargo test --manifest-path src-tauri/Cargo.toml`
+- Cross-boundary changes (frontend + tauri/backend contracts):
+	- `npm run verify:fast`
+	- `cargo test --manifest-path src-tauri/Cargo.toml`
+- Docker provider or tunnel lifecycle changes:
+	- `npm run tauri:e2e:docker:real`
+	- `npm run backend:test:docker:real` (when Docker is available)
+
+## Reporting contract
+- Include: what changed, what was verified, and what was not verified.
+- Include concrete file paths when describing changes.
+- Include explicit residual risks if any lane was skipped.
+
 ## Major software documentation
 
 ### Frontend and app framework

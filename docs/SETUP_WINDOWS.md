@@ -3,127 +3,69 @@
 ## Prerequisites
 
 - Windows 10 or Windows 11
-- Node.js 20+ and npm
-- Rust toolchain matching the repo's `rust-version`
-- WireGuard for Windows installed locally
-- Provider API token for your selected provider (DigitalOcean for production path in this phase)
-- Docker Desktop for Windows (optional, only for Docker dev provider mode)
+- Node.js 20+
+- npm
+- Rust toolchain
+- WireGuard for Windows
+- Docker Desktop (for Docker adapter workflows)
 
-## Local Setup
+## Local Development Setup
 
-1. Clone the repository.
-2. Install frontend dependencies.
+1. Install dependencies:
 
 ```bash
 npm install
 ```
 
-3. Run the desktop app in development mode.
+2. Start desktop app:
 
 ```bash
 npm run tauri:dev
 ```
 
-4. Use the UI to register your provider token, then validate it before provisioning a node.
+3. Open Settings and register provider credentials.
+4. Validate token, create node, and connect tunnel.
 
-## Docker Dev Provider Mode (Optional)
+## Docker Adapter Setup
 
-Use this when you want local provider-emulation behavior without a live cloud account.
-
-1. Enable backend feature flag:
+Set backend and frontend flags in your terminal session:
 
 ```bash
 set GOATSTARE_DEV_DOCKER=1
-```
-
-2. Enable frontend dev surfaces:
-
-```bash
 set NEXT_PUBLIC_DEV_DOCKER=1
 ```
 
-3. Start Docker Desktop and verify daemon is running.
-4. Launch app (`npm run tauri:dev`).
-5. In Settings, select Docker provider (`provider-docker`) and save faux token with prefix `dkr_v1_` or `docker_`.
-6. Run Docker readiness check.
-7. Create a node normally; Docker provider will emulate VPS provisioning with local containers and synthetic API-style data.
-
-## Docker E2E Contributor Gate
-
-Use this when validating dashboard Docker flows for Prompts 3-7.
-
-1. Confirm Docker Desktop is running.
-2. Verify CLI and daemon are reachable.
+Then run:
 
 ```bash
-npm run frontend:e2e:docker:preflight
+npm run tauri:dev
 ```
 
-3. Run the ordered Docker lane.
+In app:
+
+1. Select Docker provider.
+2. Save token with `dkr_v1_` or `docker_` prefix.
+3. Run readiness check.
+4. Create node and run tunnel lifecycle actions.
+
+## E2E Validation Setup
 
 ```bash
-npm run frontend:e2e:docker:lane
+npm run e2e:docker:preflight
+npm run tauri:e2e:docker:real
 ```
 
-4. Optional headed mode for troubleshooting.
+## Runtime Notes
 
-```bash
-npm run frontend:e2e:docker:lane:headed
-```
+- WireGuard DLL resources are loaded from [src-tauri/resources-windows/binaries](src-tauri/resources-windows/binaries).
+- App metadata persists in local app-data SQLite.
+- Secret values remain in secure storage.
 
-Run order is fixed in the lane command and should not be changed ad hoc during contributor validation.
+## Quick Troubleshooting
 
-## Environment / Config
-
-The current Phase 1 app keeps runtime configuration intentionally small:
-
-- Tauri reads the app data directory from the Windows profile.
-- SQLite is created under the app data directory.
-- Secrets are stored in Windows Credential Manager, not in environment variables.
-- Diagnostics exports are written under the app data diagnostics folder.
-- Optional dev Docker mode is controlled by `GOATSTARE_DEV_DOCKER` (backend) and `NEXT_PUBLIC_DEV_DOCKER` (frontend).
-
-### WireGuard Runtime Mode
-
-- `GOATSTARE_WG_RUNTIME` is retained for operational compatibility but is no longer required for normal operation.
-- Current behavior: DefGuard/wireguard-nt runtime path is the default for tunnel import/connect/disconnect/unregister flows.
-- Recommended value if explicitly set: `GOATSTARE_WG_RUNTIME=defguard`.
-- Legacy values are treated as compatibility hints and should not be relied on for branching behavior in this phase.
-
-### Required WireGuard DLL Path
-
-The runtime requires the WireGuard-NT DLL in app resources relative to the binary.
-
-- x64 path: `resources-windows/binaries/wireguard-amd64.dll`
-- ARM64 path: `resources-windows/binaries/wireguard-arm64.dll`
-
-If the DLL is missing, tunnel runtime operations will fail during adapter initialization.
-
-### Known config points
-
-- `src-tauri/tauri.conf.json` currently bundles to NSIS.
-- `csp` is currently `null` in the Tauri config; treat CSP hardening as a release gate.
-- TODO: project-specific fill if a future installer adds explicit environment flags or registry-based config.
-
-## Common Setup Pitfalls
-
-| Symptom | Likely Cause | Recovery |
-| --- | --- | --- |
-| Token validation fails immediately | Invalid provider token or missing API scope | Re-enter the token and validate again |
-| WireGuard actions fail with not installed / not found | WireGuard for Windows is absent or not on PATH | Install or repair WireGuard, then restart the app |
-| Node create stops at bootstrapping | Provider node never became active or bootstrap marker did not become ready | Review node status, reconcile, or force cleanup and retry |
-| Docker readiness check fails in dev mode | Docker CLI missing, daemon stopped, or dev flag disabled | Install/start Docker and ensure `GOATSTARE_DEV_DOCKER=1` |
-| Secret reads return missing reference | Credential Manager entry was removed or the reference is stale | Re-save the provider token |
-| App opens but backend commands fail | Running outside Tauri or from a plain browser tab | Launch with `npm run tauri:dev` |
-
-## Local Validation Checklist
-
-- Confirm the app starts and the dashboard loads.
-- Register a provider token and validate it.
-- Create a node and observe provisioning -> bootstrapping -> ready.
-- Create a tunnel and confirm connect/disconnect works.
-- Destroy a node and confirm cleanup completes.
-
-## Assumptions
-
-- TODO: project-specific fill for any company-managed Windows images or preinstalled tooling.
+| Symptom | Action |
+| --- | --- |
+| Token validation fails | Re-enter token and validate again |
+| Tunnel operations fail | Repair WireGuard install and restart app |
+| Docker readiness fails | Start Docker Desktop and rerun readiness |
+| Node stuck in error | Run force cleanup and retry |

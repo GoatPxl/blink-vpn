@@ -12,5 +12,5 @@
 # Error details
 
 ```
-Error: connect ENOENT /tmp/tauri-playwright.sock
+Error: Tauri process exited with code 1
 ```

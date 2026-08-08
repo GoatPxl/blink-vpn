@@ -2,73 +2,73 @@
 
 ## Overview
 
-SQLite stores local metadata and runtime snapshots only. Secrets stay out of SQLite; only secret references are persisted.
+SQLite stores local metadata, lifecycle state, and runtime snapshots. Secret values are stored in secure storage, while SQLite persists secret references.
 
 ## Tables
 
-### `providers`
+### providers
 
 Columns:
 
-- `id` TEXT primary key
-- `name` TEXT not null
-- `slug` TEXT not null unique
-- `token_ref` TEXT nullable, unique via index when present
-- `created_at` TEXT not null
-- `updated_at` TEXT not null
+- `id` TEXT PRIMARY KEY
+- `name` TEXT NOT NULL
+- `slug` TEXT NOT NULL UNIQUE
+- `token_ref` TEXT NULL
+- `created_at` TEXT NOT NULL
+- `updated_at` TEXT NOT NULL
 
 Indexes:
 
 - `idx_providers_slug`
 - `idx_providers_token_ref`
 
-### `vpn_nodes`
+### vpn_nodes
 
 Columns:
 
-- `id` TEXT primary key
-- `provider_id` TEXT not null, foreign key to `providers(id)`
-- `name` TEXT not null
-- `region` TEXT not null
-- `lifecycle_status` TEXT not null
-- `external_ref` TEXT nullable
-- `public_ipv4` TEXT nullable
-- `server_public_key` TEXT nullable
-- `error_reason` TEXT nullable
-- `created_at` TEXT not null
-- `updated_at` TEXT not null
+- `id` TEXT PRIMARY KEY
+- `provider_id` TEXT NOT NULL REFERENCES providers(id)
+- `name` TEXT NOT NULL
+- `region` TEXT NOT NULL
+- `lifecycle_status` TEXT NOT NULL
+- `external_ref` TEXT NULL
+- `public_ipv4` TEXT NULL
+- `server_public_key` TEXT NULL
+- `error_reason` TEXT NULL
+- `created_at` TEXT NOT NULL
+- `updated_at` TEXT NOT NULL
 
 Indexes:
 
 - `idx_vpn_nodes_provider_id`
 - `idx_vpn_nodes_status`
 
-### `tunnels`
+### tunnels
 
 Columns:
 
-- `id` TEXT primary key
-- `node_id` TEXT not null, foreign key to `vpn_nodes(id)` with `ON DELETE CASCADE`
-- `name` TEXT not null
-- `status` TEXT not null
-- `interface_name` TEXT nullable
-- `assigned_ipv4` TEXT nullable
-- `last_error` TEXT nullable
-- `last_handshake_age_seconds` INTEGER nullable
-- `rx_bytes` INTEGER nullable
-- `tx_bytes` INTEGER nullable
-- `stats_updated_at` TEXT nullable
-- `created_at` TEXT not null
-- `updated_at` TEXT not null
+- `id` TEXT PRIMARY KEY
+- `node_id` TEXT NOT NULL REFERENCES vpn_nodes(id) ON DELETE CASCADE
+- `name` TEXT NOT NULL
+- `status` TEXT NOT NULL
+- `interface_name` TEXT NULL
+- `assigned_ipv4` TEXT NULL
+- `last_error` TEXT NULL
+- `last_handshake_age_seconds` INTEGER NULL
+- `rx_bytes` INTEGER NULL
+- `tx_bytes` INTEGER NULL
+- `stats_updated_at` TEXT NULL
+- `created_at` TEXT NOT NULL
+- `updated_at` TEXT NOT NULL
 
 Indexes:
 
 - `idx_tunnels_node_id`
 - `idx_tunnels_status`
 
-## Status Enums
+## Lifecycle Enums
 
-### `NodeLifecycleStatus`
+Node status values:
 
 - `new`
 - `provisioning`
@@ -78,9 +78,7 @@ Indexes:
 - `error`
 - `deleting`
 
-Valid transitions are enforced in code via `can_transition_to`.
-
-### `TunnelStatus`
+Tunnel status values:
 
 - `new`
 - `ready`
@@ -89,42 +87,24 @@ Valid transitions are enforced in code via `can_transition_to`.
 - `error`
 - `deleting`
 
-## Transition Rules
+## Migration Model
 
-### Node lifecycle
+Current migration sequence in [src-tauri/migrations](src-tauri/migrations):
 
-- `new -> provisioning`
-- `provisioning -> bootstrapping | error | deleting`
-- `bootstrapping -> ready | error | deleting`
-- `ready -> connected | error | deleting`
-- `connected -> ready | error | deleting`
-- `error -> deleting`
+1. Base tables
+2. Performance indexes
+3. Provider token reference
+4. Node server key metadata
+5. Tunnel stats snapshots
+6. Provider pricing snapshots
+7. Docker provider seed
+8. Provider status metadata
+9. Init run logs
+10. Tunnel config metadata
 
-### Tunnel lifecycle
+Migration rules:
 
-- `new -> ready`
-- `ready -> connected | error | deleting`
-- `connected -> disconnected | error | deleting`
-- `disconnected -> connected | error | deleting`
-- `error -> deleting`
-
-## Migration Guidance
-
-Current migration versions:
-
-1. initial schema for providers, vpn_nodes, tunnels
-2. indexes for provider slug, node provider/status, tunnel node/status
-3. add `providers.token_ref`
-4. add `vpn_nodes.server_public_key`
-5. add tunnel runtime snapshot columns
-
-Guidance for future schema changes:
-
-- Add new columns with additive migrations.
-- Keep secret values out of SQLite.
-- Preserve backward compatibility for existing rows wherever possible.
-- When adding status values, update both the Rust enums and the SQLite CHECK constraints.
-
-## Assumptions
-
-- TODO: project-specific fill if a later phase adds new runtime tables or audit tables.
+- Use additive changes when possible.
+- Keep backward compatibility for existing rows.
+- Update enum constraints and Rust enum mapping together.
+- Do not introduce plaintext secret storage.

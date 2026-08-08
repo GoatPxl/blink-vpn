@@ -1,78 +1,58 @@
 # Operations Runbook
 
-## Day-to-Day Operations
+## Daily Health Routine
 
-### Morning checks
+1. Open dashboard and confirm provider and node data loads.
+2. Validate provider token if any provider status warning appears.
+3. Confirm active node is in `ready` or `connected` state.
+4. Confirm health panel updates handshake and transfer stats.
 
-- Open the dashboard and confirm the selected node health is loading.
-- Validate the selected provider token if the dashboard shows provider errors.
-- Confirm the selected node is in a sane state: `ready` or `connected` for active use.
-- Check diagnostics only for redacted output; do not rely on logs for secrets.
+## Standard Workflows
 
-### Common actions
+### Provision
 
-- Provision a node only after token validation succeeds.
-- Create the tunnel after the node reports a public endpoint and server public key.
-- Use connect/disconnect rather than destroy when the node should remain available.
-- Use destroy when the node and its tunnels are no longer needed.
-- Use force cleanup after interrupted provisioning, app restart mid-provision, or stale local WireGuard artifacts.
-- In Docker dev mode, confirm Docker readiness before create/destroy operations.
+1. Register token in Settings.
+2. Validate token.
+3. Select provider, region, and plan.
+4. Create node and wait for `ready`.
 
-### Runtime Mode Notes
+### Connect
 
-- DefGuard/wireguard-nt runtime is the default execution path for tunnel lifecycle operations.
-- `GOATSTARE_WG_RUNTIME` is a compatibility environment knob and should be set to `defguard` only if explicitly required by local scripts.
-- Do not rely on runtime mode switching for incident response in Phase 1; use normal recovery actions instead.
+1. Create and activate tunnel.
+2. Connect tunnel.
+3. Confirm health panel reports `connected`.
 
-### WireGuard DLL Requirement
+### Disconnect and Destroy
 
-- Ensure the WireGuard DLL resource exists next to packaged resources:
-   - `resources-windows/binaries/wireguard-amd64.dll` on x64 hosts
-   - `resources-windows/binaries/wireguard-arm64.dll` on ARM64 hosts
-- Missing DLL manifests as runtime adapter initialization failures during import/connect.
+1. Disconnect tunnel.
+2. Destroy node when no longer needed.
+3. Confirm local tunnel rows and provider resources are cleaned up.
 
-## Troubleshooting Flow
+## Recovery Workflow
 
-1. Identify the error class shown in the UI.
-2. Check whether the failure is provider, WireGuard, database/local state, or lifecycle mismatch.
-3. Choose the smallest recovery action:
-   - Retry the same action if the error was transient and the current state is still valid.
-   - Refresh the dashboard if the UI state appears stale.
-   - Validate the provider token if the issue is provider-related.
-   - Force cleanup if provisioning was interrupted or the local tunnel state is inconsistent.
-4. Re-run the workflow only after the state is known to be safe.
+Use this order for fast recovery:
 
-## Recovery Actions
+1. Retry action once for transient failures.
+2. Refresh dashboard state.
+3. Re-validate provider token.
+4. Run force cleanup for stale or partial resources.
+5. Re-run the desired workflow.
 
-| Situation | Action | Expected Result |
+## Issue-to-Action Table
+
+| Signal | Action | Success criteria |
 | --- | --- | --- |
-| Token invalid / missing | Re-save and validate token | Provider becomes usable again |
-| Provider node creation timed out | Wait briefly, then reconcile or force cleanup | Local node state matches remote reality |
-| App restart mid-provision | Force cleanup the partially created node | Local tunnels removed, remote delete attempted |
-| WireGuard service missing | Repair/reinstall WireGuard for Windows | Local tunnel operations become available |
-| Runtime adapter init fails with DLL/load errors | Verify required DLL exists under resources-windows/binaries for host architecture | Tunnel lifecycle operations can initialize adapter runtime |
-| Tunnel status stale | Refresh health | Status snapshot updates from runtime |
-| Node stuck in error state | Force cleanup, then retry provisioning if needed | Partial state is removed |
-| Docker readiness fails in dev mode | Start Docker Desktop and re-run readiness check | Dev adapter operations become available |
+| Provider token invalid | Re-save token, validate token | Provider status healthy |
+| Provision timeout | Refresh state, run cleanup if needed | Node reaches `ready` or is fully removed |
+| WireGuard import/connect failure | Repair WireGuard runtime and retry | Tunnel reaches `connected` |
+| Stale node/tunnel state | Force cleanup and re-run flow | Local and remote state aligned |
+| Docker readiness failure | Start Docker and rerun readiness check | Readiness reports installed + daemon reachable |
 
-## Force Cleanup Behavior
+## Escalation
 
-Force cleanup is the preferred recovery path for interrupted provisioning in Phase 1.
+Escalate with diagnostics export and exact command history when:
 
-- Removes local tunnel artifacts.
-- Attempts best-effort remote provider resource deletion.
-- Deletes local node/tunnel rows when possible.
-- Treats missing local state as success, not as a hard failure.
-
-## Escalation Guidance
-
-Escalate to manual intervention if:
-
-- The provider token cannot be recovered.
-- The remote node is unreachable and cannot be deleted through the provider API.
-- Local WireGuard tools are missing after reinstall attempts.
-- The SQLite database is unreadable or corrupted.
-
-## Assumptions
-
-- TODO: project-specific fill for support ownership and escalation contacts.
+- repeated failures persist after cleanup
+- provider delete path fails repeatedly
+- local runtime initialization fails after repair
+- database access is unhealthy

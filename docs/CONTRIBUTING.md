@@ -1,59 +1,61 @@
 # Contributing
 
-## Coding Standards
+## Principles
 
-- Keep changes Phase 1 scoped: Windows, WireGuard, provider-adapter architecture.
-- Preserve provider-neutral behavior in orchestration paths; keep provider-specific logic inside adapters.
-- Treat Docker provider as development-only behavior unless scope is explicitly expanded.
-- Prefer small, compile-ready changes over broad rewrites.
-- Keep functions and command handlers narrowly focused.
-- Use explicit error mapping and actionable user-facing messages.
-- Do not log secrets, token values, or private keys.
-- Keep redaction at the source, not only in the UI.
+- Keep changes small, testable, and scoped.
+- Preserve provider-neutral orchestration behavior.
+- Keep provider-specific behavior inside adapter modules.
+- Never log secrets or raw credential material.
+- Prefer explicit errors with actionable recovery guidance.
 
-## Branching / PR Guidance
+## Workflow
 
-- Use one feature or fix per branch.
-- Keep PRs small enough to review against the state machine, not just the UI.
-- Include tests for any logic change that affects provisioning, cleanup, or redaction.
-- Update docs when workflows, commands, or schema behavior changes.
+1. Restate scope, constraints, and affected components.
+2. Confirm acceptance criteria before implementation.
+3. Implement smallest viable change.
+4. Run required validation lanes.
+5. Report verified results and residual risk.
 
-## Commit Conventions
+## Required Validation
 
-- Prefer short, imperative commit messages.
-- Example style: `docs: add Phase 1 release checklist`, `fix: tighten cleanup retry path`.
-- Keep commits aligned with the feature slice under review.
-
-## Review Expectations
-
-Reviewers should check:
-
-- idempotency of retries and cleanup
-- secret handling and redaction coverage
-- Windows-only assumptions
-- SQLite schema compatibility
-- UI recovery guidance for each error class
-- tests covering the changed path
-
-## Docker Dashboard Change Gate
-
-When a PR changes Docker dashboard/provider behavior (settings, nodes, tunnel lifecycle, or cleanup), run the Docker contributor lane before requesting review.
-
-Required commands:
+Frontend-focused changes:
 
 ```bash
-npm run frontend:e2e:docker:preflight
-npm run frontend:e2e:docker:lane
+npm run typecheck
+npm run lint
 ```
 
-If failures occur, fix in lane order (provider -> nodes -> tunnel -> destroy/cleanup) and rerun the full lane.
+Backend-focused changes:
 
-## When to Ask for Help
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+```
 
-- If a change would expand beyond Phase 1 scope.
-- If a change risks plaintext secret exposure.
-- If a change requires installer signing or release infra details that are not documented yet.
+Cross-boundary changes:
 
-## Assumptions
+```bash
+npm run typecheck
+npm run lint
+cargo test --manifest-path src-tauri/Cargo.toml
+```
 
-- TODO: project-specific fill for team review cadence or approval policy.
+Docker lifecycle or tunnel lifecycle changes:
+
+```bash
+npm run e2e:docker:preflight
+npm run tauri:e2e:docker:real
+npm run backend:test:docker:real
+```
+
+## Pull Request Checklist
+
+- Include summary of behavior changes.
+- Include updated docs when behavior/contracts change.
+- Include test evidence and exact commands run.
+- Include rollback considerations for destructive flows.
+
+## Commit Guidance
+
+- Use concise, imperative messages.
+- Keep one concern per commit when practical.
+- Avoid mixing refactor and behavior changes without clear separation.

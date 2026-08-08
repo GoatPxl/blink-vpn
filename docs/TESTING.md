@@ -2,148 +2,79 @@
 
 ## Test Strategy
 
-Phase 1 tests are organized around deterministic behavior and failure handling.
+The test program combines fast deterministic checks and real workflow lanes:
 
-### What is Covered
+- Rust unit/integration tests for state, provider contracts, and recovery paths
+- Type and lint checks for frontend correctness
+- Real Tauri E2E lane for frontend/backend contract validation
+- Real Docker backend lane for provisioning and teardown validation
 
-- SQLite repository behavior
-- provider token upsert and cleanup
-- provider adapter retry policy behavior
-- provider region/pricing catalog normalization
-- WireGuard config generation and runtime parsing
-- startup reconciliation and force cleanup paths
-- log redaction helpers
-- diagnostics redaction
+## Required Verification Matrix
 
-### What is Mocked
-
-- DigitalOcean HTTP interactions use `mockito` or local test doubles.
-- Frontend browser-mode Playwright specs use a mocked Tauri invoke bridge (`tests/e2e/fixtures/tauri-mocks.ts`).
-- WireGuard command execution uses a mock `CommandRunner` in unit tests.
-- Secure storage uses the in-memory mock store outside Windows.
-
-### What is Not Mocked
-
-- The UI itself is not fully end-to-end automated in this repo.
-- Live cloud provider accounts are not required for the normal test suite.
-- Real WireGuard services are not required for unit tests.
-
-## Docker Frontend Browser Lane (Mocked Tauri Bridge)
-
-This lane validates frontend Docker dashboard state transitions with deterministic command stubs.
-
-### Prerequisites
-
-- Windows host (PowerShell or cmd)
-- Docker Desktop installed and running
-- Docker CLI available on `PATH`
-- Dependencies installed with `npm install`
-
-### Preflight
-
-Run preflight first. It must print both client and server version details.
+Frontend changes:
 
 ```bash
-npm run frontend:e2e:docker:preflight
+npm run typecheck
+npm run lint
 ```
 
-### Required Run Order
-
-Use the ordered lane command so dependencies between prompts are exercised consistently:
-
-```bash
-npm run frontend:e2e:docker:lane
-```
-
-The lane runs specs in this exact order:
-
-1. `tests/e2e/dashboard-docker-provider.spec.ts` (feature flag/readiness/token flow)
-2. `tests/e2e/dashboard-docker-nodes.spec.ts` (create-to-ready)
-3. `tests/e2e/dashboard-docker-tunnel.spec.ts` (connect/disconnect + health transition)
-4. `tests/e2e/dashboard-docker-destroy-cleanup.spec.ts` (destroy + force-cleanup idempotency)
-
-For interactive debugging:
-
-```bash
-npm run frontend:e2e:docker:lane:headed
-```
-
-### Failure Handling
-
-- If preflight fails, do not run the lane; start Docker Desktop and rerun preflight.
-- If lane fails, fix in prompt order (provider -> nodes -> tunnel -> destroy/cleanup) and rerun the full lane.
-
-## Docker Real Backend Lane (No Mock Fixtures)
-
-This lane validates real Docker adapter execution including container provisioning, init-script readiness, and teardown.
-
-```bash
-npm run backend:test:docker:real
-```
-
-## Docker Real Tauri E2E Lane (No Mock Fixtures)
-
-This lane drives the real Tauri app/webview and backend using the Playwright plugin bridge.
-
-```bash
-npm run tauri:e2e:docker:real
-```
-
-## How to Run Tests
-
-Backend:
+Backend changes:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-Frontend typecheck:
+Cross-boundary changes:
 
 ```bash
 npm run typecheck
-```
-
-Frontend lint:
-
-```bash
 npm run lint
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-General Playwright (all E2E specs):
+Docker or tunnel lifecycle changes:
 
 ```bash
-npm run frontend:e2e
+npm run e2e:docker:preflight
+npm run tauri:e2e:docker:real
+npm run backend:test:docker:real
 ```
 
-Native-webview Tauri E2E support (plugin enabled build):
+## Real E2E Lane
+
+Command:
 
 ```bash
-npm run tauri:dev:e2e
+npm run tauri:e2e:docker:real
 ```
 
-## Critical Test Cases
+Coverage focus:
 
-- token storage does not write plaintext into SQLite
-- token validation retries transient provider failures
-- node create rolls back a partially created provider node on failure
-- force cleanup removes local tunnel artifacts after an interrupted provisioning path
-- startup reconciliation repairs stale tunnel state
-- redaction removes token/private-key material from logs and diagnostics
-- WireGuard unavailable on Windows surfaces a clear, actionable error
+- token save and validation
+- provider readiness
+- node create and ready transition
+- tunnel connect lifecycle
+- diagnostics contract validation
 
-## Release Test Checklist
+## Fast Local Checks
 
-Before a Phase 1 demo release:
+```bash
+npm run typecheck
+npm run lint
+cargo test --manifest-path src-tauri/Cargo.toml
+```
 
-- Run the full Rust test suite.
-- Run `npm run typecheck`.
-- Run `npm run lint`.
-- Smoke test token save/validate.
-- Smoke test create/connect/disconnect/destroy.
-- Smoke test force cleanup after a simulated partial provision.
-- Confirm diagnostics export contains no plaintext secrets.
-- Confirm the installer path works on a clean Windows machine with WireGuard installed.
+## Release Confidence Checklist
 
-## Assumptions
+- Run required matrix commands.
+- Confirm real E2E lane passes.
+- Confirm cleanup and recovery flows pass.
+- Confirm diagnostics redaction expectations pass.
+- Confirm installer path works on clean Windows host.
 
-- TODO: project-specific fill for any additional integration tests in CI.
+## Test Failure Handling
+
+1. Reproduce in the real lane first.
+2. Classify as provider, runtime, state transition, or UI contract issue.
+3. Add regression coverage for every escaped defect.
+4. Re-run full required matrix before merge.

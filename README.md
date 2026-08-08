@@ -11,15 +11,13 @@ Project inspiration:
 
 - https://www.digitalocean.com/solutions/vpn
 
-## Phase 1 Scope
+## Current Capability Profile
 
-- Windows desktop only
-- WireGuard only
-- Rust backend + Tauri + Next.js frontend
-- Multi-provider architecture with provider adapters
-- Production provider path: DigitalOcean adapter
-- Development-only provider path: Docker adapter that emulates droplet workflows with synthetic API-style responses
-- Local secure storage for provider tokens and client keys
+- Windows desktop workflow with WireGuard runtime integration
+- Rust backend + Tauri + Next.js frontend architecture
+- Multi-provider adapter model
+- DigitalOcean cloud adapter and Docker local adapter
+- Secure storage for provider tokens and client keys
 - SQLite for provider, node, tunnel, and runtime metadata
 
 ## What It Does Today
@@ -33,12 +31,12 @@ Project inspiration:
 
 ## Dev Docker Provider
 
-The Docker provider is for development and test only.
+The Docker provider supports local development and repeatable integration testing.
 
 - Enabled by backend flag: `GOATSTARE_DEV_DOCKER=1`.
 - Exposed in frontend development UX when `NEXT_PUBLIC_DEV_DOCKER=1`.
 - Uses local Docker containers to emulate provider node provisioning behavior.
-- Returns deterministic dummy/synthetic provider plan and account data for local workflows.
+- Returns deterministic synthetic provider plan and account data for local workflows.
 
 This allows testing the provider abstraction path without requiring a live cloud account.
 
@@ -60,7 +58,7 @@ npm install
 npm run tauri:dev
 ```
 
-Run frontend Playwright tests (browser-mode, mocked Tauri bridge):
+Run real desktop E2E lane:
 
 ```bash
 npm run frontend:e2e
@@ -70,6 +68,7 @@ Run Tauri app with Playwright plugin enabled for native-webview E2E work:
 
 ```bash
 npm run tauri:dev:e2e
+```
 
 Run real Docker backend adapter integration test (no mock fixtures):
 
@@ -82,7 +81,6 @@ Run real Tauri Docker flow E2E (no mock fixtures):
 ```bash
 npm run tauri:e2e:docker:real
 ```
-```
 
 ## Documentation
 
@@ -94,6 +92,6 @@ npm run tauri:e2e:docker:real
 - [Tauri command contracts](docs/API_COMMANDS.md)
 - [Database schema](docs/DB_SCHEMA.md)
 - [Release checklist](docs/RELEASE_CHECKLIST.md)
-- [Known limitations](docs/KNOWN_LIMITATIONS.md)
-- [Phase 2 roadmap](docs/ROADMAP_PHASE2.md)
+- [Operational guarantees](docs/OPERATIONAL_GUARANTEES.md)
+- [Product roadmap](docs/ROADMAP.md)
 - [Contributing](docs/CONTRIBUTING.md)

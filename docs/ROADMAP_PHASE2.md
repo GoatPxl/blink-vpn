@@ -1,83 +1,41 @@
-# Phase 2 Roadmap
+# Product Roadmap
 
-## Baseline Carried Into Phase 2
+## Strategy
 
-Already in current Phase 1 iteration:
+Roadmap is organized by capability streams and measurable outcomes.
 
-- Provider adapter architecture with a generalized node lifecycle path.
-- Production adapter for DigitalOcean.
-- Development-only Docker adapter for local emulation using synthetic provider responses.
+## Stream 1: Reliability
 
-## Priority 1: Release Hardening
+- Expand end-to-end coverage for provider, node, tunnel, and cleanup workflows.
+- Strengthen reconciliation and restart recovery.
+- Improve timeout handling and retry observability.
 
-Goal: make Phase 1 safer to distribute without changing scope.
+## Stream 2: Security
 
-- Lock down CSP for the Tauri webview.
-- Add/confirm installer signing automation.
-- Add startup checks for WireGuard prereqs and clearer first-run failure messages.
-- Improve uninstall/rollback cleanup for local app data and temp artifacts.
+- Harden desktop webview security configuration.
+- Expand secret-handling verification and automated redaction checks.
+- Strengthen release signing and artifact validation.
 
-Dependency risks:
+## Stream 3: Provider Experience
 
-- Signing process may depend on company PKI or release infrastructure not present in the repo.
-- CSP hardening may require frontend asset review.
+- Expand provider adapter capabilities while preserving normalized contracts.
+- Improve provider capability signaling in the UI.
+- Extend provisioning feedback and action guidance.
 
-## Priority 2: Operational Resilience
+## Stream 4: Runtime Experience
 
-Goal: reduce operator friction during partial failures.
+- Improve tunnel health telemetry and diagnostics summaries.
+- Improve local runtime repair and recovery UX.
+- Strengthen lifecycle feedback for destructive actions.
 
-- Improve timeout coverage for long-running provisioning phases.
-- Add more explicit recovery states or guidance in the UI.
-- Expand restart reconciliation coverage for more drift cases.
+## Stream 5: Platform Expansion
 
-Dependency risks:
+- Validate additional desktop targets.
+- Add broader provider coverage.
+- Expand operational tooling for teams.
 
-- Long-running retries must remain idempotent.
-- WireGuard service availability remains an external dependency.
+## Delivery Model
 
-## Priority 3: Generalized Node API Completion
-
-Goal: complete provider-neutral node management semantics and close contract gaps.
-
-- Promote node-level `edit` semantics across adapters where capability exists.
-- Add explicit node-level `suspend` / `resume` lifecycle operations.
-- Keep `create`, `delete`, and `get_system_info` behavior consistent across provider adapters.
-- Improve capability signaling so UI can clearly indicate provider-specific feature availability.
-
-Dependency risks:
-
-- Providers differ in mutable fields and suspend semantics.
-- Contract must stay backward-compatible for existing DigitalOcean and Docker flows.
-
-## Priority 4: Observability and Supportability
-
-Goal: make troubleshooting easier without adding telemetry.
-
-- Improve local diagnostics summaries.
-- Add more structured event logging around lifecycle transitions.
-- Document common failure signatures in the runbook.
-
-Dependency risks:
-
-- Must keep all outputs redacted and local-only.
-
-## Priority 5: Provider Expansion
-
-Deferred until Phase 1 is stable.
-
-- Additional production provider adapters beyond DigitalOcean.
-- Additional operating systems.
-- Advanced routing and VPN features.
-- Collaborative/team workflows.
-
-## Suggested Milestone Slicing
-
-1. Security and release hardening.
-2. Cleanup/recovery UX improvements.
-3. Node API contract completion (`edit` + node suspend/resume).
-4. Reconciliation and timeout refinement.
-5. Additional provider adapters only after external stability.
-
-## Assumptions
-
-- TODO: project-specific fill for the first non-DigitalOcean production provider target.
+- Ship increments by verified workflow slices.
+- Keep compatibility for command contracts and schema migrations.
+- Prioritize real-lane test coverage for every shipped behavior change.
