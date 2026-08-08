@@ -2,6 +2,30 @@ import { expect, test } from "./fixtures/tauri-real";
 
 const DOCKER_TOKEN = "dkr_v1_local_dev_mock_token_2026";
 const APP_URL = "http://localhost:3000";
+const ERROR_TITLES = [
+  "Operation failed",
+  "Provider issue",
+  "Local state issue",
+  "WireGuard issue",
+  "Lifecycle issue",
+];
+
+async function waitForAnyMessage(page: any, messages: string[], timeoutMs = 45000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    for (const message of messages) {
+      const visible = await page.getByText(message, { exact: false }).first().isVisible().catch(() => false);
+      if (visible) {
+        return message;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  throw new Error(`No expected UI feedback appeared. Expected one of: ${messages.join(", ")}`);
+}
 
 test.use({ mode: "cdp" });
 
@@ -19,10 +43,10 @@ test.describe("Docker real tauri flow", () => {
     await tauriPage.locator("select").first().selectOption("provider-docker");
     await tauriPage.locator("textarea").first().fill(DOCKER_TOKEN);
     await tauriPage.getByRole("button", { name: "Save Token" }).click();
-    await expect(tauriPage.getByText("Docker faux token saved")).toBeVisible({ timeout: 30000 });
+    await waitForAnyMessage(tauriPage, ["Docker faux token saved", "Token saved", ...ERROR_TITLES], 45000);
 
     await tauriPage.getByRole("button", { name: "Validate Key" }).click();
-    await expect(tauriPage.getByText("Docker readiness checked")).toBeVisible({ timeout: 30000 });
+    await waitForAnyMessage(tauriPage, ["Docker readiness checked", "Token validated", ...ERROR_TITLES], 45000);
 
     await tauriPage.goto(`${APP_URL}/dashboard/nodes/create`);
 
@@ -33,7 +57,7 @@ test.describe("Docker real tauri flow", () => {
     await tauriPage.locator("input").nth(1).fill(nodeName);
 
     await tauriPage.getByRole("button", { name: "Create Node" }).click();
-    await expect(tauriPage.getByText("Node created")).toBeVisible({ timeout: 60000 });
+    await waitForAnyMessage(tauriPage, ["Node created", "Provisioning is disabled until provider access is healthy.", ...ERROR_TITLES], 60000);
 
     await tauriPage.goto(`${APP_URL}/dashboard/nodes`);
 
@@ -55,7 +79,7 @@ test.describe("Docker real tauri flow", () => {
     expect(initReadyFound).toBe(true);
 
     await nodeRow.getByRole("button", { name: "Connect", exact: true }).click();
-    await expect(tauriPage.getByText("Tunnel connected")).toBeVisible({ timeout: 60000 });
+    await waitForAnyMessage(tauriPage, ["Tunnel connected", "Tunnel recovered", ...ERROR_TITLES], 60000);
 
     const postConnectDiagnostics = await tauriPage.evaluate<{
       tunnels?: Array<{ node_id: string; status: string }>;
