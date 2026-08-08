@@ -12,8 +12,8 @@ use crate::backend::db::Database;
 use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus};
 use crate::backend::logging;
 use crate::backend::provider::{
-  ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError, ProviderPlanPricing,
-  ProviderRegistry, DEFAULT_REGION, DEFAULT_SIZE,
+  NodeInitRequest, ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError,
+  ProviderPlanPricing, ProviderRegistry, DEFAULT_REGION, DEFAULT_SIZE,
 };
 use crate::backend::provider::docker::DockerProviderAdapter;
 use crate::backend::secure_storage::SecureStorage;
@@ -280,20 +280,40 @@ impl Orchestrator {
         source,
       })?;
 
-    providers
-      .create_provider_droplet(
-        db,
-        secure_storage,
-        provider_id,
-        droplet_name,
-        DEFAULT_REGION,
-        DEFAULT_SIZE,
-        &artifact.cloud_init_user_data,
-      )
+    let token = providers
+      .resolve_provider_token_for_orchestrator(db, secure_storage, provider_id)
+      .map_err(|source| OrchestratorError::Provider {
+        detail: "Failed to resolve provider token before node initialization.".to_string(),
+        source,
+      })?;
+
+    let node_provider = providers
+      .node_provider_for_provider_id(db, secure_storage, provider_id)
+      .map_err(|source| OrchestratorError::Provider {
+        detail: "No node provider implementation is currently available for init flow.".to_string(),
+        source,
+      })?;
+
+    let request = NodeInitRequest {
+      node_name: droplet_name.to_string(),
+      region: DEFAULT_REGION.to_string(),
+      size_slug: DEFAULT_SIZE.to_string(),
+      init_payload: artifact.init_payload,
+      endpoint_ip: "0.0.0.0".to_string(),
+      readiness_marker_path: artifact.readiness_marker_path,
+    };
+
+    let init_result = node_provider
+      .init(&token, &request)
       .map_err(|source| OrchestratorError::Provider {
         detail: "Provisioning flow failed while creating or activating droplet.".to_string(),
-        source,
-      })
+        source: ProviderFlowError::Adapter {
+          detail: "Provider adapter init call failed.".to_string(),
+          source,
+        },
+      })?;
+
+    Ok(init_result.provisioned)
   }
 
   pub fn destroy_droplet_for_provider(
@@ -612,20 +632,23 @@ impl Orchestrator {
       })?;
 
     let flow_result: Result<CreateVpnNodeResult, OrchestratorError> = (|| {
-      let droplet = providers
-        .create_provider_droplet(
-          db,
-          secure_storage,
-          &request.provider_id,
-          &request.node_name,
-          &request.region,
-          &selected_pricing.size_slug,
-          &bootstrap_artifact.cloud_init_user_data,
-        )
+      let init_request = NodeInitRequest {
+        node_name: request.node_name.clone(),
+        region: request.region.clone(),
+        size_slug: selected_pricing.size_slug.clone(),
+        init_payload: bootstrap_artifact.init_payload.clone(),
+        endpoint_ip: "0.0.0.0".to_string(),
+        readiness_marker_path: bootstrap_artifact.readiness_marker_path.clone(),
+      };
+
+      let init_result = providers
+        .init_provider_node(db, secure_storage, &request.provider_id, &init_request)
         .map_err(|source| OrchestratorError::Provider {
           detail: "Droplet creation call failed in create-node flow.".to_string(),
           source,
         })?;
+
+      let droplet = init_result.provisioned;
 
       record_init(
         "provider.create",
@@ -2040,7 +2063,7 @@ mod tests {
       _droplet_name: &str,
       _region: &str,
       _size_slug: &str,
-      _cloud_init_user_data: &str,
+      _init_payload: &str,
     ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
       Ok(ProvisionedDroplet {
         droplet_id: 42,

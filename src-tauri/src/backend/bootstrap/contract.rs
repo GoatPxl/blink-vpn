@@ -32,7 +32,7 @@ impl Default for BootstrapParams {
 
 #[derive(Debug, Clone)]
 pub struct BootstrapArtifact {
-  pub cloud_init_user_data: String,
+  pub init_payload: String,
   pub readiness_marker_path: String,
   pub server_public_key_path: String,
   pub output_contract_preview: BootstrapOutputContract,

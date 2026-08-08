@@ -38,7 +38,7 @@ pub trait ProviderAdapter: Send + Sync {
     droplet_name: &str,
     region: &str,
     size_slug: &str,
-    cloud_init_user_data: &str,
+    init_payload: &str,
   ) -> Result<ProvisionedDroplet, ProviderAdapterError>;
   fn wait_for_bootstrap_ready(
     &self,
@@ -207,7 +207,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     droplet_name: &str,
     region: &str,
     size_slug: &str,
-    cloud_init_user_data: &str,
+    init_payload: &str,
   ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
     let request = CreateDropletRequest {
       name: droplet_name.to_string(),
@@ -223,7 +223,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
       },
       image: self.config.image.to_string(),
       tags: vec!["goatstare-phase1".to_string()],
-      user_data: Some(cloud_init_user_data.to_string()),
+      user_data: Some(init_payload.to_string()),
     };
 
     let created = self
@@ -320,6 +320,114 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
 pub struct ProvisionedDroplet {
   pub droplet_id: u64,
   pub public_ipv4: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeInitRequest {
+  pub node_name: String,
+  pub region: String,
+  pub size_slug: String,
+  pub init_payload: String,
+  pub endpoint_ip: String,
+  pub readiness_marker_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeInitResult {
+  pub provisioned: ProvisionedDroplet,
+  pub bootstrap_contract: BootstrapOutputContract,
+}
+
+pub trait NodeProvider: Send + Sync {
+  fn provider_name(&self) -> &'static str;
+  fn init(&self, token: &str, request: &NodeInitRequest) -> Result<NodeInitResult, ProviderAdapterError>;
+  fn wait_for_bootstrap_ready(
+    &self,
+    token: &str,
+    droplet_id: u64,
+    endpoint_ip: &str,
+    readiness_marker_path: &str,
+  ) -> Result<BootstrapOutputContract, ProviderAdapterError>;
+  fn get_status(&self, token: &str, droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError>;
+  fn exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError>;
+  fn delete(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError>;
+}
+
+#[derive(Clone)]
+struct AdapterNodeProvider {
+  adapter: Arc<dyn ProviderAdapter>,
+  token: Option<String>,
+}
+
+impl AdapterNodeProvider {
+  fn new(adapter: Arc<dyn ProviderAdapter>) -> Self {
+    Self { adapter, token: None }
+  }
+
+  fn with_token(adapter: Arc<dyn ProviderAdapter>, token: String) -> Self {
+    Self {
+      adapter,
+      token: Some(token),
+    }
+  }
+}
+
+impl NodeProvider for AdapterNodeProvider {
+  fn provider_name(&self) -> &'static str {
+    self.adapter.provider_name()
+  }
+
+  fn init(&self, token: &str, request: &NodeInitRequest) -> Result<NodeInitResult, ProviderAdapterError> {
+    let effective_token = self.token.as_deref().unwrap_or(token);
+
+    let provisioned = self.adapter.create_droplet(
+      effective_token,
+      &request.node_name,
+      &request.region,
+      &request.size_slug,
+      &request.init_payload,
+    )?;
+
+    let bootstrap_contract = self.adapter.wait_for_bootstrap_ready(
+      effective_token,
+      provisioned.droplet_id,
+      &request.endpoint_ip,
+      &request.readiness_marker_path,
+    )?;
+
+    Ok(NodeInitResult {
+      provisioned,
+      bootstrap_contract,
+    })
+  }
+
+  fn wait_for_bootstrap_ready(
+    &self,
+    token: &str,
+    droplet_id: u64,
+    endpoint_ip: &str,
+    readiness_marker_path: &str,
+  ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
+    let effective_token = self.token.as_deref().unwrap_or(token);
+    self
+      .adapter
+      .wait_for_bootstrap_ready(effective_token, droplet_id, endpoint_ip, readiness_marker_path)
+  }
+
+  fn get_status(&self, token: &str, droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError> {
+    let effective_token = self.token.as_deref().unwrap_or(token);
+    self.adapter.droplet_status(effective_token, droplet_id)
+  }
+
+  fn exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError> {
+    let effective_token = self.token.as_deref().unwrap_or(token);
+    self.adapter.droplet_exists(effective_token, droplet_id)
+  }
+
+  fn delete(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError> {
+    let effective_token = self.token.as_deref().unwrap_or(token);
+    self.adapter.delete_droplet(effective_token, droplet_id)
+  }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,6 +529,48 @@ impl ProviderRegistry {
       .get(&self.default_provider_slug)
       .map(|adapter| adapter.as_ref())
       .unwrap_or_else(|| panic!("default provider adapter missing: {}", self.default_provider_slug))
+  }
+
+  pub fn node_provider_for_slug(&self, slug: &str) -> Option<Arc<dyn NodeProvider>> {
+    self
+      .adapter_arc_for_slug(slug)
+      .map(|adapter| Arc::new(AdapterNodeProvider::new(adapter)) as Arc<dyn NodeProvider>)
+  }
+
+  pub fn node_provider_for_provider_id(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+  ) -> Result<Arc<dyn NodeProvider>, ProviderFlowError> {
+    let (provider, _adapter) = self.load_provider_and_adapter(db, provider_id)?;
+    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
+    let adapter = self
+      .adapter_arc_for_slug(&provider.slug)
+      .ok_or_else(|| ProviderFlowError::UnsupportedProviderSlug {
+        slug: provider.slug.clone(),
+        detail: "Provider adapter is not registered for the stored provider slug.".to_string(),
+      })?;
+
+    Ok(Arc::new(AdapterNodeProvider::with_token(adapter, token)) as Arc<dyn NodeProvider>)
+  }
+
+  pub fn node_provider_for_provider_id_allow_suspended(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+  ) -> Result<Arc<dyn NodeProvider>, ProviderFlowError> {
+    let (provider, _adapter) = self.load_provider_and_adapter_allow_suspended(db, provider_id)?;
+    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
+    let adapter = self
+      .adapter_arc_for_slug(&provider.slug)
+      .ok_or_else(|| ProviderFlowError::UnsupportedProviderSlug {
+        slug: provider.slug.clone(),
+        detail: "Provider adapter is not registered for the stored provider slug.".to_string(),
+      })?;
+
+    Ok(Arc::new(AdapterNodeProvider::with_token(adapter, token)) as Arc<dyn NodeProvider>)
   }
 
   pub fn create_digitalocean_provider_with_token(
@@ -557,22 +707,19 @@ impl ProviderRegistry {
       })
   }
 
-  pub fn create_provider_droplet(
+  pub fn init_provider_node(
     &self,
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
-    droplet_name: &str,
-    region: &str,
-    size_slug: &str,
-    cloud_init_user_data: &str,
-  ) -> Result<ProvisionedDroplet, ProviderFlowError> {
-    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
-    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
-    adapter
-      .create_droplet(&token, droplet_name, region, size_slug, cloud_init_user_data)
+    request: &NodeInitRequest,
+  ) -> Result<NodeInitResult, ProviderFlowError> {
+    let node_provider = self.node_provider_for_provider_id(db, secure_storage, provider_id)?;
+    let token = self.resolve_provider_token_for_orchestrator(db, secure_storage, provider_id)?;
+    node_provider
+      .init(&token, request)
       .map_err(|source| ProviderFlowError::Adapter {
-        detail: "Droplet provisioning through provider adapter failed.".to_string(),
+        detail: "Node initialization through NodeProvider failed.".to_string(),
         source,
       })
   }
@@ -619,9 +766,9 @@ impl ProviderRegistry {
     endpoint_ip: &str,
     readiness_marker_path: &str,
   ) -> Result<BootstrapOutputContract, ProviderFlowError> {
-    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
-    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
-    adapter
+    let node_provider = self.node_provider_for_provider_id(db, secure_storage, provider_id)?;
+    let token = self.resolve_provider_token_for_orchestrator(db, secure_storage, provider_id)?;
+    node_provider
       .wait_for_bootstrap_ready(&token, droplet_id, endpoint_ip, readiness_marker_path)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Bootstrap readiness wait failed in provider adapter.".to_string(),
@@ -636,10 +783,9 @@ impl ProviderRegistry {
     provider_id: &str,
     droplet_id: u64,
   ) -> Result<(), ProviderFlowError> {
-    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
-    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
-    adapter
-      .delete_droplet(&token, droplet_id)
+    let node_provider = self.node_provider_for_provider_id(db, secure_storage, provider_id)?;
+    node_provider
+      .delete("", droplet_id)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Droplet deletion through provider adapter failed.".to_string(),
         source,
@@ -653,10 +799,9 @@ impl ProviderRegistry {
     provider_id: &str,
     droplet_id: u64,
   ) -> Result<bool, ProviderFlowError> {
-    let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
-    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
-    adapter
-      .droplet_exists(&token, droplet_id)
+    let node_provider = self.node_provider_for_provider_id(db, secure_storage, provider_id)?;
+    node_provider
+      .exists("", droplet_id)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Droplet existence check through provider adapter failed.".to_string(),
         source,
@@ -670,10 +815,9 @@ impl ProviderRegistry {
     provider_id: &str,
     droplet_id: u64,
   ) -> Result<ProviderDropletStatus, ProviderFlowError> {
-    let (provider, adapter) = self.load_provider_and_adapter_allow_suspended(db, provider_id)?;
-    let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
-    adapter
-      .droplet_status(&token, droplet_id)
+    let node_provider = self.node_provider_for_provider_id_allow_suspended(db, secure_storage, provider_id)?;
+    node_provider
+      .get_status("", droplet_id)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Droplet status check through provider adapter failed.".to_string(),
         source,
@@ -726,6 +870,10 @@ impl ProviderRegistry {
         slug: slug.to_string(),
         detail: "Add provider adapter support or update provider configuration.".to_string(),
       })
+  }
+
+  fn adapter_arc_for_slug(&self, slug: &str) -> Option<Arc<dyn ProviderAdapter>> {
+    self.adapters_by_slug.get(slug).cloned()
   }
 
   fn resolve_provider_token(
@@ -788,14 +936,19 @@ impl ProviderRegistry {
 #[cfg(test)]
 mod tests {
   use std::path::PathBuf;
+  use std::sync::Arc;
   use std::time::{SystemTime, UNIX_EPOCH};
 
   use rusqlite::{Connection, params};
 
+  use crate::backend::bootstrap::BootstrapOutputContract;
   use crate::backend::db::Database;
   use crate::backend::secure_storage::SecureStorage;
 
-  use super::ProviderRegistry;
+  use super::{
+    Account, NodeInitRequest, ProviderAdapter, ProviderAdapterError, ProviderDropletStatus,
+    ProviderPlanPricing, ProviderRegistry, ProvisionedDroplet,
+  };
 
   fn test_db_path(test_name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -805,6 +958,91 @@ mod tests {
       .as_nanos();
     path.push(format!("goatstare_provider_{test_name}_{nanos}.sqlite3"));
     path
+  }
+
+  #[derive(Clone)]
+  struct TestProviderAdapter;
+
+  impl ProviderAdapter for TestProviderAdapter {
+    fn provider_name(&self) -> &'static str {
+      "test-provider"
+    }
+
+    fn default_regions(&self) -> &'static [&'static str] {
+      &["test-region"]
+    }
+
+    fn validate_token(&self, _token: &str) -> Result<Account, ProviderAdapterError> {
+      Ok(Account {
+        uuid: "test-account".to_string(),
+        email: "test@example.com".to_string(),
+        status: "active".to_string(),
+      })
+    }
+
+    fn list_regions(&self, _token: &str) -> Result<Vec<String>, ProviderAdapterError> {
+      Ok(vec!["test-region".to_string()])
+    }
+
+    fn list_plan_pricing(
+      &self,
+      _token: &str,
+      _region: &str,
+    ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError> {
+      Ok(Vec::new())
+    }
+
+    fn create_droplet(
+      &self,
+      _token: &str,
+      _droplet_name: &str,
+      _region: &str,
+      _size_slug: &str,
+      _init_payload: &str,
+    ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
+      Ok(ProvisionedDroplet {
+        droplet_id: 42,
+        public_ipv4: "203.0.113.10".to_string(),
+      })
+    }
+
+    fn wait_for_bootstrap_ready(
+      &self,
+      _token: &str,
+      _droplet_id: u64,
+      endpoint_ip: &str,
+      _readiness_marker_path: &str,
+    ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
+      Ok(BootstrapOutputContract {
+        server_endpoint_ip: endpoint_ip.to_string(),
+        server_public_key: "server-pub-key-123".to_string(),
+        listen_port: 51820,
+      })
+    }
+
+    fn droplet_status(
+      &self,
+      _token: &str,
+      _droplet_id: u64,
+    ) -> Result<ProviderDropletStatus, ProviderAdapterError> {
+      Ok(ProviderDropletStatus::Active)
+    }
+
+    fn droplet_exists(&self, _token: &str, _droplet_id: u64) -> Result<bool, ProviderAdapterError> {
+      Ok(true)
+    }
+
+    fn delete_droplet(&self, _token: &str, _droplet_id: u64) -> Result<(), ProviderAdapterError> {
+      Ok(())
+    }
+  }
+
+  #[test]
+  fn node_provider_registry_can_wrap_docker_adapter() {
+    let registry = ProviderRegistry::new();
+    let node_provider = registry.node_provider_for_slug("docker").expect("docker node provider should resolve");
+
+    assert_eq!(node_provider.provider_name(), "docker");
   }
 
   #[test]
@@ -892,6 +1130,43 @@ mod tests {
       .expect("provider lookup should succeed")
       .expect("provider should still exist");
     assert!(updated.token_ref.is_none());
+  }
+
+  #[test]
+  fn init_provider_node_uses_node_provider_interface() {
+    let db = Database::new(test_db_path("init_node_provider_interface"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let registry = ProviderRegistry::from_adapter(Arc::new(TestProviderAdapter));
+    let secure_storage = SecureStorage::dev_mock();
+    let provider_id = "provider-1";
+
+    registry
+      .upsert_provider_with_token(
+        &db,
+        &secure_storage,
+        provider_id,
+        "Test Provider",
+        "test-provider",
+        "test-token",
+      )
+      .expect("provider create should succeed");
+
+    let request = NodeInitRequest {
+      node_name: "test-node".to_string(),
+      region: "test-region".to_string(),
+      size_slug: "test-size".to_string(),
+      init_payload: "#!/bin/sh\necho hi".to_string(),
+      endpoint_ip: String::new(),
+      readiness_marker_path: "/tmp/marker".to_string(),
+    };
+
+    let result = registry
+      .init_provider_node(&db, &secure_storage, provider_id, &request)
+      .expect("node init should succeed through NodeProvider interface");
+
+    assert_eq!(result.provisioned.droplet_id, 42);
+    assert_eq!(result.bootstrap_contract.server_public_key, "server-pub-key-123");
   }
 
   #[cfg(target_os = "windows")]

@@ -22,7 +22,7 @@ impl Bootstrap {
   ) -> Result<BootstrapArtifact, BootstrapError> {
     super::contract::validate_bootstrap_params(params)?;
 
-    let cloud_init_user_data = cloud_init::build_cloud_init_user_data(params);
+    let init_payload = cloud_init::build_cloud_init_user_data(params);
     let output_contract_preview = BootstrapOutputContract {
       server_endpoint_ip: params.server_endpoint_ip.clone(),
       server_public_key: "<resolved-from-readiness-marker>".to_string(),
@@ -30,7 +30,7 @@ impl Bootstrap {
     };
 
     Ok(BootstrapArtifact {
-      cloud_init_user_data,
+      init_payload,
       readiness_marker_path: READINESS_MARKER_PATH.to_string(),
       server_public_key_path: "/etc/wireguard/server_public.key".to_string(),
       output_contract_preview,
@@ -43,7 +43,7 @@ impl Bootstrap {
   ) -> Result<BootstrapArtifact, BootstrapError> {
     super::contract::validate_bootstrap_params(params)?;
 
-    let cloud_init_user_data = docker_init::build_docker_init_script(params);
+    let init_payload = docker_init::build_docker_init_script(params);
     let output_contract_preview = BootstrapOutputContract {
       server_endpoint_ip: params.server_endpoint_ip.clone(),
       server_public_key: "<resolved-from-readiness-marker>".to_string(),
@@ -51,7 +51,7 @@ impl Bootstrap {
     };
 
     Ok(BootstrapArtifact {
-      cloud_init_user_data,
+      init_payload,
       readiness_marker_path: READINESS_MARKER_PATH.to_string(),
       server_public_key_path: "/etc/wireguard/server_public.key".to_string(),
       output_contract_preview,

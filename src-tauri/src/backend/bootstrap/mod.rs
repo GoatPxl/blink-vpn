@@ -33,26 +33,26 @@ mod tests {
       .render_cloud_init(&params)
       .expect("cloud-init render should succeed");
 
-    assert!(artifact.cloud_init_user_data.contains("#cloud-config"));
-    assert!(artifact.cloud_init_user_data.contains("- wireguard"));
-    assert!(artifact.cloud_init_user_data.contains("- wireguard-tools"));
-    assert!(artifact.cloud_init_user_data.contains("- iptables"));
-    assert!(artifact.cloud_init_user_data.contains("net.ipv4.ip_forward=1"));
-    assert!(artifact.cloud_init_user_data.contains("net.ipv4.conf.all.forwarding=1"));
-    assert!(artifact.cloud_init_user_data.contains("net.ipv4.conf.default.forwarding=1"));
-    assert!(artifact.cloud_init_user_data.contains("goatstare.bootstrap.stage=${stage}"));
-    assert!(artifact.cloud_init_user_data.contains("log_stage \"start\""));
-    assert!(artifact.cloud_init_user_data.contains("log_stage \"complete\""));
-    assert!(artifact.cloud_init_user_data.contains("log_stage \"marker-validate\""));
-    assert!(artifact.cloud_init_user_data.contains("EXPECTED_MARKER"));
-    assert!(artifact.cloud_init_user_data.contains("ACTUAL_MARKER=$(cat ${MARKER_PATH})"));
-    assert!(artifact.cloud_init_user_data.contains("iptables -A GOATSTARE-INPUT -i ${WG_IFACE} -j ACCEPT"));
-    assert!(artifact.cloud_init_user_data.contains("iptables -t nat -A POSTROUTING"));
-    assert!(artifact.cloud_init_user_data.contains("wg genkey"));
-    assert!(artifact.cloud_init_user_data.contains("wg-quick@${WG_IFACE}"));
-    assert!(artifact.cloud_init_user_data.contains(READINESS_MARKER_PATH));
-    assert!(artifact.cloud_init_user_data.contains("--dport ${WG_PORT}"));
-    assert!(artifact.cloud_init_user_data.contains("package_reboot_if_required: false"));
+    assert!(artifact.init_payload.contains("#cloud-config"));
+    assert!(artifact.init_payload.contains("- wireguard"));
+    assert!(artifact.init_payload.contains("- wireguard-tools"));
+    assert!(artifact.init_payload.contains("- iptables"));
+    assert!(artifact.init_payload.contains("net.ipv4.ip_forward=1"));
+    assert!(artifact.init_payload.contains("net.ipv4.conf.all.forwarding=1"));
+    assert!(artifact.init_payload.contains("net.ipv4.conf.default.forwarding=1"));
+    assert!(artifact.init_payload.contains("goatstare.bootstrap.stage=${stage}"));
+    assert!(artifact.init_payload.contains("log_stage \"start\""));
+    assert!(artifact.init_payload.contains("log_stage \"complete\""));
+    assert!(artifact.init_payload.contains("log_stage \"marker-validate\""));
+    assert!(artifact.init_payload.contains("EXPECTED_MARKER"));
+    assert!(artifact.init_payload.contains("ACTUAL_MARKER=$(cat ${MARKER_PATH})"));
+    assert!(artifact.init_payload.contains("iptables -A GOATSTARE-INPUT -i ${WG_IFACE} -j ACCEPT"));
+    assert!(artifact.init_payload.contains("iptables -t nat -A POSTROUTING"));
+    assert!(artifact.init_payload.contains("wg genkey"));
+    assert!(artifact.init_payload.contains("wg-quick@${WG_IFACE}"));
+    assert!(artifact.init_payload.contains(READINESS_MARKER_PATH));
+    assert!(artifact.init_payload.contains("--dport ${WG_PORT}"));
+    assert!(artifact.init_payload.contains("package_reboot_if_required: false"));
   }
 
   #[test]
@@ -70,17 +70,17 @@ mod tests {
       .render_docker_init(&params)
       .expect("docker init render should succeed");
 
-    assert!(artifact.cloud_init_user_data.contains("#!/usr/bin/env bash"));
-    assert!(artifact.cloud_init_user_data.contains("apt-get update"));
-    assert!(artifact.cloud_init_user_data.contains("apt-get install -y --no-install-recommends wireguard-tools iproute2 iptables"));
-    assert!(artifact.cloud_init_user_data.contains("/etc/sysctl.d/99-goatstare-vpn.conf"));
-    assert!(artifact.cloud_init_user_data.contains("goatstare.bootstrap.stage=${stage}"));
-    assert!(artifact.cloud_init_user_data.contains("wg genkey"));
-    assert!(artifact.cloud_init_user_data.contains("wg-quick up \"${WG_IFACE}\""));
-    assert!(!artifact.cloud_init_user_data.contains("systemctl enable --now"));
-    assert!(artifact.cloud_init_user_data.contains(READINESS_MARKER_PATH));
-    assert!(!artifact.cloud_init_user_data.contains("#cloud-config"));
-    assert!(!artifact.cloud_init_user_data.contains("apk add"));
+    assert!(artifact.init_payload.contains("#!/usr/bin/env bash"));
+    assert!(artifact.init_payload.contains("apt-get update"));
+    assert!(artifact.init_payload.contains("apt-get install -y --no-install-recommends wireguard-tools iproute2 iptables"));
+    assert!(artifact.init_payload.contains("/etc/sysctl.d/99-goatstare-vpn.conf"));
+    assert!(artifact.init_payload.contains("goatstare.bootstrap.stage=${stage}"));
+    assert!(artifact.init_payload.contains("wg genkey"));
+    assert!(artifact.init_payload.contains("wg-quick up \"${WG_IFACE}\""));
+    assert!(!artifact.init_payload.contains("systemctl enable --now"));
+    assert!(artifact.init_payload.contains(READINESS_MARKER_PATH));
+    assert!(!artifact.init_payload.contains("#cloud-config"));
+    assert!(!artifact.init_payload.contains("apk add"));
   }
 
   #[test]

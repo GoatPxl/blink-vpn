@@ -607,7 +607,7 @@ impl DockerProviderAdapter {
 
     Bootstrap::new()
       .render_docker_init(&BootstrapParams::default())
-      .map(|artifact| artifact.cloud_init_user_data)
+      .map(|artifact| artifact.init_payload)
       .map_err(|source| ProviderAdapterError::Unsupported {
         detail: format!(
           "Could not render default Docker init payload for direct Docker adapter provisioning: {}",
@@ -826,7 +826,7 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     droplet_name: &str,
     _region: &str,
     size_slug: &str,
-    cloud_init_user_data: &str,
+    init_payload: &str,
   ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let _ = Self::ensure_daemon_available()?;
@@ -885,7 +885,7 @@ impl super::ProviderAdapter for DockerProviderAdapter {
       }
     };
 
-    let docker_init_payload = Self::resolve_docker_init_payload(cloud_init_user_data)?;
+    let docker_init_payload = Self::resolve_docker_init_payload(init_payload)?;
     Self::stage_docker_init_script(&container_id, &docker_init_payload)?;
 
     let public_ipv4 = Self::docker_public_endpoint().to_string();
@@ -991,7 +991,7 @@ mod tests {
     let install_script = Bootstrap::new()
       .render_docker_init(&BootstrapParams::default())
       .expect("docker init render should succeed")
-      .cloud_init_user_data;
+      .init_payload;
     assert!(install_script.contains("apt-get update"));
     assert!(install_script.contains("apt-get install -y --no-install-recommends wireguard-tools iproute2 iptables"));
     assert!(!install_script.contains("apk add"));
