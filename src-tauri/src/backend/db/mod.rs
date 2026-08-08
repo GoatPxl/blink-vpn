@@ -888,6 +888,41 @@ impl Database {
     Ok(output)
   }
 
+  pub fn update_tunnel_identity(
+    &self,
+    id: &str,
+    name: &str,
+    interface_name: Option<&str>,
+  ) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let changed = connection
+      .execute(
+        "UPDATE tunnels
+         SET name = ?2,
+             interface_name = ?3,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1",
+        params![id, name, interface_name],
+      )
+      .map_err(|source| DbError::Query {
+        action: "update_tunnel_identity",
+        detail: "Failed updating tunnel identity fields."
+          .to_string(),
+        source,
+      })?;
+
+    if changed == 0 {
+      return Err(DbError::NotFound {
+        entity: "tunnel",
+        id: id.to_string(),
+        detail: "Tunnel identity update skipped because no row matched the id."
+          .to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
   pub fn update_tunnel_status(
     &self,
     id: &str,

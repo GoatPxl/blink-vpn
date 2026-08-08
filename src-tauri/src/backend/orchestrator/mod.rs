@@ -27,6 +27,8 @@ use crate::backend::wireguard::{
 #[derive(Clone)]
 pub struct Orchestrator;
 
+const DEFAULT_TUNNEL_BASENAME: &str = "primary";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateVpnNodeRequest {
   pub node_id: String,
@@ -810,6 +812,8 @@ impl Orchestrator {
       });
     }
 
+    let canonical_tunnel_name = canonical_tunnel_name_for_node(&node.name);
+
     let existing = db
       .get_tunnel(&request.tunnel_id)
       .map_err(|source| OrchestratorError::Database {
@@ -822,8 +826,8 @@ impl Orchestrator {
         .create_tunnel(
           &request.tunnel_id,
           &request.node_id,
-          &request.tunnel_name,
-          Some(&request.tunnel_name),
+          &canonical_tunnel_name,
+          Some(&canonical_tunnel_name),
         )
         .map_err(|source| OrchestratorError::Database {
           detail: "Failed creating tunnel row before activation.".to_string(),
@@ -836,6 +840,21 @@ impl Orchestrator {
           node_id: request.node_id.clone(),
           detail: "Tunnel id already belongs to a different vpn node.".to_string(),
         });
+      }
+
+      if existing.name != canonical_tunnel_name
+        || existing.interface_name.as_deref() != Some(canonical_tunnel_name.as_str())
+      {
+        db
+          .update_tunnel_identity(
+            &request.tunnel_id,
+            &canonical_tunnel_name,
+            Some(&canonical_tunnel_name),
+          )
+          .map_err(|source| OrchestratorError::Database {
+            detail: "Failed normalizing tunnel name for existing tunnel.".to_string(),
+            source,
+          })?;
       }
     }
 
@@ -967,7 +986,7 @@ impl Orchestrator {
 
     Ok(CreateClientTunnelResult {
       tunnel_id: request.tunnel_id.clone(),
-      tunnel_name: request.tunnel_name.clone(),
+      tunnel_name: canonical_tunnel_name,
       client_public_key: keypair.public_key,
     })
   }
@@ -1098,6 +1117,29 @@ impl Orchestrator {
       });
     }
 
+    let canonical_tunnel_name = canonical_tunnel_name_for_node(&node.name);
+    let previous_tunnel_name = tunnel.name.clone();
+    if previous_tunnel_name != canonical_tunnel_name
+      || tunnel.interface_name.as_deref() != Some(canonical_tunnel_name.as_str())
+    {
+      // Best-effort migration cleanup for legacy/randomized tunnel services.
+      // Ignore cleanup errors so connect can still proceed.
+      if previous_tunnel_name != canonical_tunnel_name {
+        let _ = wireguard.unregister_tunnel(&previous_tunnel_name);
+      }
+
+      db
+        .update_tunnel_identity(
+          &request.tunnel_id,
+          &canonical_tunnel_name,
+          Some(&canonical_tunnel_name),
+        )
+        .map_err(|source| OrchestratorError::Database {
+          detail: "Failed normalizing tunnel identity before connect flow.".to_string(),
+          source,
+        })?;
+    }
+
     let provider = db
       .get_provider(&node.provider_id)
       .map_err(|source| OrchestratorError::Database {
@@ -1113,34 +1155,75 @@ impl Orchestrator {
       load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, &tunnel)?;
 
     // Always capture the latest connect config in diagnostics, even when connect is idempotent.
-    wireguard.record_connect_trace_snapshot(&tunnel.name, &connect_config);
+    wireguard.record_connect_trace_snapshot(&canonical_tunnel_name, &connect_config);
 
     if tunnel.status == TunnelStatus::Connected && node.lifecycle_status == NodeLifecycleStatus::Connected {
-      let runtime = self.read_client_tunnel_status(wireguard, db, &request.tunnel_id)?;
-      if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
-        return Ok(());
+      if let Ok(runtime) = wireguard.read_tunnel_status(&canonical_tunnel_name) {
+        if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
+          return Ok(());
+        }
       }
     }
 
-    wireguard
-      .import_tunnel(&tunnel.name, &connect_config)
-      .map_err(|source| OrchestratorError::WireGuard {
-        detail: "Could not import client tunnel into WireGuard for Windows during connect flow."
-          .to_string(),
-        source,
-      })?;
+    let mut imported_in_this_connect = false;
+    match wireguard.read_tunnel_status(&canonical_tunnel_name) {
+      Ok(runtime) => {
+        if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
+          persist_tunnel_stats_snapshot(db, &request.tunnel_id, &runtime)?;
+          let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Connected, None);
+          let _ = db.transition_vpn_node_status(&request.node_id, NodeLifecycleStatus::Connected, None);
+          return Ok(());
+        }
+      }
+      Err(WireGuardError::TunnelNotFound { .. }) => {
+        wireguard
+          .import_tunnel(&canonical_tunnel_name, &connect_config)
+          .map_err(|source| OrchestratorError::WireGuard {
+            detail: "Could not import client tunnel into WireGuard for Windows during connect flow."
+              .to_string(),
+            source,
+          })?;
+        imported_in_this_connect = true;
+      }
+      Err(source) => {
+        return Err(OrchestratorError::WireGuard {
+          detail: "Could not read WireGuard tunnel status before connect activation.".to_string(),
+          source,
+        });
+      }
+    }
 
-    if let Err(source) = wireguard.activate_tunnel(&tunnel.name) {
-      let _ = wireguard.unregister_tunnel(&tunnel.name);
-      let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel activation failed; service was removed."));
-      return Err(OrchestratorError::WireGuard {
-        detail: "Could not activate WireGuard tunnel service in connect flow.".to_string(),
-        source,
-      });
+    if let Err(source) = wireguard.activate_tunnel(&canonical_tunnel_name) {
+      if matches!(source, WireGuardError::TunnelNotFound { .. }) && !imported_in_this_connect {
+        wireguard
+          .import_tunnel(&canonical_tunnel_name, &connect_config)
+          .map_err(|import_source| OrchestratorError::WireGuard {
+            detail: "Could not import client tunnel after missing-service activation response."
+              .to_string(),
+            source: import_source,
+          })?;
+
+        wireguard
+          .activate_tunnel(&canonical_tunnel_name)
+          .map_err(|activate_source| OrchestratorError::WireGuard {
+            detail: "Could not activate WireGuard tunnel service after re-import.".to_string(),
+            source: activate_source,
+          })?;
+      } else {
+        if imported_in_this_connect {
+          let _ = wireguard.unregister_tunnel(&canonical_tunnel_name);
+          let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel activation failed; service was removed."));
+        }
+
+        return Err(OrchestratorError::WireGuard {
+          detail: "Could not activate WireGuard tunnel service in connect flow.".to_string(),
+          source,
+        });
+      }
     }
 
     let runtime = wireguard
-      .read_tunnel_status(&tunnel.name)
+      .read_tunnel_status(&canonical_tunnel_name)
       .map_err(|source| OrchestratorError::WireGuard {
         detail: "Could not verify tunnel runtime state after connect.".to_string(),
         source,
@@ -1166,7 +1249,7 @@ impl Orchestrator {
       return Ok(());
     }
 
-    let _ = wireguard.unregister_tunnel(&tunnel.name);
+    let _ = wireguard.unregister_tunnel(&canonical_tunnel_name);
     let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel runtime did not report Running; service was removed."));
 
     Err(OrchestratorError::InvalidState {
@@ -3038,4 +3121,36 @@ fn probe_external_ipv4() -> Option<String> {
   }
 
   None
+}
+
+fn canonical_tunnel_name_for_node(node_name: &str) -> String {
+  let sanitized = node_name
+    .trim()
+    .chars()
+    .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' })
+    .collect::<String>();
+
+  let collapsed = sanitized
+    .split('-')
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("-");
+
+  let base = if collapsed.is_empty() {
+    DEFAULT_TUNNEL_BASENAME.to_string()
+  } else {
+    collapsed
+  };
+
+  let mut name = format!("{base}-wg");
+  if name.len() > 63 {
+    name.truncate(63);
+    name = name.trim_end_matches('-').to_string();
+  }
+
+  if name.is_empty() {
+    "primary-wg".to_string()
+  } else {
+    name
+  }
 }

@@ -616,21 +616,20 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     setBusyAction("connect-tunnel");
     try {
       let tunnelForNode = tunnels.find((tunnel) => tunnel.node_id === node.id) ?? null;
+      const canonicalTunnelName = `${node.name
+        .trim()
+        .replace(/[^A-Za-z0-9_-]+/g, "-")
+        .replace(/-{2,}/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 56) || "primary"}-wg`;
+      const canonicalTunnelId = `tunnel-${node.id}`;
 
       if (!tunnelForNode) {
         setBusyAction("create-tunnel");
-        const tunnelId = `tunnel-${crypto.randomUUID()}`;
-        const sanitizedName = node.name
-          .trim()
-          .replace(/[^A-Za-z0-9_-]+/g, "-")
-          .replace(/-{2,}/g, "-")
-          .replace(/^-|-$/g, "")
-          .slice(0, 28) || "primary";
-
         await createAndActivateClientTunnel({
-          tunnelId,
+          tunnelId: canonicalTunnelId,
           nodeId: node.id,
-          tunnelName: `${sanitizedName}-wg`,
+          tunnelName: canonicalTunnelName,
           clientAddressCidr: "10.66.0.2/32",
           dnsServer: "1.1.1.1",
           allowedIps: ["0.0.0.0/0", "::/0"],
@@ -669,7 +668,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
             await createAndActivateClientTunnel({
               tunnelId: recoverableTunnel.id,
               nodeId: recoverableTunnel.node_id,
-              tunnelName: recoverableTunnel.name,
+              tunnelName: canonicalTunnelName,
               clientAddressCidr: "10.66.0.2/32",
               dnsServer: "1.1.1.1",
               allowedIps: ["0.0.0.0/0", "::/0"],
@@ -723,7 +722,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           await createAndActivateClientTunnel({
             tunnelId: tunnel.id,
             nodeId: tunnel.node_id,
-            tunnelName: tunnel.name,
+            tunnelName: `${(nodes.find((node) => node.id === tunnel.node_id)?.name ?? tunnel.name)
+              .trim()
+              .replace(/[^A-Za-z0-9_-]+/g, "-")
+              .replace(/-{2,}/g, "-")
+              .replace(/^-|-$/g, "")
+              .slice(0, 56) || "primary"}-wg`,
             clientAddressCidr: "10.66.0.2/32",
             dnsServer: "1.1.1.1",
             allowedIps: ["0.0.0.0/0", "::/0"],
@@ -747,7 +751,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     } finally {
       setBusyAction(null);
     }
-  }, [handleError, loadDashboard, pushToast, refreshHealth]);
+  }, [handleError, loadDashboard, nodes, pushToast, refreshHealth]);
 
   const disconnectTunnel = useCallback(async (tunnel: TunnelRecord) => {
     setBusyAction("disconnect-tunnel");

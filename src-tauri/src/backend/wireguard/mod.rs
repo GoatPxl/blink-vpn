@@ -432,23 +432,31 @@ impl WireGuardManager {
       "{} /installtunnelservice {}",
       wireguard_program, config_path_string
     ));
-    let result = match self.runner.run(&wireguard_program, &install_args, None) {
-      Ok(output) => Ok(output),
-      Err(source) => {
-        let should_retry_elevated = matches!(
-          &source,
-          CommandExecError::NonZeroExit { detail, .. }
-            if is_windows_access_denied_detail(detail)
-        );
+    let result = if cfg!(target_os = "windows") && !cfg!(test) {
+      self.record_command(&format!(
+        "{} /installtunnelservice {} (via UAC)",
+        wireguard_program, config_path_string
+      ));
+      run_wireguard_via_uac(&wireguard_program, &install_args)
+    } else {
+      match self.runner.run(&wireguard_program, &install_args, None) {
+        Ok(output) => Ok(output),
+        Err(source) => {
+          let should_retry_elevated = matches!(
+            &source,
+            CommandExecError::NonZeroExit { detail, .. }
+              if is_windows_access_denied_detail(detail)
+          );
 
-        if should_retry_elevated {
-          self.record_command(&format!(
-            "{} /installtunnelservice {} (retry via UAC)",
-            wireguard_program, config_path_string
-          ));
-          run_wireguard_via_uac(&wireguard_program, &install_args)
-        } else {
-          Err(source)
+          if should_retry_elevated {
+            self.record_command(&format!(
+              "{} /installtunnelservice {} (retry via UAC)",
+              wireguard_program, config_path_string
+            ));
+            run_wireguard_via_uac(&wireguard_program, &install_args)
+          } else {
+            Err(source)
+          }
         }
       }
     }
@@ -692,23 +700,31 @@ impl WireGuardManager {
       "{} /uninstalltunnelservice {}",
       wireguard_program, tunnel_name
     ));
-    let result = match self.runner.run(&wireguard_program, &uninstall_args, None) {
-      Ok(output) => Ok(output),
-      Err(source) => {
-        let should_retry_elevated = matches!(
-          &source,
-          CommandExecError::NonZeroExit { detail, .. }
-            if is_windows_access_denied_detail(detail)
-        );
+    let result = if cfg!(target_os = "windows") && !cfg!(test) {
+      self.record_command(&format!(
+        "{} /uninstalltunnelservice {} (via UAC)",
+        wireguard_program, tunnel_name
+      ));
+      run_wireguard_via_uac(&wireguard_program, &uninstall_args)
+    } else {
+      match self.runner.run(&wireguard_program, &uninstall_args, None) {
+        Ok(output) => Ok(output),
+        Err(source) => {
+          let should_retry_elevated = matches!(
+            &source,
+            CommandExecError::NonZeroExit { detail, .. }
+              if is_windows_access_denied_detail(detail)
+          );
 
-        if should_retry_elevated {
-          self.record_command(&format!(
-            "{} /uninstalltunnelservice {} (retry via UAC)",
-            wireguard_program, tunnel_name
-          ));
-          run_wireguard_via_uac(&wireguard_program, &uninstall_args)
-        } else {
-          Err(source)
+          if should_retry_elevated {
+            self.record_command(&format!(
+              "{} /uninstalltunnelservice {} (retry via UAC)",
+              wireguard_program, tunnel_name
+            ));
+            run_wireguard_via_uac(&wireguard_program, &uninstall_args)
+          } else {
+            Err(source)
+          }
         }
       }
     }
