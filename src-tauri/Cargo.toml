@@ -29,7 +29,7 @@ keyring = "3"
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
-tauri-plugin-playwright = "0.4.1"
+tauri-plugin-playwright = { version = "0.4.1", optional = true }
 defguard_wireguard_rs = "0.11"
 wireguard-nt = "0.5"
 
@@ -37,4 +37,4 @@ wireguard-nt = "0.5"
 mockito = "1"
 
 [features]
-e2e-testing = []
+e2e-testing = ["tauri-plugin-playwright"]
