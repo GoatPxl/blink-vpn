@@ -388,7 +388,6 @@ impl Orchestrator {
     )?;
 
     for tunnel in &tunnels {
-      let _ = wireguard.deactivate_tunnel_for_mode(connection_mode, &tunnel.name);
       let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &tunnel.name);
     }
 
@@ -1238,6 +1237,25 @@ impl Orchestrator {
               .to_string(),
             source,
           })?;
+
+        match wireguard.read_tunnel_status_for_mode(connection_mode, &canonical_tunnel_name) {
+          Ok(_) => {}
+          Err(source @ WireGuardError::TunnelNotFound { .. }) => {
+            return Err(OrchestratorError::WireGuard {
+              detail: "Tunnel import completed but no local WireGuard tunnel service was created."
+                .to_string(),
+              source,
+            });
+          }
+          Err(source) => {
+            return Err(OrchestratorError::WireGuard {
+              detail: "Could not verify WireGuard tunnel service after import in connect flow."
+                .to_string(),
+              source,
+            });
+          }
+        }
+
         imported_in_this_connect = true;
       }
       Err(source) => {
@@ -2403,6 +2421,10 @@ mod tests {
 
   fn setup_connected_node_and_tunnel(db: &Database) {
     db
+      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
+      .expect("wireguard connection mode should switch to user for test");
+
+    db
       .create_vpn_node("node-connect", TEST_PROVIDER_ID, "Node Connect", "nyc1")
       .expect("node should insert");
     db
@@ -2434,6 +2456,10 @@ mod tests {
   }
 
   fn setup_ready_node_and_tunnel(db: &Database, secure_storage: &SecureStorage) {
+    db
+      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
+      .expect("wireguard connection mode should switch to user for test");
+
     db
       .create_vpn_node("node-ready", TEST_PROVIDER_ID, "Node Ready", "nyc1")
       .expect("node should insert");
@@ -2671,6 +2697,9 @@ mod tests {
   fn connect_flow_requires_existing_tunnel() {
     let db = Database::new(test_db_path("connect_missing_tunnel"));
     db.run_migrations().expect("migrations should succeed");
+    db
+      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
+      .expect("wireguard connection mode should switch to user for test");
 
     db
       .update_provider_token_ref(TEST_PROVIDER_ID, Some("do-token:provider-1:abc"))
@@ -2843,6 +2872,9 @@ mod tests {
   fn reconcile_flags_deleted_droplet() {
     let db = Database::new(test_db_path("reconcile_deleted_droplet"));
     db.run_migrations().expect("migrations should succeed");
+    db
+      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
+      .expect("wireguard connection mode should switch to user for test");
 
     let secure_storage = SecureStorage::dev_mock();
     setup_provider_and_token(&db, &secure_storage);
@@ -2959,6 +2991,9 @@ mod tests {
   fn force_cleanup_removes_partial_provisioning_state() {
     let db = Database::new(test_db_path("force_cleanup_partial"));
     db.run_migrations().expect("migrations should succeed");
+    db
+      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
+      .expect("wireguard connection mode should switch to user for test");
 
     let secure_storage = SecureStorage::dev_mock();
     setup_provider_and_token(&db, &secure_storage);
