@@ -18,9 +18,10 @@
 
 ### Connect
 
-1. Create and activate tunnel.
-2. Connect tunnel.
-3. Confirm health panel reports `connected`.
+1. Confirm the Settings connection mode is correct for the local machine (`Admin Mode` or `User Mode`).
+2. Create and activate tunnel.
+3. Connect tunnel.
+4. Confirm health panel reports `connected`.
 
 ### Disconnect and Destroy
 
@@ -44,7 +45,7 @@ Use this order for fast recovery:
 | --- | --- | --- |
 | Provider token invalid | Re-save token, validate token | Provider status healthy |
 | Provision timeout | Refresh state, run cleanup if needed | Node reaches `ready` or is fully removed |
-| WireGuard import/connect failure | Repair WireGuard runtime and retry | Tunnel reaches `connected` |
+| WireGuard runtime or mode failure | Repair the local runtime, confirm the selected mode, and retry | Tunnel reaches `connected` |
 | Stale node/tunnel state | Force cleanup and re-run flow | Local and remote state aligned |
 | Docker readiness failure | Start Docker and rerun readiness check | Readiness reports installed + daemon reachable |
 

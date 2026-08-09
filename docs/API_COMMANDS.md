@@ -39,9 +39,9 @@ Provider adapters currently included:
 | `list_provider_regions` | `provider_id` | `string[]` | Region catalog |
 | `list_provider_pricing` | `provider_id`, `region` | `ProviderPricingResponse` | Plan and pricing catalog |
 | `create_vpn_node_to_ready` | `node_id`, `provider_id`, `node_name`, `region`, `plan_key` | `string` | Provision and bootstrap workflow |
-| `create_and_activate_client_tunnel` | `tunnel_id`, `node_id`, `tunnel_name`, `client_address_cidr`, `dns_server?`, `allowed_ips` | `string` | Generates keypair, imports tunnel, activates tunnel |
-| `activate_client_tunnel` | `tunnel_id` | `void` | Activates a local tunnel |
-| `deactivate_client_tunnel` | `tunnel_id` | `void` | Deactivates a local tunnel |
+| `create_and_activate_client_tunnel` | `tunnel_id`, `node_id`, `tunnel_name`, `client_address_cidr`, `dns_server?`, `allowed_ips` | `string` | Generates keypair, configures the local runtime, and activates the tunnel according to the selected mode |
+| `activate_client_tunnel` | `tunnel_id` | `void` | Activates a local tunnel through the configured WireGuard mode |
+| `deactivate_client_tunnel` | `tunnel_id` | `void` | Deactivates a local tunnel through the configured WireGuard mode |
 | `connect_tunnel` | `node_id`, `tunnel_id` | `void` | Marks tunnel connected and updates node lifecycle |
 | `disconnect_tunnel` | `node_id`, `tunnel_id` | `void` | Marks tunnel disconnected and updates node lifecycle |
 | `suspend_provider` | `provider_id` | `void` | Suspends provider operations |
@@ -101,6 +101,6 @@ Create node complete: node_id=node-1, droplet_id=42, endpoint_ip=203.0.113.10, l
 | Class | Typical source | UI guidance |
 | --- | --- | --- |
 | Provider | token validation, create/delete, region/pricing fetch | Validate token, check provider status, retry |
-| WireGuard | service/tooling/import/connect failures | Repair local runtime, retry, use cleanup when needed |
+| WireGuard | local runtime, mode selection, import, or connect failures | Repair the local runtime, retry, use cleanup when needed |
 | State | stale rows, transition conflicts, interrupted flows | Refresh, reconcile, run cleanup |
 | Unknown | unclassified exceptions | Retry and export diagnostics |

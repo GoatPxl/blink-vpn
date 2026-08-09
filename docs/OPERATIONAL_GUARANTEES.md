@@ -9,7 +9,7 @@
 
 ## Platform and Runtime Notes
 
-- Primary desktop target is Windows with local WireGuard runtime integration.
+- Primary desktop target is Windows with DefGuard-managed local WireGuard runtime integration.
 - Provider orchestration supports cloud adapter and local Docker adapter workflows.
 - Local diagnostics and logs are available for support and incident analysis.
 

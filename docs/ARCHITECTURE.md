@@ -11,7 +11,7 @@ Stack:
 - Rust backend for orchestration, provider adapters, lifecycle state, and diagnostics
 - SQLite for local metadata and runtime snapshots
 - Windows Credential Manager for secret storage
-- Host WireGuard runtime installed on the machine running the app, with `wg` accessible to the app process.
+- DefGuard-managed WireGuard runtime on the machine running the app, backed by `wireguard-nt` and a single connection-mode setting.
 
 Included provider adapters:
 
@@ -30,7 +30,7 @@ flowchart LR
   NP --> DKR[Docker adapter]
   ORCH --> DB[(SQLite)]
   ORCH --> SEC[Credential Manager]
-  ORCH --> WG[WireGuard runtime]
+  ORCH --> RUNTIME[DefGuard WireGuard runtime]
   DO --> DOAPI[DigitalOcean API]
   DKR --> DKRCLI[Docker CLI]
 ```
@@ -43,8 +43,15 @@ flowchart LR
 - Provider registry: adapter resolution by provider slug and NodeProvider construction.
 - NodeProvider: provider-neutral lifecycle contract for init, bootstrap readiness, status, existence checks, and delete.
 - Provider adapters: low-level provider implementation details for validate, catalog, create, wait, and delete.
-- WireGuard manager: import, activate, deactivate, remove local tunnel interfaces.
+- WireGuard manager: generate keys, configure local tunnels through the DefGuard runtime, activate/deactivate connections, and clean up local interfaces.
 - Key management: generate and store key material on the app host; never generate client keys on remote nodes.
+
+## Connection Modes
+
+- Settings exposes one WireGuard mode toggle: `Admin Mode` or `User Mode`.
+- `Admin Mode` uses a privileged virtual adapter workflow and can require Windows elevation prompts during tunnel creation or cleanup.
+- `User Mode` uses the installed WireGuard for Windows service path without creating an app-managed virtual adapter.
+- Both modes flow through the same typed Tauri/backend contracts; the selected mode only changes how the local runtime is configured.
 
 ## Unified NodeProvider Contract
 
@@ -88,24 +95,24 @@ State changes are validated in backend transition guards.
 - Frontend input boundary: all command inputs are treated as untrusted.
 - Secret boundary: secure storage keeps secret values out of SQLite.
 - Provider boundary: remote API responses are validated and normalized.
-- Local runtime boundary: WireGuard and Docker command output is treated as untrusted process output.
+- Local runtime boundary: DefGuard/WireGuard runtime and Docker command output is treated as untrusted process output.
 
 ## Data Flow
 
 1. Register and validate provider credentials.
 2. Fetch region and pricing catalog.
-3. Verify WireGuard is installed on the app host and `wg` is callable by the app.
+3. Verify the DefGuard-managed WireGuard runtime prerequisites are available on the app host.
 4. Generate WireGuard keypair on the app host (where the app resides) and persist secrets locally.
 5. Provision node with an init script that receives and applies the generated public key.
 6. Wait for bootstrap readiness and verify node-side WireGuard configuration.
-7. Import/activate client tunnel locally.
+7. Configure and activate the client tunnel locally using the selected connection mode.
 8. Poll health and diagnostics.
 9. Disconnect, destroy, or force-cleanup as required.
 
 ## Key Generation And Bootstrap Requirements
 
 - Key generation location: WireGuard key generation must happen on the same machine where the app runs.
-- Host dependency: WireGuard must be installed on that host system, and the app runtime must have command access to `wg`.
+- Host dependency: the app host must provide the DefGuard runtime DLL resources and any Windows WireGuard service dependencies required by the selected connection mode.
 - Private key handling: private key material remains local to the app host and secure storage boundary.
 - Public key propagation: the generated public key is injected into the provider/node init script payload.
 - Node bootstrap contract: init script must set the public key in node WireGuard config during first boot.
@@ -115,4 +122,4 @@ State changes are validated in backend transition guards.
 
 - Idempotent cleanup semantics for partial failures.
 - Startup reconciliation for stale local/remote state.
-- Explicit recovery flows in the UI for provider and WireGuard failures.
+- Explicit recovery flows in the UI for provider and local WireGuard runtime failures.

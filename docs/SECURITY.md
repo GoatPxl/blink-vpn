@@ -17,7 +17,7 @@
 
 - Frontend to backend: untrusted input boundary.
 - Backend to provider APIs: remote boundary over TLS.
-- Backend to WireGuard runtime: privileged local boundary.
+- Backend to DefGuard/WireGuard runtime: privileged local boundary.
 - Backend to Docker runtime: local process boundary with validated command output.
 
 ## Redaction Policy
