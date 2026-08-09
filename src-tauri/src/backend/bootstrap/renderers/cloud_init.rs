@@ -1,7 +1,11 @@
 use super::super::contract::BootstrapParams;
 use super::shared;
 
-pub(crate) fn build_cloud_init_user_data(params: &BootstrapParams) -> String {
+pub(crate) fn build_cloud_init_user_data(
+  params: &BootstrapParams,
+  server_private_key: &str,
+  server_public_key: &str,
+) -> String {
   let script = shared::render_cloud_bootstrap_script(params);
   let escaped_script = shared::indent_for_yaml_block(&script, 6);
 
@@ -24,6 +28,16 @@ write_files:
       net.ipv4.ip_forward=1
       net.ipv4.conf.all.forwarding=1
       net.ipv4.conf.default.forwarding=1
+  - path: /etc/wireguard/server_private.key
+    permissions: '0600'
+    owner: root:root
+    content: |
+      {server_private_key}
+  - path: /etc/wireguard/server_public.key
+    permissions: '0600'
+    owner: root:root
+    content: |
+      {server_public_key}
   - path: /usr/local/bin/goatstare-bootstrap.sh
     permissions: '0700'
     owner: root:root

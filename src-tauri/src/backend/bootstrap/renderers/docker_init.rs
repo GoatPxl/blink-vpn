@@ -62,8 +62,8 @@ rm -f /tmp/goatstare-wg-prereq.err
 ip link delete "$probe" >/dev/null 2>&1 || true
 
 if [ ! -f /etc/wireguard/server_private.key ] || [ ! -f /etc/wireguard/server_public.key ]; then
-  log_stage "generate-keypair" "writing server keypair"
-  wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+  log_stage "keypair-missing" "app must stage server keys before running init script"
+  exit 64
 fi
 
 SERVER_PRIVATE_KEY=$(cat /etc/wireguard/server_private.key)

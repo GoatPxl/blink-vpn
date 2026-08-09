@@ -19,13 +19,15 @@ impl Bootstrap {
   pub fn render_cloud_init(
     &self,
     params: &BootstrapParams,
+    server_private_key: &str,
+    server_public_key: &str,
   ) -> Result<BootstrapArtifact, BootstrapError> {
     super::contract::validate_bootstrap_params(params)?;
 
-    let init_payload = cloud_init::build_cloud_init_user_data(params);
+    let init_payload = cloud_init::build_cloud_init_user_data(params, server_private_key, server_public_key);
     let output_contract_preview = BootstrapOutputContract {
       server_endpoint_ip: params.server_endpoint_ip.clone(),
-      server_public_key: "<resolved-from-readiness-marker>".to_string(),
+      server_public_key: server_public_key.to_string(),
       listen_port: params.listen_port,
     };
 

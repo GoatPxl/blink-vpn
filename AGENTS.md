@@ -63,7 +63,20 @@ When requirements are incomplete, ask focused questions in these areas:
 
 ### Core project docs
 - Repository README: README.md
-- Architecture: docs/ARCHITECTURE.md
-- Windows setup: docs/SETUP_WINDOWS.md
-- Operations runbook: docs/OPERATIONS_RUNBOOK.md
-- Testing: docs/TESTING.md
+- Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Windows setup: [`docs/SETUP_WINDOWS.md`](docs/SETUP_WINDOWS.md)
+- Operations runbook: [`docs/OPERATIONS_RUNBOOK.md`](docs/OPERATIONS_RUNBOOK.md)
+- Testing: [`docs/TESTING.md`](docs/TESTING.md)
+
+
+### Architectural Decision Protocol
+
+1. **Trigger Check**: Before making any architectural decision—including adding dependencies, altering database schemas, modifying API contracts, changing directory structures, or choosing design patterns—consult [`ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+2. **Guidance Evaluation**:
+   - **If guidance exists**: Execute the task strictly according to [`ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+   - **If guidance is missing or ambiguous**: **HALT implementation immediately.** Do not generate application code.
+3. **Escalation Output**: Present a prompt structured as follows:
+   - **Missing Topic**: Briefly define the architectural decision required.
+   - **Options**: Provide 2–3 viable technical choices with pros and cons.
+   - **Proposed Markdown**: Provide the exact text/diff snippet to add to [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) for each option.
+4. **Execution Pause**: Wait for user selection and authorization to update [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) before writing implementation code.

@@ -274,6 +274,11 @@ impl Orchestrator {
     provider_id: &str,
     droplet_name: &str,
   ) -> Result<ProvisionedDroplet, OrchestratorError> {
+    let server_keypair = generate_server_keypair().map_err(|source| OrchestratorError::Keygen {
+      detail: "Failed to generate WireGuard server keypair for droplet provisioning.".to_string(),
+      source,
+    })?;
+
     let artifact = bootstrap
       .render_cloud_init(&BootstrapParams {
         server_endpoint_ip: "0.0.0.0".to_string(),
@@ -281,7 +286,7 @@ impl Orchestrator {
         server_interface_cidr: DEFAULT_SERVER_INTERFACE_CIDR.to_string(),
         client_cidr: DEFAULT_CLIENT_CIDR.to_string(),
         interface_name: DEFAULT_INTERFACE_NAME.to_string(),
-      })
+      }, &server_keypair.private_key, &server_keypair.public_key)
       .map_err(|source| OrchestratorError::Bootstrap {
         detail: "Could not render bootstrap cloud-init for droplet create.".to_string(),
         source,
@@ -308,10 +313,7 @@ impl Orchestrator {
       init_payload: artifact.init_payload,
       endpoint_ip: "0.0.0.0".to_string(),
       readiness_marker_path: artifact.readiness_marker_path,
-      server_keypair: generate_server_keypair().map_err(|source| OrchestratorError::Keygen {
-        detail: "Failed to generate WireGuard server keypair for droplet provisioning.".to_string(),
-        source,
-      })?,
+      server_keypair,
     };
 
     let init_result = node_provider
@@ -584,10 +586,15 @@ impl Orchestrator {
       interface_name: DEFAULT_INTERFACE_NAME.to_string(),
     };
 
+    let server_keypair = generate_server_keypair().map_err(|source| OrchestratorError::Keygen {
+      detail: "Failed to generate WireGuard server keypair for node provisioning.".to_string(),
+      source,
+    })?;
+
     let bootstrap_artifact = if provider_slug == "docker" {
       bootstrap.render_docker_init(&bootstrap_params)
     } else {
-      bootstrap.render_cloud_init(&bootstrap_params)
+      bootstrap.render_cloud_init(&bootstrap_params, &server_keypair.private_key, &server_keypair.public_key)
     }
     .map_err(|source| OrchestratorError::Bootstrap {
       detail: if provider_slug == "docker" {
@@ -643,11 +650,6 @@ impl Orchestrator {
       })?;
 
     let flow_result: Result<CreateVpnNodeResult, OrchestratorError> = (|| {
-      let server_keypair = generate_server_keypair().map_err(|source| OrchestratorError::Keygen {
-        detail: "Failed to generate WireGuard server keypair for node provisioning.".to_string(),
-        source,
-      })?;
-
       let init_request = NodeInitRequest {
         node_name: request.node_name.clone(),
         region: request.region.clone(),

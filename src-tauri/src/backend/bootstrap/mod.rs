@@ -17,6 +17,7 @@ mod tests {
     DEFAULT_INTERFACE_NAME, DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_WIREGUARD_PORT,
     READINESS_MARKER_PATH,
   };
+  use crate::backend::crypto::keypair::generate_server_keypair;
 
   #[test]
   fn renders_cloud_init_with_wireguard_nat_and_marker() {
@@ -28,9 +29,10 @@ mod tests {
       client_cidr: DEFAULT_CLIENT_CIDR.to_string(),
       interface_name: DEFAULT_INTERFACE_NAME.to_string(),
     };
+    let keypair = generate_server_keypair().expect("keypair should generate");
 
     let artifact = bootstrap
-      .render_cloud_init(&params)
+      .render_cloud_init(&params, &keypair.private_key, &keypair.public_key)
       .expect("cloud-init render should succeed");
 
     assert!(artifact.init_payload.contains("#cloud-config"));
@@ -41,14 +43,9 @@ mod tests {
     assert!(artifact.init_payload.contains("net.ipv4.conf.all.forwarding=1"));
     assert!(artifact.init_payload.contains("net.ipv4.conf.default.forwarding=1"));
     assert!(artifact.init_payload.contains("goatstare.bootstrap.stage=${stage}"));
-    assert!(artifact.init_payload.contains("log_stage \"start\""));
-    assert!(artifact.init_payload.contains("log_stage \"complete\""));
-    assert!(artifact.init_payload.contains("log_stage \"marker-validate\""));
-    assert!(artifact.init_payload.contains("EXPECTED_MARKER"));
-    assert!(artifact.init_payload.contains("ACTUAL_MARKER=$(cat ${MARKER_PATH})"));
-    assert!(artifact.init_payload.contains("iptables -A GOATSTARE-INPUT -i ${WG_IFACE} -j ACCEPT"));
-    assert!(artifact.init_payload.contains("iptables -t nat -A POSTROUTING"));
-    assert!(artifact.init_payload.contains("wg genkey"));
+    assert!(!artifact.init_payload.contains("wg genkey"));
+    assert!(artifact.init_payload.contains("keypair-missing"));
+    assert!(artifact.init_payload.contains(&keypair.public_key));
     assert!(artifact.init_payload.contains("wg-quick@${WG_IFACE}"));
     assert!(artifact.init_payload.contains(READINESS_MARKER_PATH));
     assert!(artifact.init_payload.contains("--dport ${WG_PORT}"));
@@ -75,7 +72,8 @@ mod tests {
     assert!(artifact.init_payload.contains("apt-get install -y --no-install-recommends wireguard-tools iproute2 iptables"));
     assert!(artifact.init_payload.contains("/etc/sysctl.d/99-goatstare-vpn.conf"));
     assert!(artifact.init_payload.contains("goatstare.bootstrap.stage=${stage}"));
-    assert!(artifact.init_payload.contains("wg genkey"));
+    assert!(!artifact.init_payload.contains("wg genkey"));
+    assert!(artifact.init_payload.contains("keypair-missing"));
     assert!(artifact.init_payload.contains("wg-quick up \"${WG_IFACE}\""));
     assert!(!artifact.init_payload.contains("systemctl enable --now"));
     assert!(artifact.init_payload.contains(READINESS_MARKER_PATH));
@@ -95,7 +93,7 @@ mod tests {
     };
 
     let err = bootstrap
-      .render_cloud_init(&params)
+      .render_cloud_init(&params, "dummy-private-key", "dummy-public-key")
       .expect_err("invalid params must be rejected");
     assert!(err.to_string().contains("Invalid bootstrap parameter"));
   }

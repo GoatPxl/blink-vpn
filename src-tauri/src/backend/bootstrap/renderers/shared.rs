@@ -67,8 +67,8 @@ command -v iptables >/dev/null
 command -v systemctl >/dev/null
 
 if [ ! -f /etc/wireguard/server_private.key ] || [ ! -f /etc/wireguard/server_public.key ]; then
-  log_stage "generate-keypair" "writing server keypair"
-  wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+  log_stage "keypair-missing" "app must stage server keys before running init script"
+  exit 64
 fi
 
 SERVER_PRIVATE_KEY=$(cat /etc/wireguard/server_private.key)
