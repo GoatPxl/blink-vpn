@@ -303,7 +303,13 @@ impl WireGuardManager {
     config_text: &str,
   ) -> Result<(), WireGuardError> {
     match mode {
-      WireGuardConnectionMode::Admin => self.import_tunnel_defguard(tunnel_name, config_text),
+      WireGuardConnectionMode::Admin => match self.import_tunnel_defguard(tunnel_name, config_text) {
+        Ok(()) => Ok(()),
+        Err(error) if is_wireguard_runtime_access_denied_error(&error) => {
+          self.import_tunnel_legacy(tunnel_name, config_text)
+        }
+        Err(error) => Err(error),
+      },
       WireGuardConnectionMode::User => self.import_tunnel_legacy(tunnel_name, config_text),
     }
   }
@@ -318,7 +324,13 @@ impl WireGuardManager {
     tunnel_name: &str,
   ) -> Result<(), WireGuardError> {
     match mode {
-      WireGuardConnectionMode::Admin => self.activate_tunnel_defguard(tunnel_name),
+      WireGuardConnectionMode::Admin => match self.activate_tunnel_defguard(tunnel_name) {
+        Ok(()) => Ok(()),
+        Err(error) if is_wireguard_runtime_access_denied_error(&error) => {
+          self.activate_tunnel_legacy(tunnel_name)
+        }
+        Err(error) => Err(error),
+      },
       WireGuardConnectionMode::User => self.activate_tunnel_legacy(tunnel_name),
     }
   }
@@ -404,7 +416,13 @@ impl WireGuardManager {
     tunnel_name: &str,
   ) -> Result<(), WireGuardError> {
     match mode {
-      WireGuardConnectionMode::Admin => self.deactivate_tunnel_defguard(tunnel_name),
+      WireGuardConnectionMode::Admin => match self.deactivate_tunnel_defguard(tunnel_name) {
+        Ok(()) => Ok(()),
+        Err(error) if is_wireguard_runtime_access_denied_error(&error) => {
+          self.deactivate_tunnel_legacy(tunnel_name)
+        }
+        Err(error) => Err(error),
+      },
       WireGuardConnectionMode::User => self.deactivate_tunnel_legacy(tunnel_name),
     }
   }
@@ -419,7 +437,13 @@ impl WireGuardManager {
     tunnel_name: &str,
   ) -> Result<(), WireGuardError> {
     match mode {
-      WireGuardConnectionMode::Admin => self.unregister_tunnel_defguard(tunnel_name),
+      WireGuardConnectionMode::Admin => match self.unregister_tunnel_defguard(tunnel_name) {
+        Ok(()) => Ok(()),
+        Err(error) if is_wireguard_runtime_access_denied_error(&error) => {
+          self.unregister_tunnel_legacy(tunnel_name)
+        }
+        Err(error) => Err(error),
+      },
       WireGuardConnectionMode::User => self.unregister_tunnel_legacy(tunnel_name),
     }
   }
@@ -588,7 +612,13 @@ impl WireGuardManager {
     validate_tunnel_name(tunnel_name)?;
 
     match mode {
-      WireGuardConnectionMode::Admin => self.read_tunnel_status_defguard(tunnel_name),
+      WireGuardConnectionMode::Admin => match self.read_tunnel_status_defguard(tunnel_name) {
+        Ok(status) => Ok(status),
+        Err(error) if is_wireguard_runtime_access_denied_error(&error) => {
+          self.read_tunnel_status_legacy(tunnel_name)
+        }
+        Err(error) => Err(error),
+      },
       WireGuardConnectionMode::User => self.read_tunnel_status_legacy(tunnel_name),
     }
   }
@@ -1221,29 +1251,54 @@ fn wireguard_dll_name() -> &'static str {
   }
 }
 
+fn wireguard_canonical_dll_name() -> &'static str {
+  "wireguard.dll"
+}
+
+fn wireguard_nt_zip_arch_dir() -> &'static str {
+  #[cfg(target_arch = "aarch64")]
+  {
+    "arm64"
+  }
+  #[cfg(target_arch = "x86_64")]
+  {
+    "amd64"
+  }
+}
+
 fn candidate_wireguard_dll_paths() -> Vec<PathBuf> {
   let mut candidates = Vec::new();
 
   if let Ok(exe) = std::env::current_exe() {
     if let Some(parent) = exe.parent() {
       candidates.push(parent.join("resources-windows").join("binaries").join(wireguard_dll_name()));
+      candidates.push(parent.join("resources-windows").join("binaries").join(wireguard_canonical_dll_name()));
       candidates.push(parent.join("resources-windows").join(wireguard_dll_name()));
+      candidates.push(parent.join("resources-windows").join(wireguard_canonical_dll_name()));
       candidates.push(parent.join(wireguard_dll_name()));
+      candidates.push(parent.join(wireguard_canonical_dll_name()));
     }
   }
 
   if let Ok(cwd) = std::env::current_dir() {
     candidates.push(cwd.join("resources-windows").join("binaries").join(wireguard_dll_name()));
+    candidates.push(cwd.join("resources-windows").join("binaries").join(wireguard_canonical_dll_name()));
     candidates.push(cwd.join("resources-windows").join(wireguard_dll_name()));
+    candidates.push(cwd.join("resources-windows").join(wireguard_canonical_dll_name()));
     candidates.push(cwd.join(wireguard_dll_name()));
+    candidates.push(cwd.join(wireguard_canonical_dll_name()));
   }
 
   let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap_or_else(|| Path::new("."));
   candidates.push(repo_root.join("src-tauri").join("resources-windows").join("binaries").join(wireguard_dll_name()));
+  candidates.push(repo_root.join("src-tauri").join("resources-windows").join("binaries").join(wireguard_canonical_dll_name()));
   candidates.push(repo_root.join("src-tauri").join("resources-windows").join(wireguard_dll_name()));
+  candidates.push(repo_root.join("src-tauri").join("resources-windows").join(wireguard_canonical_dll_name()));
 
   candidates.push(PathBuf::from(r"C:\Program Files\WireGuard\").join(wireguard_dll_name()));
+  candidates.push(PathBuf::from(r"C:\Program Files\WireGuard\").join(wireguard_canonical_dll_name()));
   candidates.push(PathBuf::from(r"C:\Program Files (x86)\WireGuard\").join(wireguard_dll_name()));
+  candidates.push(PathBuf::from(r"C:\Program Files (x86)\WireGuard\").join(wireguard_canonical_dll_name()));
 
   candidates
 }
@@ -1270,10 +1325,11 @@ fn bootstrap_wireguard_dll_from_download() -> Result<PathBuf, WireGuardError> {
 
   let powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
   let script = format!(
-    r#"$ErrorActionPreference = "Stop"; $zip = '{}'; $dest = '{}'; $out = '{}'; Invoke-WebRequest -Uri 'https://download.wireguard.com/wireguard-nt/wireguard-nt-1.1.zip' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dest -Force; $dll = if (Test-Path "$dest\bin\amd64\wireguard.dll") {{ "$dest\bin\amd64\wireguard.dll" }} elseif (Test-Path "$dest\bin\arm64\wireguard.dll") {{ "$dest\bin\arm64\wireguard.dll" }} elseif (Test-Path "$dest\bin\x86\wireguard.dll") {{ "$dest\bin\x86\wireguard.dll" }} else {{ $null }}; if ($dll) {{ Copy-Item $dll -Destination $out -Force }}"#,
+    r#"$ErrorActionPreference = "Stop"; $zip = '{}'; $dest = '{}'; $out = '{}'; $preferredArch = '{}'; Invoke-WebRequest -Uri 'https://download.wireguard.com/wireguard-nt/wireguard-nt-1.1.zip' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dest -Force; $preferred = Join-Path $dest ("bin\" + $preferredArch + "\wireguard.dll"); $dll = if (Test-Path $preferred) {{ $preferred }} else {{ Get-ChildItem -Path $dest -Recurse -Filter 'wireguard.dll' -File | Select-Object -First 1 -ExpandProperty FullName }}; if (-not $dll) {{ throw "wireguard.dll was not found in downloaded wireguard-nt archive." }}; Copy-Item $dll -Destination $out -Force"#,
     zip_path.display(),
     temp_dir.display(),
-    target_path.display()
+    target_path.display(),
+    wireguard_nt_zip_arch_dir()
   );
 
   let output = Command::new(powershell)
@@ -1677,6 +1733,16 @@ fn is_wireguard_access_denied_error(error: &WireGuardError) -> bool {
       source: CommandExecError::NonZeroExit { detail, .. },
       ..
     } => is_windows_access_denied_detail(detail),
+    _ => false,
+  }
+}
+
+fn is_wireguard_runtime_access_denied_error(error: &WireGuardError) -> bool {
+  match error {
+    WireGuardError::Runtime { detail } => {
+      let lowered = detail.to_ascii_lowercase();
+      lowered.contains("access is denied") || lowered.contains("os error 5")
+    }
     _ => false,
   }
 }
