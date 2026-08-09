@@ -66,6 +66,18 @@ Indexes:
 - `idx_tunnels_node_id`
 - `idx_tunnels_status`
 
+### app_settings
+
+Columns:
+
+- `key` TEXT PRIMARY KEY
+- `value` TEXT NOT NULL
+- `updated_at` TEXT NOT NULL
+
+Seeded keys:
+
+- `wireguard_connection_mode` with default value `admin`
+
 ## Lifecycle Enums
 
 Node status values:
@@ -101,6 +113,7 @@ Current migration sequence in [src-tauri/migrations](src-tauri/migrations):
 8. Provider status metadata
 9. Init run logs
 10. Tunnel config metadata
+11. App settings
 
 Migration rules:
 

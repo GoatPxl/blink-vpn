@@ -42,6 +42,8 @@ Provider adapters currently included:
 | `create_and_activate_client_tunnel` | `tunnel_id`, `node_id`, `tunnel_name`, `client_address_cidr`, `dns_server?`, `allowed_ips` | `string` | Generates keypair, configures the local runtime, and activates the tunnel according to the selected mode |
 | `activate_client_tunnel` | `tunnel_id` | `void` | Activates a local tunnel through the configured WireGuard mode |
 | `deactivate_client_tunnel` | `tunnel_id` | `void` | Deactivates a local tunnel through the configured WireGuard mode |
+| `get_wireguard_connection_mode` | none | `{ mode: "admin" | "user" }` | Reads the global WireGuard runtime mode |
+| `set_wireguard_connection_mode` | `mode` | `{ mode: "admin" | "user" }` | Updates the global WireGuard runtime mode; rejects changes while a tunnel is connected |
 | `connect_tunnel` | `node_id`, `tunnel_id` | `void` | Marks tunnel connected and updates node lifecycle |
 | `disconnect_tunnel` | `node_id`, `tunnel_id` | `void` | Marks tunnel disconnected and updates node lifecycle |
 | `suspend_provider` | `provider_id` | `void` | Suspends provider operations |

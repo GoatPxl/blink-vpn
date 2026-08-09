@@ -41,9 +41,8 @@ pub fn run() {
       let wireguard_diagnostics = backend.wireguard.resolution_diagnostics();
       let path_summary = summarize_path_for_log(wireguard_diagnostics.process_path.as_deref());
       log::info!(
-        "event=wireguard.resolution_diagnostics path_summary={} wg_resolved_path={:?} wireguard_resolved_path={:?}",
+        "event=wireguard.resolution_diagnostics path_summary={} wireguard_resolved_path={:?}",
         path_summary,
-        wireguard_diagnostics.wg_resolved_path,
         wireguard_diagnostics.wireguard_resolved_path
       );
 
@@ -90,6 +89,8 @@ pub fn run() {
       commands::system::open_wireguard_install_page,
       commands::system::install_wireguard_with_prerequisites,
       commands::system::check_wireguard_readiness,
+      commands::system::get_wireguard_connection_mode,
+      commands::system::set_wireguard_connection_mode,
       commands::system::check_docker_readiness,
       commands::system::register_digitalocean_provider_token,
       commands::system::register_docker_provider_token,

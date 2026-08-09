@@ -53,6 +53,27 @@ flowchart LR
 - `User Mode` uses the installed WireGuard for Windows service path without creating an app-managed virtual adapter.
 - Both modes flow through the same typed Tauri/backend contracts; the selected mode only changes how the local runtime is configured.
 
+## Global App Settings
+
+Desktop-wide runtime settings are persisted in SQLite through a dedicated `app_settings` table owned by the Rust backend.
+
+Rules:
+
+- The backend is the source of truth for global runtime settings used during tunnel lifecycle operations.
+- The frontend reads and updates these settings only through typed Tauri commands.
+- Settings must be additive, versioned through migrations, and safe for existing installs.
+- Secret values must not be stored in app settings.
+
+Initial settings in this category:
+
+- `wireguard_connection_mode`: `admin` or `user`
+
+Behavior:
+
+- Default value is `admin`.
+- Mode changes are blocked while any tunnel is connected.
+- Tunnel connect and disconnect flows read the current persisted mode at execution time.
+
 ## Unified NodeProvider Contract
 
 The orchestrator and command layer operate against a shared NodeProvider abstraction instead of reaching directly into provider-specific execution paths.

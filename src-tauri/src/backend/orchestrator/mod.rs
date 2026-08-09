@@ -10,7 +10,7 @@ use crate::backend::bootstrap::{
 };
 use crate::backend::crypto::keypair::{generate_server_keypair, KeygenError};
 use crate::backend::db::Database;
-use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus};
+use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus, WireGuardConnectionMode};
 use crate::backend::logging;
 use crate::backend::provider::{
   BootstrapWaitRequest, NodeInitRequest, ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError,
@@ -382,9 +382,14 @@ impl Orchestrator {
       source,
     })?;
 
+    let connection_mode = load_wireguard_connection_mode(
+      db,
+      "Failed loading WireGuard connection mode before force cleanup flow.",
+    )?;
+
     for tunnel in &tunnels {
-      let _ = wireguard.deactivate_tunnel(&tunnel.name);
-      let _ = wireguard.unregister_tunnel(&tunnel.name);
+      let _ = wireguard.deactivate_tunnel_for_mode(connection_mode, &tunnel.name);
+      let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &tunnel.name);
     }
 
     let local_tunnels_removed = tunnels.len();
@@ -1155,6 +1160,11 @@ impl Orchestrator {
         },
       })?;
 
+    let connection_mode = load_wireguard_connection_mode(
+      db,
+      "Failed loading WireGuard connection mode before connect flow.",
+    )?;
+
     if tunnel.node_id != request.node_id {
       return Err(OrchestratorError::InvalidState {
         node_id: request.node_id.clone(),
@@ -1170,7 +1180,7 @@ impl Orchestrator {
       // Best-effort migration cleanup for legacy/randomized tunnel services.
       // Ignore cleanup errors so connect can still proceed.
       if previous_tunnel_name != canonical_tunnel_name {
-        let _ = wireguard.unregister_tunnel(&previous_tunnel_name);
+        let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &previous_tunnel_name);
       }
 
       db
@@ -1203,7 +1213,7 @@ impl Orchestrator {
     wireguard.record_connect_trace_snapshot(&canonical_tunnel_name, &connect_config);
 
     if tunnel.status == TunnelStatus::Connected && node.lifecycle_status == NodeLifecycleStatus::Connected {
-      if let Ok(runtime) = wireguard.read_tunnel_status(&canonical_tunnel_name) {
+      if let Ok(runtime) = wireguard.read_tunnel_status_for_mode(connection_mode, &canonical_tunnel_name) {
         if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
           return Ok(());
         }
@@ -1211,7 +1221,7 @@ impl Orchestrator {
     }
 
     let mut imported_in_this_connect = false;
-    match wireguard.read_tunnel_status(&canonical_tunnel_name) {
+    match wireguard.read_tunnel_status_for_mode(connection_mode, &canonical_tunnel_name) {
       Ok(runtime) => {
         if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
           persist_tunnel_stats_snapshot(db, &request.tunnel_id, &runtime)?;
@@ -1222,7 +1232,7 @@ impl Orchestrator {
       }
       Err(WireGuardError::TunnelNotFound { .. }) => {
         wireguard
-          .import_tunnel(&canonical_tunnel_name, &connect_config)
+          .import_tunnel_for_mode(connection_mode, &canonical_tunnel_name, &connect_config)
           .map_err(|source| OrchestratorError::WireGuard {
             detail: "Could not import client tunnel into WireGuard for Windows during connect flow."
               .to_string(),
@@ -1238,10 +1248,10 @@ impl Orchestrator {
       }
     }
 
-    if let Err(source) = wireguard.activate_tunnel(&canonical_tunnel_name) {
+    if let Err(source) = wireguard.activate_tunnel_for_mode(connection_mode, &canonical_tunnel_name) {
       if matches!(source, WireGuardError::TunnelNotFound { .. }) && !imported_in_this_connect {
         wireguard
-          .import_tunnel(&canonical_tunnel_name, &connect_config)
+          .import_tunnel_for_mode(connection_mode, &canonical_tunnel_name, &connect_config)
           .map_err(|import_source| OrchestratorError::WireGuard {
             detail: "Could not import client tunnel after missing-service activation response."
               .to_string(),
@@ -1249,14 +1259,14 @@ impl Orchestrator {
           })?;
 
         wireguard
-          .activate_tunnel(&canonical_tunnel_name)
+          .activate_tunnel_for_mode(connection_mode, &canonical_tunnel_name)
           .map_err(|activate_source| OrchestratorError::WireGuard {
             detail: "Could not activate WireGuard tunnel service after re-import.".to_string(),
             source: activate_source,
           })?;
       } else {
         if imported_in_this_connect {
-          let _ = wireguard.unregister_tunnel(&canonical_tunnel_name);
+          let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &canonical_tunnel_name);
           let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel activation failed; service was removed."));
         }
 
@@ -1268,7 +1278,7 @@ impl Orchestrator {
     }
 
     let runtime = wireguard
-      .read_tunnel_status(&canonical_tunnel_name)
+      .read_tunnel_status_for_mode(connection_mode, &canonical_tunnel_name)
       .map_err(|source| OrchestratorError::WireGuard {
         detail: "Could not verify tunnel runtime state after connect.".to_string(),
         source,
@@ -1294,7 +1304,7 @@ impl Orchestrator {
       return Ok(());
     }
 
-    let _ = wireguard.unregister_tunnel(&canonical_tunnel_name);
+    let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &canonical_tunnel_name);
     let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel runtime did not report Running; service was removed."));
 
     Err(OrchestratorError::InvalidState {
@@ -1347,6 +1357,11 @@ impl Orchestrator {
         },
       })?;
 
+    let connection_mode = load_wireguard_connection_mode(
+      db,
+      "Failed loading WireGuard connection mode before disconnect flow.",
+    )?;
+
     if tunnel.node_id != request.node_id {
       return Err(OrchestratorError::InvalidState {
         node_id: request.node_id.clone(),
@@ -1355,14 +1370,14 @@ impl Orchestrator {
     }
 
     wireguard
-      .deactivate_tunnel(&tunnel.name)
+      .deactivate_tunnel_for_mode(connection_mode, &tunnel.name)
       .map_err(|source| OrchestratorError::WireGuard {
         detail: "Could not deactivate WireGuard tunnel service in disconnect flow.".to_string(),
         source,
       })?;
 
     wireguard
-      .unregister_tunnel(&tunnel.name)
+      .unregister_tunnel_for_mode(connection_mode, &tunnel.name)
       .map_err(|source| OrchestratorError::WireGuard {
         detail: "Could not unregister WireGuard tunnel service in disconnect flow.".to_string(),
         source,
@@ -1405,9 +1420,14 @@ impl Orchestrator {
         source,
       })?;
 
+    let connection_mode = load_wireguard_connection_mode(
+      db,
+      "Failed loading WireGuard connection mode before force-disconnect flow.",
+    )?;
+
     for tunnel in tunnels {
-      let _ = wireguard.deactivate_tunnel(&tunnel.name);
-      let _ = wireguard.unregister_tunnel(&tunnel.name);
+      let _ = wireguard.deactivate_tunnel_for_mode(connection_mode, &tunnel.name);
+      let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &tunnel.name);
       let _ = db.update_tunnel_stats_snapshot(&tunnel.id, None, None, None);
       let _ = db.update_tunnel_status(&tunnel.id, TunnelStatus::Disconnected, Some("Best-effort force disconnect requested from dashboard."));
     }
@@ -1437,7 +1457,12 @@ impl Orchestrator {
         },
       })?;
 
-    let status = match wireguard.read_tunnel_status(&tunnel.name) {
+    let connection_mode = load_wireguard_connection_mode(
+      db,
+      "Failed loading WireGuard connection mode before tunnel status read.",
+    )?;
+
+    let status = match wireguard.read_tunnel_status_for_mode(connection_mode, &tunnel.name) {
       Ok(runtime) => runtime,
       Err(WireGuardError::TunnelNotFound { .. }) => TunnelRuntimeStatus {
         tunnel_name: tunnel.name.clone(),
@@ -1500,26 +1525,34 @@ impl Orchestrator {
     };
 
     if let Some(tunnel) = selected_tunnel.as_ref() {
+      let connection_mode = load_wireguard_connection_mode(
+        db,
+        "Failed loading WireGuard connection mode before health summary trace capture.",
+      )?;
       if let Ok(provider) = db.get_provider(&node.provider_id) {
         if let Some(provider) = provider {
           if let Ok(config) = load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, tunnel) {
             // Populate diagnostics trace even when only health polling occurs.
             wireguard.record_connect_trace_snapshot(&tunnel.name, &config);
           } else {
-            let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
+            let _ = wireguard.capture_runtime_connect_trace_snapshot_for_mode(connection_mode, &tunnel.name);
           }
         } else {
-          let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
+          let _ = wireguard.capture_runtime_connect_trace_snapshot_for_mode(connection_mode, &tunnel.name);
         }
       } else {
-        let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
+        let _ = wireguard.capture_runtime_connect_trace_snapshot_for_mode(connection_mode, &tunnel.name);
       }
     }
 
     let runtime = if let Some(tunnel) = selected_tunnel.as_ref() {
+      let connection_mode = load_wireguard_connection_mode(
+        db,
+        "Failed loading WireGuard connection mode before health summary runtime read.",
+      )?;
       Some(
         wireguard
-          .read_tunnel_status(&tunnel.name)
+          .read_tunnel_status_for_mode(connection_mode, &tunnel.name)
           .map_err(|source| OrchestratorError::WireGuard {
             detail: "Failed reading tunnel runtime for health summary.".to_string(),
             source,
@@ -1746,9 +1779,14 @@ impl Orchestrator {
           source,
         })?;
 
+      let connection_mode = load_wireguard_connection_mode(
+        db,
+        "Failed loading WireGuard connection mode during startup reconciliation.",
+      )?;
+
       let mut any_connected = false;
       for tunnel in tunnels {
-        match wireguard.read_tunnel_status(&tunnel.name) {
+        match wireguard.read_tunnel_status_for_mode(connection_mode, &tunnel.name) {
           Ok(runtime) => {
             any_connected |= runtime.state == crate::backend::wireguard::TunnelServiceState::Running;
             let _ = persist_tunnel_stats_snapshot(db, &tunnel.id, &runtime);
@@ -3203,4 +3241,15 @@ fn canonical_tunnel_name_for_node(node_name: &str) -> String {
   } else {
     name
   }
+}
+
+fn load_wireguard_connection_mode(
+  db: &Database,
+  detail: &str,
+) -> Result<WireGuardConnectionMode, OrchestratorError> {
+  db.get_wireguard_connection_mode()
+    .map_err(|source| OrchestratorError::Database {
+      detail: detail.to_string(),
+      source,
+    })
 }

@@ -3,13 +3,14 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::panic::{self, AssertUnwindSafe};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use defguard_wireguard_rs::host::Host as WireguardHost;
 use defguard_wireguard_rs::key::Key as WireguardKey;
 use defguard_wireguard_rs::net::IpAddrMask as WireguardIpAddrMask;
 use defguard_wireguard_rs::peer::Peer as WireguardPeer;
@@ -18,6 +19,7 @@ use serde::Serialize;
 use thiserror::Error;
 use wireguard_nt::{Adapter as WireguardNtAdapter, Error as WireguardNtError, Wireguard as WireguardNtRuntime};
 
+use crate::backend::db::WireGuardConnectionMode;
 use crate::backend::logging;
 
 pub const DEFAULT_CLIENT_ALLOWED_IPS: &[&str] = &["0.0.0.0/0", "::/0"];
@@ -101,41 +103,33 @@ impl WireGuardManager {
     &self,
     tunnel_name: &str,
   ) -> Result<(), WireGuardError> {
+    self.capture_runtime_connect_trace_snapshot_for_mode(
+      WireGuardConnectionMode::User,
+      tunnel_name,
+    )
+  }
+
+  pub fn capture_runtime_connect_trace_snapshot_for_mode(
+    &self,
+    mode: WireGuardConnectionMode,
+    tunnel_name: &str,
+  ) -> Result<(), WireGuardError> {
     self.ensure_installed()?;
     validate_tunnel_name(tunnel_name)?;
-    let wg_program = self.resolve_wg_program()?;
 
-    self.record_command(&format!("{} showconf {}", wg_program, tunnel_name));
-    let showconf = self.runner.run(&wg_program, &["showconf", tunnel_name], None);
+    let host = self.read_runtime_host_data(tunnel_name)?;
+    let snapshot = format_runtime_snapshot(&host);
+    let path = match mode {
+      WireGuardConnectionMode::Admin => "runtime://defguard_wireguard_rs.read_interface_data.admin",
+      WireGuardConnectionMode::User => "runtime://defguard_wireguard_rs.read_interface_data.user",
+    };
 
-    if let Ok(output) = &showconf {
-      let text = output.stdout.trim();
-      if !text.is_empty() {
-        self.record_last_import_snapshot(tunnel_name, "runtime://wg_showconf", text);
-        return Ok(());
-      }
-    }
-
-    self.record_command(&format!("{} show {} dump", wg_program, tunnel_name));
-    if let Ok(output) = self
-      .runner
-      .run(&wg_program, &["show", tunnel_name, "dump"], None)
-    {
-      let text = output.stdout.trim();
-      if !text.is_empty() {
-        self.record_last_import_snapshot(tunnel_name, "runtime://wg_show_dump", text);
-        return Ok(());
-      }
-    }
-
-    if let Err(source) = showconf {
-      return Err(WireGuardError::Command {
-        command: format!("wg showconf {tunnel_name}"),
-        detail: "Could not read active WireGuard runtime config for debug trace capture.".to_string(),
-        source,
-      });
-    }
-
+    self.record_command(&format!(
+      "defguard_wireguard_rs::WGApi::read_interface_data {} ({})",
+      tunnel_name,
+      mode.as_str()
+    ));
+    self.record_last_import_snapshot(tunnel_name, path, &snapshot);
     Ok(())
   }
 
@@ -147,22 +141,6 @@ impl WireGuardManager {
     }
 
     let wireguard_program = self.resolve_wireguard_program()?;
-
-    let wg_program = self.resolve_wg_program()?;
-    let wg_probe = self
-      .runner
-      .run(&wg_program, &["-v"], None)
-      .or_else(|_| self.runner.run(&wg_program, &["--version"], None));
-
-    if !command_probe_indicates_presence(&wg_probe) {
-      let source = wg_probe
-        .err()
-        .unwrap_or(CommandExecError::NotFound {
-          program: wg_program.clone(),
-          detail: "WireGuard command probe failed.".to_string(),
-        });
-      return Err(map_install_error(source, &wg_program));
-    }
 
     let wireguard_probe = self
       .runner
@@ -194,16 +172,8 @@ impl WireGuardManager {
       };
     }
 
-    let wg_program = self.resolve_wg_program().ok();
     let wireguard_program = self.resolve_wireguard_program().ok();
 
-    let wg_check = wg_program.as_ref().and_then(|program| {
-      self
-        .runner
-        .run(program, &["-v"], None)
-        .or_else(|_| self.runner.run(program, &["--version"], None))
-        .ok()
-    });
     let wireguard_probe = wireguard_program
       .as_ref()
       .map(|program| self.runner.run(program, &["/help"], None));
@@ -211,16 +181,11 @@ impl WireGuardManager {
       .runner
       .run("sc", &["query", "WireGuardManager"], None);
 
-    let executable_found = wg_check.is_some()
-      && wireguard_probe
-        .as_ref()
-        .is_some_and(command_probe_indicates_presence);
+    let executable_found = wireguard_probe
+      .as_ref()
+      .is_some_and(command_probe_indicates_presence);
     let service_available = service_check.is_ok();
     let installed = executable_found;
-
-    let version = wg_check.and_then(|output| {
-      parse_wg_version_output(&output.stdout).or_else(|| parse_wg_version_output(&output.stderr))
-    });
 
     let (message, action_guidance) = if installed && service_available {
       (
@@ -229,8 +194,8 @@ impl WireGuardManager {
       )
     } else if !installed {
       (
-        "WireGuard executable tools are missing.".to_string(),
-        "Install WireGuard for Windows, ensure both 'wg.exe' and 'wireguard.exe' are on PATH, then click Re-check."
+        "WireGuard for Windows is missing or incomplete.".to_string(),
+        "Install or repair WireGuard for Windows, ensure 'wireguard.exe' is available, then click Re-check."
           .to_string(),
       )
     } else {
@@ -245,7 +210,7 @@ impl WireGuardManager {
       installed,
       executable_found,
       service_available,
-      version,
+      version: None,
       message,
       action_guidance,
     }
@@ -254,15 +219,9 @@ impl WireGuardManager {
   pub fn resolution_diagnostics(&self) -> WireGuardResolutionDiagnostics {
     WireGuardResolutionDiagnostics {
       process_path: std::env::var_os("PATH").map(|value| value.to_string_lossy().to_string()),
-      wg_resolved_path: resolve_wireguard_command_path("wg")
-        .map(|path| path.to_string_lossy().to_string()),
       wireguard_resolved_path: resolve_wireguard_command_path("wireguard")
         .map(|path| path.to_string_lossy().to_string()),
     }
-  }
-
-  fn resolve_wg_program(&self) -> Result<String, WireGuardError> {
-    self.resolve_program("wg")
   }
 
   fn resolve_wireguard_program(&self) -> Result<String, WireGuardError> {
@@ -276,7 +235,7 @@ impl WireGuardManager {
 
     Err(WireGuardError::NotInstalled {
       detail: format!(
-        "Could not locate a single WireGuard installation containing '{command_name}.exe'. Repair WireGuard for Windows so both 'wg.exe' and 'wireguard.exe' are installed together, then click Re-check."
+        "Could not locate the required WireGuard installation containing '{command_name}.exe'. Repair WireGuard for Windows, then click Re-check."
       ),
     })
   }
@@ -313,11 +272,34 @@ impl WireGuardManager {
   }
 
   pub fn import_tunnel(&self, tunnel_name: &str, config_text: &str) -> Result<(), WireGuardError> {
-    self.import_tunnel_legacy(tunnel_name, config_text)
+    self.import_tunnel_for_mode(WireGuardConnectionMode::User, tunnel_name, config_text)
+  }
+
+  pub fn import_tunnel_for_mode(
+    &self,
+    mode: WireGuardConnectionMode,
+    tunnel_name: &str,
+    config_text: &str,
+  ) -> Result<(), WireGuardError> {
+    match mode {
+      WireGuardConnectionMode::Admin => self.import_tunnel_defguard(tunnel_name, config_text),
+      WireGuardConnectionMode::User => self.import_tunnel_legacy(tunnel_name, config_text),
+    }
   }
 
   pub fn activate_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.activate_tunnel_legacy(tunnel_name)
+    self.activate_tunnel_for_mode(WireGuardConnectionMode::User, tunnel_name)
+  }
+
+  pub fn activate_tunnel_for_mode(
+    &self,
+    mode: WireGuardConnectionMode,
+    tunnel_name: &str,
+  ) -> Result<(), WireGuardError> {
+    match mode {
+      WireGuardConnectionMode::Admin => self.activate_tunnel_defguard(tunnel_name),
+      WireGuardConnectionMode::User => self.activate_tunnel_legacy(tunnel_name),
+    }
   }
 
   fn wait_for_running_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
@@ -392,11 +374,33 @@ impl WireGuardManager {
   
 
   pub fn deactivate_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.deactivate_tunnel_legacy(tunnel_name)
+    self.deactivate_tunnel_for_mode(WireGuardConnectionMode::User, tunnel_name)
+  }
+
+  pub fn deactivate_tunnel_for_mode(
+    &self,
+    mode: WireGuardConnectionMode,
+    tunnel_name: &str,
+  ) -> Result<(), WireGuardError> {
+    match mode {
+      WireGuardConnectionMode::Admin => self.deactivate_tunnel_defguard(tunnel_name),
+      WireGuardConnectionMode::User => self.deactivate_tunnel_legacy(tunnel_name),
+    }
   }
 
   pub fn unregister_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.unregister_tunnel_legacy(tunnel_name)
+    self.unregister_tunnel_for_mode(WireGuardConnectionMode::User, tunnel_name)
+  }
+
+  pub fn unregister_tunnel_for_mode(
+    &self,
+    mode: WireGuardConnectionMode,
+    tunnel_name: &str,
+  ) -> Result<(), WireGuardError> {
+    match mode {
+      WireGuardConnectionMode::Admin => self.unregister_tunnel_defguard(tunnel_name),
+      WireGuardConnectionMode::User => self.unregister_tunnel_legacy(tunnel_name),
+    }
   }
 
   fn import_tunnel_legacy(&self, tunnel_name: &str, config_text: &str) -> Result<(), WireGuardError> {
@@ -534,8 +538,24 @@ impl WireGuardManager {
   }
 
   pub fn read_tunnel_status(&self, tunnel_name: &str) -> Result<TunnelRuntimeStatus, WireGuardError> {
+    self.read_tunnel_status_for_mode(WireGuardConnectionMode::User, tunnel_name)
+  }
+
+  pub fn read_tunnel_status_for_mode(
+    &self,
+    mode: WireGuardConnectionMode,
+    tunnel_name: &str,
+  ) -> Result<TunnelRuntimeStatus, WireGuardError> {
     self.ensure_installed()?;
-    let wg_program = self.resolve_wg_program()?;
+    validate_tunnel_name(tunnel_name)?;
+
+    match mode {
+      WireGuardConnectionMode::Admin => self.read_tunnel_status_defguard(tunnel_name),
+      WireGuardConnectionMode::User => self.read_tunnel_status_legacy(tunnel_name),
+    }
+  }
+
+  fn read_tunnel_status_legacy(&self, tunnel_name: &str) -> Result<TunnelRuntimeStatus, WireGuardError> {
     validate_tunnel_name(tunnel_name)?;
 
     let service_name = wireguard_service_name(tunnel_name);
@@ -557,24 +577,50 @@ impl WireGuardManager {
       });
     }
 
-    self.record_command(&format!("{} show {} dump", wg_program, tunnel_name));
-    let dump_out = self
-      .runner
-      .run(&wg_program, &["show", tunnel_name, "dump"], None)
-      .map_err(|source| WireGuardError::Command {
-        command: format!("wg show {tunnel_name} dump"),
-        detail: "Could not read WireGuard tunnel peer stats.".to_string(),
-        source,
-      })?;
+    self.record_command(&format!(
+      "defguard_wireguard_rs::WGApi::read_interface_data {} (user)",
+      tunnel_name
+    ));
+    let host = self.read_runtime_host_data(tunnel_name)?;
+    let peer_metrics = peer_metrics_from_host(&host);
 
-    let now_unix_seconds = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .map_err(|_| WireGuardError::InvalidOutput {
-        detail: "System time is before UNIX epoch; cannot compute handshake age.".to_string(),
-      })?
-      .as_secs();
+    Ok(TunnelRuntimeStatus {
+      tunnel_name: tunnel_name.to_string(),
+      state,
+      last_handshake_age_seconds: peer_metrics.last_handshake_age_seconds,
+      rx_bytes: peer_metrics.rx_bytes,
+      tx_bytes: peer_metrics.tx_bytes,
+    })
+  }
 
-    let peer_metrics = parse_wg_dump_metrics(now_unix_seconds, &dump_out.stdout)?;
+  fn read_tunnel_status_defguard(&self, tunnel_name: &str) -> Result<TunnelRuntimeStatus, WireGuardError> {
+    validate_tunnel_name(tunnel_name)?;
+
+    let adapter = open_existing_adapter(tunnel_name)?;
+    self.record_command(&format!("wireguard_nt::Adapter::is_up {}", tunnel_name));
+    let is_up = adapter.is_up().map_err(map_wireguard_nt_error)?;
+    let state = if is_up {
+      TunnelServiceState::Running
+    } else {
+      TunnelServiceState::Stopped
+    };
+
+    if state != TunnelServiceState::Running {
+      return Ok(TunnelRuntimeStatus {
+        tunnel_name: tunnel_name.to_string(),
+        state,
+        last_handshake_age_seconds: None,
+        rx_bytes: None,
+        tx_bytes: None,
+      });
+    }
+
+    self.record_command(&format!(
+      "defguard_wireguard_rs::WGApi::read_interface_data {} (admin)",
+      tunnel_name
+    ));
+    let host = self.read_runtime_host_data(tunnel_name)?;
+    let peer_metrics = peer_metrics_from_host(&host);
 
     Ok(TunnelRuntimeStatus {
       tunnel_name: tunnel_name.to_string(),
@@ -751,6 +797,13 @@ impl WireGuardManager {
   }
 }
 
+impl WireGuardManager {
+  fn read_runtime_host_data(&self, tunnel_name: &str) -> Result<WireguardHost, WireGuardError> {
+    let api = WireguardApi::<WireguardKernel>::new(tunnel_name).map_err(map_defguard_error)?;
+    api.read_interface_data().map_err(map_defguard_error)
+  }
+}
+
 #[derive(Debug, Clone, Default)]
 struct WireGuardDebugTrace {
   commands: VecDeque<String>,
@@ -831,7 +884,6 @@ pub struct WireGuardReadiness {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireGuardResolutionDiagnostics {
   pub process_path: Option<String>,
-  pub wg_resolved_path: Option<String>,
   pub wireguard_resolved_path: Option<String>,
 }
 
@@ -1457,6 +1509,39 @@ fn parse_wg_dump_metrics(now_unix_seconds: u64, dump: &str) -> Result<PeerMetric
     rx_bytes: if peer_count == 0 { None } else { Some(rx_total) },
     tx_bytes: if peer_count == 0 { None } else { Some(tx_total) },
   })
+}
+
+fn peer_metrics_from_host(host: &WireguardHost) -> PeerMetrics {
+  let mut newest_handshake_age_seconds: Option<u64> = None;
+  let mut rx_total: u64 = 0;
+  let mut tx_total: u64 = 0;
+  let mut peer_count: u64 = 0;
+
+  for peer in host.peers.values() {
+    peer_count += 1;
+    rx_total = rx_total.saturating_add(peer.rx_bytes);
+    tx_total = tx_total.saturating_add(peer.tx_bytes);
+
+    if let Some(last_handshake) = peer.last_handshake {
+      if let Ok(age) = SystemTime::now().duration_since(last_handshake) {
+        let age_seconds = age.as_secs();
+        newest_handshake_age_seconds = Some(match newest_handshake_age_seconds {
+          Some(current) => current.min(age_seconds),
+          None => age_seconds,
+        });
+      }
+    }
+  }
+
+  PeerMetrics {
+    last_handshake_age_seconds: newest_handshake_age_seconds,
+    rx_bytes: if peer_count == 0 { None } else { Some(rx_total) },
+    tx_bytes: if peer_count == 0 { None } else { Some(tx_total) },
+  }
+}
+
+fn format_runtime_snapshot(host: &WireguardHost) -> String {
+  format!("{host:#?}")
 }
 
 fn parse_sc_state(raw_output: &str) -> Result<TunnelServiceState, WireGuardError> {

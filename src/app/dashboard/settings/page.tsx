@@ -16,9 +16,11 @@ export default function DashboardSettingsPage() {
     deleteProvider,
     dockerDevEnabled,
     dockerFauxTokenConfigured,
+    connectedTunnel,
     nodes,
     providerId,
     providers,
+    saveWireGuardConnectionMode,
     selectProviderId,
     saveDockerFauxToken,
     saveToken,
@@ -26,6 +28,7 @@ export default function DashboardSettingsPage() {
     resumeProvider,
     validateDockerReadiness,
     validateToken,
+    wireGuardConnectionMode,
   } = useDashboard();
 
   async function handleSaveToken() {
@@ -44,6 +47,9 @@ export default function DashboardSettingsPage() {
       dockerFauxToken={dockerFauxToken}
       setDockerFauxToken={setDockerFauxToken}
       dockerFauxTokenConfigured={dockerFauxTokenConfigured}
+      wireGuardConnectionMode={wireGuardConnectionMode}
+      wireGuardModeLocked={connectedTunnel?.status.toLowerCase() === "connected"}
+      onChangeWireGuardConnectionMode={saveWireGuardConnectionMode}
       configuredProvider={configuredProvider}
       providerId={providerId}
       providers={providers}

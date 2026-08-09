@@ -14,6 +14,7 @@ export type ToastKind = "info" | "success" | "warning" | "error";
 export type AppView = "dashboard" | "nodes" | "health" | "diagnostics" | "settings";
 export type DashboardBusyAction =
   | "refresh"
+  | "save-wireguard-mode"
   | "save-token"
   | "save-docker-token"
   | "validate-token"

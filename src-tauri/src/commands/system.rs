@@ -6,7 +6,7 @@ use tauri::State;
 use tauri::{AppHandle, Manager};
 
 use crate::backend::Backend;
-use crate::backend::db::{Database, ProviderRecord, ProviderStatus};
+use crate::backend::db::{Database, ProviderRecord, ProviderStatus, WireGuardConnectionMode};
 use crate::backend::logging;
 use crate::backend::provider::ProviderPlanPricing;
 use crate::backend::orchestrator::{
@@ -74,6 +74,11 @@ pub struct DockerReadinessResponse {
   pub daemon_version: Option<String>,
   pub message: String,
   pub action_guidance: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WireGuardConnectionModeResponse {
+  pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -846,12 +851,11 @@ if ($machinePath -notlike "*$wireGuardDir*") {
   [Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
 }
 
-$wgCommand = Get-Command wg -ErrorAction SilentlyContinue
 $wireguardCommand = Get-Command wireguard -ErrorAction SilentlyContinue
 $service = Get-Service -Name 'WireGuardManager' -ErrorAction SilentlyContinue
 
-if (-not $wgCommand -or -not $wireguardCommand) {
-  throw 'WireGuard commands are not available after installation.'
+if (-not $wireguardCommand) {
+  throw 'WireGuard command is not available after installation.'
 }
 
 if (-not $service) {
@@ -964,4 +968,47 @@ mod tests {
 
     let _ = fs::remove_file(path);
   }
+}
+
+#[tauri::command]
+pub fn get_wireguard_connection_mode(
+  backend: State<'_, Backend>,
+) -> Result<WireGuardConnectionModeResponse, String> {
+  let mode = backend
+    .db
+    .get_wireguard_connection_mode()
+    .map_err(|err| err.to_string())?;
+
+  Ok(WireGuardConnectionModeResponse {
+    mode: mode.as_str().to_string(),
+  })
+}
+
+#[tauri::command]
+pub fn set_wireguard_connection_mode(
+  mode: String,
+  backend: State<'_, Backend>,
+) -> Result<WireGuardConnectionModeResponse, String> {
+  if backend
+    .db
+    .has_connected_tunnels()
+    .map_err(|err| err.to_string())?
+  {
+    return Err(
+      "Disconnect all active tunnels before changing the WireGuard connection mode. Next: Disconnect the active tunnel, then retry the mode change."
+        .to_string(),
+    );
+  }
+
+  let parsed_mode = WireGuardConnectionMode::try_from(mode.as_str())
+    .map_err(|err| err.to_string())?;
+
+  backend
+    .db
+    .set_wireguard_connection_mode(parsed_mode)
+    .map_err(|err| err.to_string())?;
+
+  Ok(WireGuardConnectionModeResponse {
+    mode: parsed_mode.as_str().to_string(),
+  })
 }
