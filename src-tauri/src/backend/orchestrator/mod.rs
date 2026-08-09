@@ -8,11 +8,12 @@ use crate::backend::bootstrap::{
   Bootstrap, BootstrapError, BootstrapParams, DEFAULT_CLIENT_CIDR, DEFAULT_INTERFACE_NAME,
   DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_WIREGUARD_PORT,
 };
+use crate::backend::crypto::keypair::{generate_server_keypair, KeygenError};
 use crate::backend::db::Database;
 use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus};
 use crate::backend::logging;
 use crate::backend::provider::{
-  NodeInitRequest, ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError,
+  BootstrapWaitRequest, NodeInitRequest, ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError,
   ProviderPlanPricing, ProviderRegistry, DEFAULT_REGION, DEFAULT_SIZE,
 };
 use crate::backend::provider::docker::DockerProviderAdapter;
@@ -187,6 +188,12 @@ pub enum OrchestratorError {
     #[source]
     source: SecretStoreError,
   },
+  #[error("WireGuard keypair generation failed: {detail}")]
+  Keygen {
+    detail: String,
+    #[source]
+    source: KeygenError,
+  },
 }
 
 impl Orchestrator {
@@ -301,6 +308,10 @@ impl Orchestrator {
       init_payload: artifact.init_payload,
       endpoint_ip: "0.0.0.0".to_string(),
       readiness_marker_path: artifact.readiness_marker_path,
+      server_keypair: generate_server_keypair().map_err(|source| OrchestratorError::Keygen {
+        detail: "Failed to generate WireGuard server keypair for droplet provisioning.".to_string(),
+        source,
+      })?,
     };
 
     let init_result = node_provider
@@ -632,6 +643,11 @@ impl Orchestrator {
       })?;
 
     let flow_result: Result<CreateVpnNodeResult, OrchestratorError> = (|| {
+      let server_keypair = generate_server_keypair().map_err(|source| OrchestratorError::Keygen {
+        detail: "Failed to generate WireGuard server keypair for node provisioning.".to_string(),
+        source,
+      })?;
+
       let init_request = NodeInitRequest {
         node_name: request.node_name.clone(),
         region: request.region.clone(),
@@ -639,12 +655,13 @@ impl Orchestrator {
         init_payload: bootstrap_artifact.init_payload.clone(),
         endpoint_ip: "0.0.0.0".to_string(),
         readiness_marker_path: bootstrap_artifact.readiness_marker_path.clone(),
+        server_keypair: server_keypair.clone(),
       };
 
       let init_result = providers
         .init_provider_node(db, secure_storage, &request.provider_id, &init_request)
         .map_err(|source| OrchestratorError::Provider {
-          detail: "Droplet creation call failed in create-node flow.".to_string(),
+          detail: "Node creation or bootstrap setup failed in create-node flow.".to_string(),
           source,
         })?;
 
@@ -685,9 +702,12 @@ impl Orchestrator {
           db,
           secure_storage,
           &request.provider_id,
-          droplet.droplet_id,
-          &droplet.public_ipv4,
-          &bootstrap_artifact.readiness_marker_path,
+          &BootstrapWaitRequest {
+            droplet_id: droplet.droplet_id,
+            endpoint_ip: droplet.public_ipv4.clone(),
+            readiness_marker_path: bootstrap_artifact.readiness_marker_path.clone(),
+            server_keypair,
+          },
         )
         .map_err(|source| OrchestratorError::Provider {
           detail: "Bootstrap readiness marker wait failed.".to_string(),
@@ -1959,7 +1979,7 @@ mod tests {
 
   use super::*;
   use crate::backend::provider::{
-    Account, ProviderAdapter, ProviderAdapterError, ProviderDropletStatus,
+    Account, BootstrapWaitRequest, ProviderAdapter, ProviderAdapterError, ProviderDropletStatus,
   };
   use crate::backend::secure_storage::SecureStorage;
   use crate::backend::provider::ProviderRegistry;
@@ -2074,9 +2094,7 @@ mod tests {
     fn wait_for_bootstrap_ready(
       &self,
       _token: &str,
-      _droplet_id: u64,
-      endpoint_ip: &str,
-      _readiness_marker_path: &str,
+      request: &BootstrapWaitRequest,
     ) -> Result<crate::backend::bootstrap::BootstrapOutputContract, ProviderAdapterError> {
       if self.fail_bootstrap_wait {
         return Err(ProviderAdapterError::Unsupported {
@@ -2085,7 +2103,7 @@ mod tests {
       }
 
       Ok(crate::backend::bootstrap::BootstrapOutputContract {
-        server_endpoint_ip: endpoint_ip.to_string(),
+        server_endpoint_ip: request.endpoint_ip.clone(),
         server_public_key: "server-pub-key-123".to_string(),
         listen_port: DEFAULT_WIREGUARD_PORT,
       })
@@ -3085,6 +3103,13 @@ impl OrchestratorError {
         message: detail.clone(),
         next_action:
           "Retry node creation after checking bootstrap settings, or Force Cleanup first if the node already exists."
+            .to_string(),
+      },
+      Self::Keygen { detail, .. } => UserFacingError {
+        kind: UserFacingErrorKind::Unknown,
+        message: detail.clone(),
+        next_action:
+          "Ensure WireGuard is installed and accessible, then retry node creation."
             .to_string(),
       },
     }

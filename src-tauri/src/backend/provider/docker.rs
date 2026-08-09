@@ -1,15 +1,14 @@
-use std::io::Write;
 use std::process::Command;
-use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::backend::bootstrap::{
   Bootstrap, BootstrapOutputContract, BootstrapParams, ReadinessMarker,
   DEFAULT_INTERFACE_NAME, DEFAULT_WIREGUARD_PORT,
 };
+use crate::backend::crypto::keypair::WireGuardKeypair;
 
 use super::{
-  Account, ProviderAdapterError, ProviderDropletStatus, ProviderPlanPricing,
+  Account, BootstrapWaitRequest, ProviderAdapterError, ProviderDropletStatus, ProviderPlanPricing,
   ProvisionedDroplet,
 };
 
@@ -501,105 +500,6 @@ impl DockerProviderAdapter {
     Ok(())
   }
 
-  fn generate_host_wireguard_keypair() -> Result<(String, String), ProviderAdapterError> {
-    let private_out = Command::new("wg")
-      .arg("genkey")
-      .output()
-      .map_err(|error| ProviderAdapterError::Unsupported {
-        detail: format!(
-          "Could not execute host WireGuard key generation via 'wg genkey': {}",
-          error
-        ),
-      })?;
-
-    if !private_out.status.success() {
-      let stderr = String::from_utf8_lossy(&private_out.stderr).trim().to_string();
-      return Err(ProviderAdapterError::Unsupported {
-        detail: format!(
-          "Host WireGuard key generation failed via 'wg genkey' (exit {:?}): {}",
-          private_out.status.code(),
-          if stderr.is_empty() {
-            "unknown error".to_string()
-          } else {
-            stderr
-          }
-        ),
-      });
-    }
-
-    let private_key = String::from_utf8_lossy(&private_out.stdout).trim().to_string();
-    if private_key.is_empty() {
-      return Err(ProviderAdapterError::Unsupported {
-        detail: "Host WireGuard key generation produced an empty private key.".to_string(),
-      });
-    }
-
-    let mut pub_cmd = Command::new("wg")
-      .arg("pubkey")
-      .stdin(Stdio::piped())
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .spawn()
-      .map_err(|error| ProviderAdapterError::Unsupported {
-        detail: format!(
-          "Could not execute host WireGuard public key derivation via 'wg pubkey': {}",
-          error
-        ),
-      })?;
-
-    {
-      let stdin = pub_cmd
-        .stdin
-        .as_mut()
-        .ok_or_else(|| ProviderAdapterError::Unsupported {
-          detail: "Host WireGuard public key derivation could not open stdin pipe."
-            .to_string(),
-        })?;
-
-      stdin
-        .write_all(private_key.as_bytes())
-        .map_err(|error| ProviderAdapterError::Unsupported {
-          detail: format!(
-            "Could not send private key to host WireGuard public key derivation: {}",
-            error
-          ),
-        })?;
-    }
-
-    let public_out = pub_cmd
-      .wait_with_output()
-      .map_err(|error| ProviderAdapterError::Unsupported {
-        detail: format!(
-          "Host WireGuard public key derivation process failed while waiting for output: {}",
-          error
-        ),
-      })?;
-
-    if !public_out.status.success() {
-      let stderr = String::from_utf8_lossy(&public_out.stderr).trim().to_string();
-      return Err(ProviderAdapterError::Unsupported {
-        detail: format!(
-          "Host WireGuard public key derivation failed via 'wg pubkey' (exit {:?}): {}",
-          public_out.status.code(),
-          if stderr.is_empty() {
-            "unknown error".to_string()
-          } else {
-            stderr
-          }
-        ),
-      });
-    }
-
-    let public_key = String::from_utf8_lossy(&public_out.stdout).trim().to_string();
-    if public_key.is_empty() {
-      return Err(ProviderAdapterError::Unsupported {
-        detail: "Host WireGuard public key derivation produced an empty public key.".to_string(),
-      });
-    }
-
-    Ok((private_key, public_key))
-  }
-
   fn resolve_docker_init_payload(init_script: &str) -> Result<String, ProviderAdapterError> {
     if !init_script.trim().is_empty() {
       return Ok(init_script.to_string());
@@ -618,62 +518,39 @@ impl DockerProviderAdapter {
 
   fn initialize_wireguard_server_in_container(
     container_id: &str,
+    keypair: &WireGuardKeypair,
     readiness_marker_path: &str,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
-    let (server_private_key, server_public_key) = Self::generate_host_wireguard_keypair()?;
-
     let _ = Self::docker_exec(
       container_id,
       "set -eu; mkdir -p /etc/wireguard;",
-      "prepare Docker WireGuard directory before init script",
+      "prepare WireGuard directory before staging keys",
     )?;
 
     Self::copy_host_text_to_container(
       container_id,
-      &format!("{}\n", server_private_key),
+      &format!("{}\n", keypair.private_key),
       "/etc/wireguard/server_private.key",
-      "copy Docker server private key into container",
+      "stage server private key in container",
     )?;
 
     Self::copy_host_text_to_container(
       container_id,
-      &format!("{}\n", server_public_key),
+      &format!("{}\n", keypair.public_key),
       "/etc/wireguard/server_public.key",
-      "copy Docker server public key into container",
+      "stage server public key in container",
     )?;
 
-    let execute_init_script = |action: &str| {
-      Self::docker_exec(
-        container_id,
-        &format!(
-          "set -eu; {script}; for attempt in 1 2 3 4 5; do if [ -f '{marker}' ]; then exit 0; fi; sleep 1; done; exit 62;",
-          script = DOCKER_INIT_SCRIPT_PATH,
-          marker = readiness_marker_path,
-        ),
-        action,
-      )
-    };
-
-    let _ = execute_init_script("execute Docker init script")?;
-    if server_public_key.len() < 40 {
-      return Err(ProviderAdapterError::Unsupported {
-        detail: "Docker init script returned an invalid WireGuard server public key."
-          .to_string(),
-      });
-    }
-
-    let marker_script = format!(
-      "set -eu; mkdir -p \"$(dirname {readiness_marker_path})\"; printf '{{\"status\":\"ready\",\"server_public_key\":\"%s\",\"listen_port\":%d}}\\n' {server_public_key} {listen_port} > {readiness_marker_path};",
-      readiness_marker_path = Self::shell_single_quote(readiness_marker_path),
-      server_public_key = Self::shell_single_quote(&server_public_key),
-      listen_port = DEFAULT_WIREGUARD_PORT,
-    );
-
+    // init script skips keygen because both key files are already present
     let _ = Self::docker_exec(
       container_id,
-      &marker_script,
-      "write Docker bootstrap readiness marker",
-    )?;
+      &format!(
+        "set -eu; {script}; for attempt in 1 2 3 4 5; do if [ -f '{marker}' ]; then exit 0; fi; sleep 1; done; exit 62;",
+        script = DOCKER_INIT_SCRIPT_PATH,
+        marker = readiness_marker_path,
+      ),
+      "execute Docker init script",
+    )?;;
 
     let marker_content = Self::copy_container_file_to_host_text_with_retries(
       container_id,
@@ -899,20 +776,21 @@ impl super::ProviderAdapter for DockerProviderAdapter {
   fn wait_for_bootstrap_ready(
     &self,
     token: &str,
-    droplet_id: u64,
-    endpoint_ip: &str,
-    readiness_marker_path: &str,
+    request: &BootstrapWaitRequest,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let _ = Self::ensure_daemon_available()?;
 
-    let container_id = Self::container_id_for_droplet(droplet_id)?;
-    let mut contract =
-      Self::initialize_wireguard_server_in_container(&container_id, readiness_marker_path)?;
-    contract.server_endpoint_ip = if endpoint_ip.trim().is_empty() {
+    let container_id = Self::container_id_for_droplet(request.droplet_id)?;
+    let mut contract = Self::initialize_wireguard_server_in_container(
+      &container_id,
+      &request.server_keypair,
+      &request.readiness_marker_path,
+    )?;
+    contract.server_endpoint_ip = if request.endpoint_ip.trim().is_empty() {
       Self::docker_public_endpoint().to_string()
     } else {
-      endpoint_ip.to_string()
+      request.endpoint_ip.clone()
     };
 
     Ok(contract)
@@ -981,7 +859,8 @@ mod tests {
     DockerProviderAdapter, DOCKER_IMAGE, DOCKER_REGION, DOCKER_WIREGUARD_PUBLISH,
   };
   use crate::backend::bootstrap::{Bootstrap, BootstrapParams, READINESS_MARKER_PATH};
-  use crate::backend::provider::ProviderAdapter;
+  use crate::backend::crypto::keypair::generate_server_keypair;
+  use crate::backend::provider::{BootstrapWaitRequest, ProviderAdapter};
   use std::time::{SystemTime, UNIX_EPOCH};
 
   #[test]
@@ -1036,9 +915,12 @@ mod tests {
 
     let contract_result = adapter.wait_for_bootstrap_ready(
       token,
-      provisioned.droplet_id,
-      &provisioned.public_ipv4,
-      READINESS_MARKER_PATH,
+      &BootstrapWaitRequest {
+        droplet_id: provisioned.droplet_id,
+        endpoint_ip: provisioned.public_ipv4.clone(),
+        readiness_marker_path: READINESS_MARKER_PATH.to_string(),
+        server_keypair: generate_server_keypair().expect("keypair should generate for real test"),
+      },
     );
 
     match contract_result {
@@ -1121,9 +1003,12 @@ mod tests {
     let contract = adapter
       .wait_for_bootstrap_ready(
         token,
-        provisioned.droplet_id,
-        &provisioned.public_ipv4,
-        READINESS_MARKER_PATH,
+        &BootstrapWaitRequest {
+          droplet_id: provisioned.droplet_id,
+          endpoint_ip: provisioned.public_ipv4.clone(),
+          readiness_marker_path: READINESS_MARKER_PATH.to_string(),
+          server_keypair: generate_server_keypair().expect("keypair should generate for real test"),
+        },
       )
       .expect("bootstrap contract should be available");
 

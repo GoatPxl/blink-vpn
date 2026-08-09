@@ -1,4 +1,5 @@
 pub mod bootstrap;
+pub mod crypto;
 pub mod db;
 pub mod feature_flags;
 pub mod logging;

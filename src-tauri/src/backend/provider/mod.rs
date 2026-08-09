@@ -10,6 +10,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::backend::bootstrap::BootstrapOutputContract;
+use crate::backend::crypto::keypair::WireGuardKeypair;
 use crate::backend::db::{Database, DbError, ProviderRecord, ProviderStatus};
 use crate::backend::secure_storage::{SecretStoreError, SecureStorage};
 
@@ -43,9 +44,7 @@ pub trait ProviderAdapter: Send + Sync {
   fn wait_for_bootstrap_ready(
     &self,
     token: &str,
-    droplet_id: u64,
-    endpoint_ip: &str,
-    readiness_marker_path: &str,
+    request: &BootstrapWaitRequest,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError>;
   fn droplet_status(
     &self,
@@ -265,14 +264,12 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
   fn wait_for_bootstrap_ready(
     &self,
     _token: &str,
-    _droplet_id: u64,
-    _endpoint_ip: &str,
-    readiness_marker_path: &str,
+    request: &BootstrapWaitRequest,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
     Err(ProviderAdapterError::Unsupported {
       detail: format!(
         "Cloud-init readiness marker retrieval from '{}' requires a remote retrieval channel and is not yet available in this phase.",
-        readiness_marker_path
+        request.readiness_marker_path
       ),
     })
   }
@@ -330,12 +327,20 @@ pub struct NodeInitRequest {
   pub init_payload: String,
   pub endpoint_ip: String,
   pub readiness_marker_path: String,
+  pub server_keypair: WireGuardKeypair,
 }
 
 #[derive(Debug, Clone)]
 pub struct NodeInitResult {
   pub provisioned: ProvisionedDroplet,
-  pub bootstrap_contract: BootstrapOutputContract,
+}
+
+#[derive(Debug, Clone)]
+pub struct BootstrapWaitRequest {
+  pub droplet_id: u64,
+  pub endpoint_ip: String,
+  pub readiness_marker_path: String,
+  pub server_keypair: WireGuardKeypair,
 }
 
 pub trait NodeProvider: Send + Sync {
@@ -344,9 +349,7 @@ pub trait NodeProvider: Send + Sync {
   fn wait_for_bootstrap_ready(
     &self,
     token: &str,
-    droplet_id: u64,
-    endpoint_ip: &str,
-    readiness_marker_path: &str,
+    request: &BootstrapWaitRequest,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError>;
   fn get_status(&self, token: &str, droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError>;
   fn exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError>;
@@ -388,30 +391,16 @@ impl NodeProvider for AdapterNodeProvider {
       &request.init_payload,
     )?;
 
-    let bootstrap_contract = self.adapter.wait_for_bootstrap_ready(
-      effective_token,
-      provisioned.droplet_id,
-      &request.endpoint_ip,
-      &request.readiness_marker_path,
-    )?;
-
-    Ok(NodeInitResult {
-      provisioned,
-      bootstrap_contract,
-    })
+    Ok(NodeInitResult { provisioned })
   }
 
   fn wait_for_bootstrap_ready(
     &self,
     token: &str,
-    droplet_id: u64,
-    endpoint_ip: &str,
-    readiness_marker_path: &str,
+    request: &BootstrapWaitRequest,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
     let effective_token = self.token.as_deref().unwrap_or(token);
-    self
-      .adapter
-      .wait_for_bootstrap_ready(effective_token, droplet_id, endpoint_ip, readiness_marker_path)
+    self.adapter.wait_for_bootstrap_ready(effective_token, request)
   }
 
   fn get_status(&self, token: &str, droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError> {
@@ -762,14 +751,12 @@ impl ProviderRegistry {
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
-    droplet_id: u64,
-    endpoint_ip: &str,
-    readiness_marker_path: &str,
+    request: &BootstrapWaitRequest,
   ) -> Result<BootstrapOutputContract, ProviderFlowError> {
     let node_provider = self.node_provider_for_provider_id(db, secure_storage, provider_id)?;
     let token = self.resolve_provider_token_for_orchestrator(db, secure_storage, provider_id)?;
     node_provider
-      .wait_for_bootstrap_ready(&token, droplet_id, endpoint_ip, readiness_marker_path)
+      .wait_for_bootstrap_ready(&token, request)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Bootstrap readiness wait failed in provider adapter.".to_string(),
         source,
@@ -945,9 +932,11 @@ mod tests {
   use crate::backend::db::Database;
   use crate::backend::secure_storage::SecureStorage;
 
+  use crate::backend::crypto::keypair::generate_server_keypair;
+
   use super::{
-    Account, NodeInitRequest, ProviderAdapter, ProviderAdapterError, ProviderDropletStatus,
-    ProviderPlanPricing, ProviderRegistry, ProvisionedDroplet,
+    Account, BootstrapWaitRequest, NodeInitRequest, ProviderAdapter, ProviderAdapterError,
+    ProviderDropletStatus, ProviderPlanPricing, ProviderRegistry, ProvisionedDroplet,
   };
 
   fn test_db_path(test_name: &str) -> PathBuf {
@@ -1009,12 +998,10 @@ mod tests {
     fn wait_for_bootstrap_ready(
       &self,
       _token: &str,
-      _droplet_id: u64,
-      endpoint_ip: &str,
-      _readiness_marker_path: &str,
+      request: &BootstrapWaitRequest,
     ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
       Ok(BootstrapOutputContract {
-        server_endpoint_ip: endpoint_ip.to_string(),
+        server_endpoint_ip: request.endpoint_ip.clone(),
         server_public_key: "server-pub-key-123".to_string(),
         listen_port: 51820,
       })
@@ -1159,6 +1146,7 @@ mod tests {
       init_payload: "#!/bin/sh\necho hi".to_string(),
       endpoint_ip: String::new(),
       readiness_marker_path: "/tmp/marker".to_string(),
+      server_keypair: generate_server_keypair().expect("keypair generation should succeed"),
     };
 
     let result = registry
@@ -1166,7 +1154,6 @@ mod tests {
       .expect("node init should succeed through NodeProvider interface");
 
     assert_eq!(result.provisioned.droplet_id, 42);
-    assert_eq!(result.bootstrap_contract.server_public_key, "server-pub-key-123");
   }
 
   #[cfg(target_os = "windows")]

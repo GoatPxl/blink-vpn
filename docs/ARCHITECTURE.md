@@ -11,6 +11,7 @@ Stack:
 - Rust backend for orchestration, provider adapters, lifecycle state, and diagnostics
 - SQLite for local metadata and runtime snapshots
 - Windows Credential Manager for secret storage
+- Host WireGuard runtime installed on the machine running the app, with `wg` accessible to the app process.
 
 Included provider adapters:
 
@@ -43,6 +44,7 @@ flowchart LR
 - NodeProvider: provider-neutral lifecycle contract for init, bootstrap readiness, status, existence checks, and delete.
 - Provider adapters: low-level provider implementation details for validate, catalog, create, wait, and delete.
 - WireGuard manager: import, activate, deactivate, remove local tunnel interfaces.
+- Key management: generate and store key material on the app host; never generate client keys on remote nodes.
 
 ## Unified NodeProvider Contract
 
@@ -92,10 +94,22 @@ State changes are validated in backend transition guards.
 
 1. Register and validate provider credentials.
 2. Fetch region and pricing catalog.
-3. Provision node and wait for readiness.
-4. Generate/import/activate client tunnel.
-5. Poll health and diagnostics.
-6. Disconnect, destroy, or force-cleanup as required.
+3. Verify WireGuard is installed on the app host and `wg` is callable by the app.
+4. Generate WireGuard keypair on the app host (where the app resides) and persist secrets locally.
+5. Provision node with an init script that receives and applies the generated public key.
+6. Wait for bootstrap readiness and verify node-side WireGuard configuration.
+7. Import/activate client tunnel locally.
+8. Poll health and diagnostics.
+9. Disconnect, destroy, or force-cleanup as required.
+
+## Key Generation And Bootstrap Requirements
+
+- Key generation location: WireGuard key generation must happen on the same machine where the app runs.
+- Host dependency: WireGuard must be installed on that host system, and the app runtime must have command access to `wg`.
+- Private key handling: private key material remains local to the app host and secure storage boundary.
+- Public key propagation: the generated public key is injected into the provider/node init script payload.
+- Node bootstrap contract: init script must set the public key in node WireGuard config during first boot.
+- Verification: bootstrap readiness must include confirmation that the node has applied the expected public key.
 
 ## Reliability Patterns
 
