@@ -71,8 +71,8 @@ if [ ! -f /etc/wireguard/server_private.key ] || [ ! -f /etc/wireguard/server_pu
   exit 64
 fi
 
-SERVER_PRIVATE_KEY=$(cat /etc/wireguard/server_private.key)
-SERVER_PUBLIC_KEY=$(cat /etc/wireguard/server_public.key)
+SERVER_PRIVATE_KEY=$(tr -d '\r\n' < /etc/wireguard/server_private.key)
+SERVER_PUBLIC_KEY=$(tr -d '\r\n' < /etc/wireguard/server_public.key)
 
 log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf"
 

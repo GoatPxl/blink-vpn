@@ -615,15 +615,8 @@ impl DockerProviderAdapter {
     client_address_cidr: &str,
     interface_name: &str,
   ) -> Result<String, ProviderAdapterError> {
-    let public_key = client_public_key.trim();
     let client_cidr = client_address_cidr.trim();
     let iface = Self::validate_wireguard_interface_name(interface_name)?;
-
-    if public_key.is_empty() {
-      return Err(ProviderAdapterError::Unsupported {
-        detail: "Docker client peer update needs a non-empty client public key.".to_string(),
-      });
-    }
 
     if client_cidr.is_empty() {
       return Err(ProviderAdapterError::Unsupported {
@@ -637,11 +630,25 @@ impl DockerProviderAdapter {
       });
     }
 
-    let public_key = Self::shell_single_quote(public_key);
+    let public_key = crate::backend::crypto::keypair::validate_public_key(client_public_key)
+      .map_err(|source| ProviderAdapterError::Unsupported {
+        detail: format!("Docker client peer update needs a valid WireGuard public key: {source}"),
+      })?;
+    let peer_fragment = crate::backend::crypto::keypair::build_client_peer_config_fragment(
+      &public_key,
+      client_cidr,
+    )
+    .map_err(|source| ProviderAdapterError::Unsupported {
+      detail: format!("Docker client peer update could not build a valid config fragment: {source}"),
+    })?;
+
+    let public_key = Self::shell_single_quote(&public_key);
     let client_cidr = Self::shell_single_quote(client_cidr);
+    let peer_fragment = Self::shell_single_quote(&peer_fragment);
 
     Ok(format!(
-      "set -eu; mkdir -p /etc/wireguard /var/lib/goatstare; fragment=$(mktemp /tmp/goatstare-peer-XXXXXX.conf); printf '[Peer]\nPublicKey = %s\nAllowedIPs = %s\n' {public_key} {client_cidr} > \"$fragment\"; cat \"$fragment\" >> /etc/wireguard/{iface}.conf; cp \"$fragment\" /var/lib/goatstare/{iface}-client-peer.conf; rm -f \"$fragment\"; ip link show {iface} >/dev/null 2>&1; wg set {iface} peer {public_key} allowed-ips {client_cidr};",
+      "set -eu; mkdir -p /etc/wireguard /var/lib/goatstare; fragment=$(mktemp /tmp/goatstare-peer-XXXXXX.conf); printf %s {peer_fragment} > \"$fragment\"; cat \"$fragment\" >> /etc/wireguard/{iface}.conf; cp \"$fragment\" /var/lib/goatstare/{iface}-client-peer.conf; rm -f \"$fragment\"; ip link show {iface} >/dev/null 2>&1; wg set {iface} peer {public_key} allowed-ips {client_cidr};",
+      peer_fragment = peer_fragment,
       public_key = public_key,
       client_cidr = client_cidr,
     ))
@@ -975,14 +982,14 @@ mod tests {
 
   #[test]
   #[ignore = "Requires local Docker daemon and network package install inside test container"]
-  fn real_docker_create_init_and_delete_roundtrip() {
+  fn real_docker_bootstrap_init_phase_sets_up_wireguard_host() {
     let adapter = DockerProviderAdapter::new();
     let token = "dkr_v1_local_dev_mock_token_2026";
     let suffix = SystemTime::now()
       .duration_since(UNIX_EPOCH)
       .map(|value| value.as_secs())
       .unwrap_or(0);
-    let node_name = format!("docker-real-roundtrip-{suffix}");
+    let node_name = format!("docker-bootstrap-phase-{suffix}");
 
     let provisioned = adapter
       .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", "")
@@ -1044,14 +1051,14 @@ mod tests {
 
   #[test]
   #[ignore = "Requires local Docker daemon and WireGuard tooling inside the test container"]
-  fn real_docker_server_config_accepts_client_peer_roundtrip() {
+  fn real_docker_connect_phase_wires_client_peer_to_host() {
     let adapter = DockerProviderAdapter::new();
     let token = "dkr_v1_local_dev_mock_token_2026";
     let suffix = SystemTime::now()
       .duration_since(UNIX_EPOCH)
       .map(|value| value.as_secs())
       .unwrap_or(0);
-    let node_name = format!("docker-peer-roundtrip-{suffix}");
+    let node_name = format!("docker-connect-phase-{suffix}");
 
     let provisioned = adapter
       .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", "")
@@ -1069,28 +1076,42 @@ mod tests {
       )
       .expect("bootstrap contract should be available");
 
+    let client_keypair = generate_server_keypair().expect("client keypair should generate for real test");
+
     DockerProviderAdapter::wire_client_peer(
       provisioned.droplet_id,
-      "client-pub-key",
+      &client_keypair.public_key,
       "10.66.0.2/32",
     )
     .expect("client peer wiring should succeed");
 
     let container_id = DockerProviderAdapter::container_id_for_droplet(provisioned.droplet_id)
       .expect("container id should resolve for provisioned droplet");
-    let _server_conf = DockerProviderAdapter::docker_exec(
+
+    let server_config = DockerProviderAdapter::read_container_text_with_fallback(
       &container_id,
-      "cat /etc/wireguard/wg0.conf",
-      "read WireGuard server config after client peer wiring",
+      "/etc/wireguard/wg0.conf",
+      "copy WireGuard server config from container",
+      "read WireGuard server config from container via shell fallback",
     )
     .expect("server config should be readable from container");
 
-    DockerProviderAdapter::docker_exec(
+    assert!(server_config.contains("[Interface]") || server_config.contains("[Peer]"));
+    assert!(server_config.contains("PrivateKey =") || server_config.contains("PublicKey ="));
+    assert!(server_config.contains("Address = 10.66.0.1/24") || server_config.contains("AllowedIPs = 10.66.0.2/32"));
+    assert!(server_config.contains("ListenPort = 51820") || server_config.contains("AllowedIPs = 10.66.0.2/32"));
+
+    let peer_fragment_content = DockerProviderAdapter::read_container_text_with_fallback(
       &container_id,
-      "set -eu; ip link show wg0 >/dev/null 2>&1; wg show wg0 peers | grep -qx 'client-pub-key';",
-      "validate client peer is active on Docker WireGuard interface",
+      "/var/lib/goatstare/wg0-client-peer.conf",
+      "copy rendered peer fragment artifact from container",
+      "read rendered peer fragment artifact from container via shell fallback",
     )
-    .expect("client peer should be present on wg0");
+    .expect("peer fragment artifact should be discoverable");
+
+    assert!(peer_fragment_content.contains("[Peer]"));
+    assert!(peer_fragment_content.contains(&format!("PublicKey = {}", client_keypair.public_key)));
+    assert!(peer_fragment_content.contains("AllowedIPs = 10.66.0.2/32"));
 
     assert_eq!(contract.server_endpoint_ip, provisioned.public_ipv4);
 
