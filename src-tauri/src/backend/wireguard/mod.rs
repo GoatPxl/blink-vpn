@@ -6,6 +6,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,9 +26,11 @@ use crate::backend::logging;
 
 pub const DEFAULT_CLIENT_ALLOWED_IPS: &[&str] = &["0.0.0.0/0", "::/0"];
 pub const DEFAULT_CLIENT_KEEPALIVE_SECONDS: u16 = 25;
-const ACTIVATE_POLL_ATTEMPTS: usize = 10;
+const ACTIVATE_POLL_ATTEMPTS: usize = 60;
 const ACTIVATE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRACE_HISTORY_LIMIT: usize = 120;
+static ADMIN_RUNTIME_ACCESS_DENIED: AtomicBool = AtomicBool::new(false);
+static PROCESS_ELEVATION_IS_ADMIN: OnceLock<bool> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct WireGuardManager {
@@ -47,6 +51,35 @@ impl WireGuardManager {
       runner,
       debug_trace: Arc::new(Mutex::new(WireGuardDebugTrace::default())),
     }
+  }
+
+  fn should_force_legacy_for_admin_mode(&self) -> bool {
+    ADMIN_RUNTIME_ACCESS_DENIED.load(Ordering::Relaxed)
+  }
+
+  fn mark_force_legacy_for_admin_mode(&self) {
+    ADMIN_RUNTIME_ACCESS_DENIED.store(true, Ordering::Relaxed);
+  }
+
+  fn should_use_legacy_for_admin_mode(&self) -> bool {
+    if self.should_force_legacy_for_admin_mode() {
+      return true;
+    }
+
+    if !self.is_process_elevated_for_admin_runtime() {
+      self.mark_force_legacy_for_admin_mode();
+      return true;
+    }
+
+    false
+  }
+
+  fn is_process_elevated_for_admin_runtime(&self) -> bool {
+    if cfg!(test) {
+      return true;
+    }
+
+    *PROCESS_ELEVATION_IS_ADMIN.get_or_init(|| detect_windows_elevated_process(self.runner.as_ref()))
   }
 
   pub fn debug_snapshot(&self) -> WireGuardDebugSnapshot {
@@ -303,9 +336,13 @@ impl WireGuardManager {
     config_text: &str,
   ) -> Result<(), WireGuardError> {
     match mode {
+      WireGuardConnectionMode::Admin if self.should_use_legacy_for_admin_mode() => {
+        self.import_tunnel_legacy(tunnel_name, config_text)
+      }
       WireGuardConnectionMode::Admin => match self.import_tunnel_defguard(tunnel_name, config_text) {
         Ok(()) => Ok(()),
         Err(error) if is_wireguard_runtime_access_denied_error(&error) => {
+          self.mark_force_legacy_for_admin_mode();
           self.import_tunnel_legacy(tunnel_name, config_text)
         }
         Err(error) => Err(error),
@@ -324,9 +361,13 @@ impl WireGuardManager {
     tunnel_name: &str,
   ) -> Result<(), WireGuardError> {
     match mode {
+      WireGuardConnectionMode::Admin if self.should_use_legacy_for_admin_mode() => {
+        self.activate_tunnel_legacy(tunnel_name)
+      }
       WireGuardConnectionMode::Admin => match self.activate_tunnel_defguard(tunnel_name) {
         Ok(()) => Ok(()),
         Err(error) if is_wireguard_runtime_access_denied_error(&error) => {
+          self.mark_force_legacy_for_admin_mode();
           self.activate_tunnel_legacy(tunnel_name)
         }
         Err(error) => Err(error),
@@ -416,9 +457,13 @@ impl WireGuardManager {
     tunnel_name: &str,
   ) -> Result<(), WireGuardError> {
     match mode {
+      WireGuardConnectionMode::Admin if self.should_use_legacy_for_admin_mode() => {
+        self.deactivate_tunnel_legacy(tunnel_name)
+      }
       WireGuardConnectionMode::Admin => match self.deactivate_tunnel_defguard(tunnel_name) {
         Ok(()) => Ok(()),
         Err(error) if is_wireguard_runtime_access_denied_error(&error) => {
+          self.mark_force_legacy_for_admin_mode();
           self.deactivate_tunnel_legacy(tunnel_name)
         }
         Err(error) => Err(error),
@@ -437,9 +482,13 @@ impl WireGuardManager {
     tunnel_name: &str,
   ) -> Result<(), WireGuardError> {
     match mode {
+      WireGuardConnectionMode::Admin if self.should_use_legacy_for_admin_mode() => {
+        self.unregister_tunnel_legacy(tunnel_name)
+      }
       WireGuardConnectionMode::Admin => match self.unregister_tunnel_defguard(tunnel_name) {
         Ok(()) => Ok(()),
         Err(error) if is_wireguard_runtime_access_denied_error(&error) => {
+          self.mark_force_legacy_for_admin_mode();
           self.unregister_tunnel_legacy(tunnel_name)
         }
         Err(error) => Err(error),
@@ -544,16 +593,16 @@ impl WireGuardManager {
 
     let service_name = wireguard_service_name(tunnel_name);
     self.record_command(&format!("sc start {}", service_name));
-    let start_result = self.runner.run("sc", &["start", &service_name], None);
+    let start_result = run_sc_with_uac_fallback(self.runner.as_ref(), "start", &service_name);
 
     match start_result {
       Ok(_) => self.wait_for_running_tunnel(tunnel_name),
-      Err(source) => {
+      Err(error) => {
         if self.wait_for_running_tunnel(tunnel_name).is_ok() {
           return Ok(());
         }
 
-        Err(map_sc_tunnel_error(source, &service_name, "start"))
+        Err(error)
       }
     }
   }
@@ -612,9 +661,13 @@ impl WireGuardManager {
     validate_tunnel_name(tunnel_name)?;
 
     match mode {
+      WireGuardConnectionMode::Admin if self.should_use_legacy_for_admin_mode() => {
+        self.read_tunnel_status_legacy(tunnel_name)
+      }
       WireGuardConnectionMode::Admin => match self.read_tunnel_status_defguard(tunnel_name) {
         Ok(status) => Ok(status),
         Err(error) if is_wireguard_runtime_access_denied_error(&error) => {
+          self.mark_force_legacy_for_admin_mode();
           self.read_tunnel_status_legacy(tunnel_name)
         }
         Err(error) => Err(error),
@@ -1859,6 +1912,23 @@ fn parse_wg_version_output(raw: &str) -> Option<String> {
   }
 
   Some(first_line.to_string())
+}
+
+fn detect_windows_elevated_process(runner: &dyn CommandRunner) -> bool {
+  if !cfg!(target_os = "windows") {
+    return false;
+  }
+
+  let output = match runner.run("whoami", &["/groups"], None) {
+    Ok(output) => output,
+    Err(_) => return false,
+  };
+
+  let group_output = output.stdout.to_ascii_lowercase();
+
+  group_output.contains("s-1-16-12288")
+    || group_output.contains("s-1-16-16384")
+    || group_output.contains("s-1-16-20480")
 }
 
 fn command_probe_indicates_presence(result: &Result<CommandOutput, CommandExecError>) -> bool {
