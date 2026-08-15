@@ -11,7 +11,7 @@ Stack:
 - Rust backend for orchestration, provider adapters, lifecycle state, and diagnostics
 - SQLite for local metadata and runtime snapshots
 - Windows Credential Manager for secret storage
-- DefGuard-managed WireGuard runtime on the machine running the app, backed by `wireguard-nt` and a single connection-mode setting.
+- WireGuard for Windows on the machine running the app; tunnels are managed through its service.
 
 Included provider adapters:
 
@@ -30,7 +30,7 @@ flowchart LR
   NP --> DKR[Docker adapter]
   ORCH --> DB[(SQLite)]
   ORCH --> SEC[Credential Manager]
-  ORCH --> RUNTIME[DefGuard WireGuard runtime]
+  ORCH --> RUNTIME[WireGuard for Windows service]
   DO --> DOAPI[DigitalOcean API]
   DKR --> DKRCLI[Docker CLI]
 ```
@@ -43,15 +43,14 @@ flowchart LR
 - Provider registry: adapter resolution by provider slug and NodeProvider construction.
 - NodeProvider: provider-neutral lifecycle contract for init, bootstrap readiness, status, existence checks, and delete.
 - Provider adapters: low-level provider implementation details for validate, catalog, create, wait, and delete.
-- WireGuard manager: generate keys, configure local tunnels through the DefGuard runtime, activate/deactivate connections, and clean up local interfaces.
+- WireGuard manager: generate keys, and import, activate, deactivate, and unregister tunnels through the WireGuard for Windows service.
 - Key management: generate and store key material on the app host; never generate client keys on remote nodes.
 
-## Connection Modes
+## Connection Model
 
-- Settings exposes one WireGuard mode toggle: `Admin Mode` or `User Mode`.
-- `Admin Mode` uses a privileged virtual adapter workflow and can require Windows elevation prompts during tunnel creation or cleanup.
-- `User Mode` uses the installed WireGuard for Windows service path without creating an app-managed virtual adapter.
-- Both modes flow through the same typed Tauri/backend contracts; the selected mode only changes how the local runtime is configured.
+- There is one connection path: the WireGuard for Windows tunnel service.
+- Elevation is requested for connect and disconnect only, and only after a direct attempt is refused for permissions. Status reads never elevate.
+- An earlier `Admin Mode` / `User Mode` toggle was removed. It promised a second, in-process adapter runtime that could not work — the adapter was destroyed when its creating function returned, and interface reads always failed for want of an adapter handle — so Admin Mode silently fell back to the service path and the two modes were identical in practice.
 
 ## Global App Settings
 
@@ -64,15 +63,9 @@ Rules:
 - Settings must be additive, versioned through migrations, and safe for existing installs.
 - Secret values must not be stored in app settings.
 
-Initial settings in this category:
-
-- `wireguard_connection_mode`: `admin` or `user`
-
-Behavior:
-
-- Default value is `admin`.
-- Mode changes are blocked while any tunnel is connected.
-- Tunnel connect and disconnect flows read the current persisted mode at execution time.
+The table currently holds no settings. It previously held `wireguard_connection_mode`, removed in
+migration 0014 along with the connection-mode toggle (see Connection Model above). The table is
+kept because the migration path and access pattern are useful for future settings.
 
 ## Unified NodeProvider Contract
 
@@ -116,24 +109,24 @@ State changes are validated in backend transition guards.
 - Frontend input boundary: all command inputs are treated as untrusted.
 - Secret boundary: secure storage keeps secret values out of SQLite.
 - Provider boundary: remote API responses are validated and normalized.
-- Local runtime boundary: DefGuard/WireGuard runtime and Docker command output is treated as untrusted process output.
+- Local runtime boundary: `wireguard.exe`, `sc`, `wg`, and Docker command output are treated as untrusted process output.
 
 ## Data Flow
 
 1. Register and validate provider credentials.
 2. Fetch region and pricing catalog.
-3. Verify the DefGuard-managed WireGuard runtime prerequisites are available on the app host.
+3. Verify WireGuard for Windows is installed on the app host.
 4. Generate WireGuard keypair on the app host (where the app resides) and persist secrets locally.
 5. Provision node with an init script that receives and applies the generated public key.
 6. Wait for bootstrap readiness and verify node-side WireGuard configuration.
-7. Configure and activate the client tunnel locally using the selected connection mode.
+7. Configure and activate the client tunnel locally through the WireGuard tunnel service.
 8. Poll health and diagnostics.
 9. Disconnect, destroy, or force-cleanup as required.
 
 ## Key Generation And Bootstrap Requirements
 
 - Key generation location: WireGuard key generation must happen on the same machine where the app runs.
-- Host dependency: the app host must provide the DefGuard runtime DLL resources and any Windows WireGuard service dependencies required by the selected connection mode.
+- Host dependency: the app host must have WireGuard for Windows installed. No driver DLL is bundled or downloaded.
 - Private key handling: private key material remains local to the app host and secure storage boundary.
 - Public key propagation: the generated public key is injected into the provider/node init script payload.
 - Node bootstrap contract: init script must set the public key in node WireGuard config during first boot.

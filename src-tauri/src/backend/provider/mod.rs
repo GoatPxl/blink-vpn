@@ -676,6 +676,29 @@ impl ProviderRegistry {
     self.upsert_provider_with_token(db, secure_storage, provider_id, provider_name, "docker", api_token)
   }
 
+  /// Register a credential against whichever adapter the provider's slug names.
+  ///
+  /// The slug is resolved from the stored provider record by the caller, so adding a provider
+  /// does not mean adding another command.
+  pub fn upsert_provider_token_for_slug(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    provider_id: &str,
+    provider_name: &str,
+    provider_slug: &str,
+    api_token: &str,
+  ) -> Result<ProviderRecord, ProviderFlowError> {
+    self.upsert_provider_with_token(
+      db,
+      secure_storage,
+      provider_id,
+      provider_name,
+      provider_slug,
+      api_token,
+    )
+  }
+
   fn upsert_provider_with_token(
     &self,
     db: &Database,

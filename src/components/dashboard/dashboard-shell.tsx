@@ -146,10 +146,6 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             <Link href={VIEW_ROUTE.dashboard} className="mt-4 inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2.5 text-sm font-medium text-[var(--on-surface)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)]">Open dashboard</Link>
           </div>
 
-          <div className="mt-auto space-y-2 pt-6 text-[var(--on-surface-variant)]">
-            <button type="button" className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left hover:bg-[color:rgba(255,255,255,0.04)] hover:text-[var(--on-surface)]"><AppIcon name="user" className="h-5 w-5" /><span>Account</span></button>
-            <button type="button" className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left hover:bg-[color:rgba(255,255,255,0.04)] hover:text-[var(--on-surface)]"><AppIcon name="power" className="h-5 w-5" /><span>Logout</span></button>
-          </div>
         </aside>
 
         <main className="flex-1 lg:pl-[240px]">

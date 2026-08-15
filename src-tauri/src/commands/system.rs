@@ -6,6 +6,7 @@ use tauri::State;
 use tauri::{AppHandle, Manager};
 
 use crate::backend::Backend;
+use crate::commands::error::{CommandError, CommandErrorKind};
 use crate::backend::db::{Database, ProviderRecord, ProviderStatus};
 use crate::backend::logging;
 use crate::backend::provider::ProviderPlanPricing;
@@ -88,20 +89,20 @@ fn ensure_provider_present(
   provider_id: &str,
   provider_name: &str,
   provider_slug: &str,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
   if db
     .get_provider(provider_id)
-    .map_err(|err| err.to_string())?
+    .map_err(CommandError::from)?
     .is_none()
   {
     db.create_provider(provider_id, provider_name, provider_slug, None)
-      .map_err(|err| err.to_string())?;
+      .map_err(CommandError::from)?;
   }
 
   Ok(())
 }
 
-fn ensure_builtin_providers(db: &Database, docker_dev_enabled: bool) -> Result<(), String> {
+fn ensure_builtin_providers(db: &Database, docker_dev_enabled: bool) -> Result<(), CommandError> {
   ensure_provider_present(
     db,
     BUILTIN_DIGITALOCEAN_PROVIDER_ID,
@@ -125,38 +126,46 @@ fn clear_provider_credential(
   db: &Database,
   secure_storage: &SecureStorage,
   provider_id: &str,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
   let provider = db
     .get_provider(provider_id)
-    .map_err(|err| err.to_string())?
-    .ok_or_else(|| format!("Provider '{}' was not found.", provider_id))?;
+    .map_err(CommandError::from)?
+    .ok_or_else(|| CommandError::new(
+      CommandErrorKind::MissingResource,
+      format!("Provider '{}' was not found.", provider_id),
+      "Refresh the dashboard so the provider list reloads, then retry.",
+    ))?;
 
   let provider_nodes = db
     .list_vpn_nodes()
-    .map_err(|err| err.to_string())?
+    .map_err(CommandError::from)?
     .into_iter()
     .filter(|node| node.provider_id == provider_id)
     .count();
 
   if provider_nodes > 0 {
-    return Err(format!(
-      "Cannot delete provider key while {} node{} are still attached. Destroy dependent nodes first.",
-      provider_nodes,
-      if provider_nodes == 1 { "" } else { "s" }
+    return Err(CommandError::new(
+      CommandErrorKind::InvalidState,
+      format!(
+        "Cannot delete provider key while {} node{} are still attached.",
+        provider_nodes,
+        if provider_nodes == 1 { "" } else { "s" }
+      ),
+      "Destroy the dependent nodes first, then delete the key.",
     ));
   }
 
   if let Some(token_ref) = provider.token_ref.as_deref() {
     secure_storage
       .delete_provider_api_token(token_ref)
-      .map_err(|err| err.to_string())?;
+      .map_err(CommandError::from)?;
   }
 
   db.update_provider_token_ref(provider_id, None)
-    .map_err(|err| err.to_string())?;
+    .map_err(CommandError::from)?;
 
   if provider.status == ProviderStatus::Suspended {
-    db.resume_provider(provider_id).map_err(|err| err.to_string())?;
+    db.resume_provider(provider_id).map_err(CommandError::from)?;
   }
 
   Ok(())
@@ -172,11 +181,11 @@ pub fn hello(name: Option<String>, backend: State<'_, Backend>) -> String {
 }
 
 #[tauri::command]
-pub fn validate_provider_token(provider_id: String, backend: State<'_, Backend>) -> Result<String, String> {
+pub fn validate_provider_token(provider_id: String, backend: State<'_, Backend>) -> Result<String, CommandError> {
   let account = backend
     .provider
     .validate_provider_token(&backend.db, &backend.secure_storage, &provider_id)
-    .map_err(|err| err.to_string())?;
+    .map_err(CommandError::from)?;
 
   Ok(format!(
     "Provider token valid for account {} ({})",
@@ -189,7 +198,7 @@ pub fn provision_provider_droplet(
   provider_id: String,
   droplet_name: String,
   backend: State<'_, Backend>,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
   let droplet = backend
     .orchestrator
     .provision_droplet_for_provider(
@@ -200,10 +209,7 @@ pub fn provision_provider_droplet(
       &provider_id,
       &droplet_name,
     )
-    .map_err(|err| {
-      let user_error = err.to_user_facing();
-      format!("{} Next: {}", user_error.message, user_error.next_action)
-    })?;
+    .map_err(CommandError::from)?;
 
   Ok(format!(
     "Droplet provisioned: id={}, public_ipv4={}",
@@ -216,7 +222,7 @@ pub fn delete_provider_droplet(
   provider_id: String,
   droplet_id: u64,
   backend: State<'_, Backend>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
   backend
     .orchestrator
     .destroy_droplet_for_provider(
@@ -226,63 +232,47 @@ pub fn delete_provider_droplet(
       &provider_id,
       droplet_id,
     )
-    .map_err(|err| err.to_string())
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub fn register_digitalocean_provider_token(
+pub fn register_provider_token(
   provider_id: String,
   provider_name: String,
   api_token: String,
   backend: State<'_, Backend>,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
+  // The slug comes from the provider record rather than from the caller, so the UI no longer
+  // picks a command name by slug and the backend stays the single source of truth for which
+  // adapter a provider uses.
+  let slug = backend
+    .db
+    .get_provider(&provider_id)
+    .map_err(CommandError::from)?
+    .map(|provider| provider.slug)
+    .ok_or_else(|| CommandError::new(
+      CommandErrorKind::MissingResource,
+      format!("Provider '{}' was not found.", provider_id),
+      "Refresh the dashboard so the provider list reloads, then retry.",
+    ))?;
+
   let provider = backend
     .provider
-    .upsert_digitalocean_provider_with_token(
+    .upsert_provider_token_for_slug(
       &backend.db,
       &backend.secure_storage,
       &provider_id,
       &provider_name,
+      &slug,
       &api_token,
     )
-    .map_err(|err| err.to_string())?;
+    .map_err(CommandError::from)?;
 
   let token_ref = provider
     .token_ref
     .unwrap_or_else(|| "<missing-token-ref>".to_string());
 
-  Ok(format!(
-    "Provider registered with token_ref: {}",
-    token_ref
-  ))
-}
-
-#[tauri::command]
-pub fn register_docker_provider_token(
-  provider_id: String,
-  provider_name: String,
-  api_token: String,
-  backend: State<'_, Backend>,
-) -> Result<String, String> {
-  let provider = backend
-    .provider
-    .upsert_docker_provider_with_token(
-      &backend.db,
-      &backend.secure_storage,
-      &provider_id,
-      &provider_name,
-      &api_token,
-    )
-    .map_err(|err| err.to_string())?;
-
-  let token_ref = provider
-    .token_ref
-    .unwrap_or_else(|| "<missing-token-ref>".to_string());
-
-  Ok(format!(
-    "Provider registered with token_ref: {}",
-    token_ref
-  ))
+  Ok(format!("Provider registered with token_ref: {}", token_ref))
 }
 
 #[tauri::command]
@@ -290,11 +280,11 @@ pub fn list_provider_pricing(
   provider_id: String,
   region: String,
   backend: State<'_, Backend>,
-) -> Result<ProviderPricingResponse, String> {
+) -> Result<ProviderPricingResponse, CommandError> {
   let plans = backend
     .provider
     .list_provider_plan_pricing(&backend.db, &backend.secure_storage, &provider_id, &region)
-    .map_err(|err| err.to_string())?;
+    .map_err(CommandError::from)?;
 
   Ok(ProviderPricingResponse {
     provider_id,
@@ -307,34 +297,38 @@ pub fn list_provider_pricing(
 pub fn list_provider_regions(
   provider_id: String,
   backend: State<'_, Backend>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, CommandError> {
   backend
     .provider
     .list_provider_regions(&backend.db, &backend.secure_storage, &provider_id)
-    .map_err(|err| err.to_string())
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub fn list_vpn_nodes(backend: State<'_, Backend>) -> Result<Vec<VpnNodeRecord>, String> {
+pub fn list_vpn_nodes(backend: State<'_, Backend>) -> Result<Vec<VpnNodeRecord>, CommandError> {
   backend
     .orchestrator
     .list_nodes(&backend.provider, &backend.db, &backend.secure_storage)
-    .map_err(|err| err.to_string())
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub fn list_providers(backend: State<'_, Backend>) -> Result<Vec<ProviderRecord>, String> {
+pub fn list_providers(backend: State<'_, Backend>) -> Result<Vec<ProviderRecord>, CommandError> {
   ensure_builtin_providers(&backend.db, backend.feature_flags.docker_dev)?;
-  backend.db.list_providers().map_err(|err| err.to_string())
+  backend.db.list_providers().map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub fn suspend_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), String> {
+pub fn suspend_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
   let provider = backend
     .db
     .get_provider(&provider_id)
-    .map_err(|err| err.to_string())?
-    .ok_or_else(|| format!("Provider '{}' was not found.", provider_id))?;
+    .map_err(CommandError::from)?
+    .ok_or_else(|| CommandError::new(
+      CommandErrorKind::MissingResource,
+      format!("Provider '{}' was not found.", provider_id),
+      "Refresh the dashboard so the provider list reloads, then retry.",
+    ))?;
 
   if provider.status == crate::backend::db::ProviderStatus::Suspended {
     return Ok(());
@@ -343,16 +337,20 @@ pub fn suspend_provider(provider_id: String, backend: State<'_, Backend>) -> Res
   backend
     .db
     .suspend_provider(&provider_id)
-    .map_err(|err| err.to_string())
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub fn resume_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), String> {
+pub fn resume_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
   let provider = backend
     .db
     .get_provider(&provider_id)
-    .map_err(|err| err.to_string())?
-    .ok_or_else(|| format!("Provider '{}' was not found.", provider_id))?;
+    .map_err(CommandError::from)?
+    .ok_or_else(|| CommandError::new(
+      CommandErrorKind::MissingResource,
+      format!("Provider '{}' was not found.", provider_id),
+      "Refresh the dashboard so the provider list reloads, then retry.",
+    ))?;
 
   if provider.status == crate::backend::db::ProviderStatus::Active {
     return Ok(());
@@ -361,11 +359,11 @@ pub fn resume_provider(provider_id: String, backend: State<'_, Backend>) -> Resu
   backend
     .db
     .resume_provider(&provider_id)
-    .map_err(|err| err.to_string())
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub fn delete_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), String> {
+pub fn delete_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
   clear_provider_credential(&backend.db, &backend.secure_storage, &provider_id)
 }
 
@@ -373,15 +371,15 @@ pub fn delete_provider(provider_id: String, backend: State<'_, Backend>) -> Resu
 pub fn list_tunnels_for_node(
   node_id: String,
   backend: State<'_, Backend>,
-) -> Result<Vec<TunnelRecord>, String> {
+) -> Result<Vec<TunnelRecord>, CommandError> {
   backend
     .orchestrator
     .list_tunnels_for_node(&backend.db, &node_id)
-    .map_err(|err| err.to_string())
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub fn destroy_vpn_node(node_id: String, backend: State<'_, Backend>) -> Result<(), String> {
+pub fn destroy_vpn_node(node_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
   backend
     .orchestrator
     .destroy_vpn_node(
@@ -391,14 +389,14 @@ pub fn destroy_vpn_node(node_id: String, backend: State<'_, Backend>) -> Result<
       &backend.secure_storage,
       &node_id,
     )
-    .map_err(|err| err.to_string())
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub fn force_cleanup_vpn_node(
   node_id: String,
   backend: State<'_, Backend>,
-) -> Result<ForceCleanupResult, String> {
+) -> Result<ForceCleanupResult, CommandError> {
   backend
     .orchestrator
     .force_cleanup_vpn_node(
@@ -408,7 +406,7 @@ pub fn force_cleanup_vpn_node(
       &backend.secure_storage,
       &node_id,
     )
-    .map_err(|err| err.to_string())
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -419,7 +417,7 @@ pub fn create_vpn_node_to_ready(
   region: String,
   plan_key: String,
   backend: State<'_, Backend>,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
   let result = backend
     .orchestrator
     .create_vpn_node_to_ready(
@@ -435,7 +433,7 @@ pub fn create_vpn_node_to_ready(
         plan_key,
       },
     )
-    .map_err(|err| err.to_string())?;
+    .map_err(CommandError::from)?;
 
   Ok(format!(
     "Create node complete: node_id={}, droplet_id={}, endpoint_ip={}, listen_port={}, correlation_id={}, idempotent_reuse={}",
@@ -457,7 +455,7 @@ pub fn create_and_activate_client_tunnel(
   dns_server: Option<String>,
   allowed_ips: Vec<String>,
   backend: State<'_, Backend>,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
   let result = backend
     .orchestrator
     .create_and_activate_client_tunnel(
@@ -473,7 +471,7 @@ pub fn create_and_activate_client_tunnel(
         allowed_ips,
       },
     )
-    .map_err(|err| err.to_string())?;
+    .map_err(CommandError::from)?;
 
   Ok(format!(
     "Tunnel configured: tunnel_id={}, tunnel_name={}, client_public_key={}",
@@ -482,33 +480,33 @@ pub fn create_and_activate_client_tunnel(
 }
 
 #[tauri::command]
-pub fn activate_client_tunnel(tunnel_id: String, backend: State<'_, Backend>) -> Result<(), String> {
+pub fn activate_client_tunnel(tunnel_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
   backend
     .orchestrator
     .activate_client_tunnel(&backend.wireguard, &backend.db, &backend.secure_storage, &tunnel_id)
-    .map_err(|err| err.to_string())
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub fn deactivate_client_tunnel(
   tunnel_id: String,
   backend: State<'_, Backend>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
   backend
     .orchestrator
     .deactivate_client_tunnel(&backend.wireguard, &backend.db, &backend.secure_storage, &tunnel_id)
-    .map_err(|err| err.to_string())
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub fn read_client_tunnel_status(
   tunnel_id: String,
   backend: State<'_, Backend>,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
   let status = backend
     .orchestrator
     .read_client_tunnel_status(&backend.wireguard, &backend.db, &tunnel_id)
-    .map_err(|err| err.to_string())?;
+    .map_err(CommandError::from)?;
 
   Ok(format!(
     "Tunnel status: name={}, state={:?}, handshake_age_seconds={:?}, rx_bytes={:?}, tx_bytes={:?}",
@@ -525,7 +523,7 @@ pub fn connect_tunnel(
   node_id: String,
   tunnel_id: String,
   backend: State<'_, Backend>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
   backend
     .orchestrator
     .connect_tunnel(
@@ -534,10 +532,7 @@ pub fn connect_tunnel(
       &backend.secure_storage,
       &ConnectTunnelRequest { node_id, tunnel_id },
     )
-    .map_err(|err| {
-      let user_error = err.to_user_facing();
-      format!("{} Next: {}", user_error.message, user_error.next_action)
-    })
+    .map_err(CommandError::from)
 }
 
   #[tauri::command]
@@ -545,7 +540,7 @@ pub fn connect_tunnel(
     node_id: String,
     tunnel_id: Option<String>,
     backend: State<'_, Backend>,
-  ) -> Result<HealthPanelData, String> {
+  ) -> Result<HealthPanelData, CommandError> {
     let summary = backend
       .orchestrator
       .get_health_summary(
@@ -555,7 +550,7 @@ pub fn connect_tunnel(
         &node_id,
         tunnel_id.as_deref(),
       )
-      .map_err(|err| err.to_string())?;
+      .map_err(CommandError::from)?;
 
     Ok(HealthPanelData {
       node_id: summary.node_id,
@@ -570,12 +565,12 @@ pub fn connect_tunnel(
   }
 
   #[tauri::command]
-  pub fn get_diagnostics_bundle(backend: State<'_, Backend>) -> Result<DiagnosticsBundleResponse, String> {
+  pub fn get_diagnostics_bundle(backend: State<'_, Backend>) -> Result<DiagnosticsBundleResponse, CommandError> {
     ensure_builtin_providers(&backend.db, backend.feature_flags.docker_dev)?;
     let bundle = backend
       .orchestrator
       .build_diagnostics_bundle(&backend.wireguard, &backend.db)
-      .map_err(|err| err.to_string())?;
+      .map_err(CommandError::from)?;
 
     Ok(DiagnosticsBundleResponse {
       generated_at: bundle.generated_at,
@@ -592,25 +587,25 @@ pub fn connect_tunnel(
 pub fn export_diagnostics_bundle(
   app: AppHandle,
   backend: State<'_, Backend>,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
   let bundle = backend
     .orchestrator
     .build_diagnostics_bundle(&backend.wireguard, &backend.db)
-    .map_err(|err| err.to_string())?;
+    .map_err(CommandError::from)?;
 
-  let bundle_json = serde_json::to_string_pretty(&bundle).map_err(|err| err.to_string())?;
+  let bundle_json = serde_json::to_string_pretty(&bundle).map_err(CommandError::from)?;
   let sanitized_json = logging::redact_sensitive_text(&bundle_json);
 
   let diagnostics_dir = app
     .path()
     .app_data_dir()
-    .map_err(|err| err.to_string())?
+    .map_err(CommandError::from)?
     .join("diagnostics");
 
-  std::fs::create_dir_all(&diagnostics_dir).map_err(|err| err.to_string())?;
+  std::fs::create_dir_all(&diagnostics_dir).map_err(CommandError::from)?;
 
   let file_path = diagnostics_dir.join(format!("diagnostics-{}.json", bundle.generated_at));
-  std::fs::write(&file_path, sanitized_json).map_err(|err| err.to_string())?;
+  std::fs::write(&file_path, sanitized_json).map_err(CommandError::from)?;
 
   Ok(file_path.display().to_string())
 }
@@ -620,7 +615,7 @@ pub fn disconnect_tunnel(
   node_id: String,
   tunnel_id: String,
   backend: State<'_, Backend>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
   backend
     .orchestrator
     .disconnect_tunnel(
@@ -629,24 +624,18 @@ pub fn disconnect_tunnel(
       &backend.secure_storage,
       &DisconnectTunnelRequest { node_id, tunnel_id },
     )
-    .map_err(|err| {
-      let user_error = err.to_user_facing();
-      format!("{} Next: {}", user_error.message, user_error.next_action)
-    })
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub fn force_disconnect_node_service(
   node_id: String,
   backend: State<'_, Backend>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
   backend
     .orchestrator
     .force_disconnect_node_service(&backend.wireguard, &backend.db, &node_id)
-    .map_err(|err| {
-      let user_error = err.to_user_facing();
-      format!("{} Next: {}", user_error.message, user_error.next_action)
-    })
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -665,12 +654,12 @@ pub fn check_wireguard_readiness(backend: State<'_, Backend>) -> WireGuardReadin
 #[tauri::command]
 pub fn check_docker_readiness(
   backend: State<'_, Backend>,
-) -> Result<DockerReadinessResponse, String> {
+) -> Result<DockerReadinessResponse, CommandError> {
   if !backend.feature_flags.docker_dev {
-    return Err(
-      "Docker development mode is disabled. Set GOATSTARE_DEV_DOCKER=1 and restart the app."
-        .to_string(),
-    );
+    return Err(CommandError::dependency(
+      "Docker development mode is disabled.",
+      "Set GOATSTARE_DEV_DOCKER=1 and restart the app.",
+    ));
   }
 
   let cli_result = Command::new("docker").args(["--version"]).output();
@@ -751,9 +740,12 @@ pub fn check_docker_readiness(
 }
 
 #[tauri::command]
-pub fn open_wireguard_install_page() -> Result<(), String> {
+pub fn open_wireguard_install_page() -> Result<(), CommandError> {
   if !cfg!(target_os = "windows") {
-    return Err("WireGuard install shortcut is supported on Windows only in Phase 1.".to_string());
+    return Err(CommandError::dependency(
+      "WireGuard install shortcut is supported on Windows only in Phase 1.",
+      "Install WireGuard manually from wireguard.com/install.",
+    ));
   }
 
   Command::new("cmd")
@@ -765,9 +757,12 @@ pub fn open_wireguard_install_page() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn install_wireguard_with_prerequisites() -> Result<WireGuardInstallResult, String> {
+pub fn install_wireguard_with_prerequisites() -> Result<WireGuardInstallResult, CommandError> {
   if !cfg!(target_os = "windows") {
-    return Err("WireGuard installation is supported on Windows only for Phase 1.".to_string());
+    return Err(CommandError::dependency(
+      "WireGuard installation is supported on Windows only for Phase 1.",
+      "Install WireGuard manually from wireguard.com/install.",
+    ));
   }
 
   let script_path = build_wireguard_install_script().map_err(|error| {
@@ -802,10 +797,10 @@ pub fn install_wireguard_with_prerequisites() -> Result<WireGuardInstallResult, 
   })?;
 
   if !status.success() {
-    return Err(
-      "WireGuard installation was cancelled or failed. Accept the UAC prompt and complete the installer, then retry."
-        .to_string(),
-    );
+    return Err(CommandError::dependency(
+      "WireGuard installation was cancelled or did not complete.",
+      "Accept the elevation prompt and finish the installer, then retry.",
+    ));
   }
 
   Ok(WireGuardInstallResult {
@@ -866,7 +861,7 @@ if (-not $service) {
 
 #[cfg(test)]
 mod tests {
-  use super::{clear_provider_credential, ensure_builtin_providers};
+  use super::{clear_provider_credential, ensure_builtin_providers, CommandErrorKind};
   use crate::backend::db::{Database, ProviderStatus};
   use crate::backend::secure_storage::SecureStorage;
   use std::fs;
@@ -954,7 +949,9 @@ mod tests {
     let error = clear_provider_credential(&db, &secure_storage, "provider-1")
       .expect_err("credential clear should fail with attached nodes");
 
-    assert!(error.contains("Destroy dependent nodes first"));
+    // Assert on the machine-readable kind, not on message wording.
+    assert_eq!(error.kind, CommandErrorKind::InvalidState);
+    assert!(error.next_action.contains("Destroy the dependent nodes"));
     let provider = db
       .get_provider("provider-1")
       .expect("provider lookup should succeed")

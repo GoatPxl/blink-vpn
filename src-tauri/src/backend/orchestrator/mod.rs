@@ -1674,7 +1674,7 @@ impl Orchestrator {
     }
 
     Ok(DiagnosticsBundle {
-      generated_at: chrono_like_timestamp(),
+      generated_at: epoch_millis_label(),
       providers,
       nodes,
       tunnels,
@@ -1875,7 +1875,11 @@ fn redact_text(value: &str) -> String {
   output
 }
 
-fn chrono_like_timestamp() -> String {
+/// Unix epoch milliseconds as a bare number.
+///
+/// Used for `generated_at` and therefore for the exported diagnostics filename, so it must stay
+/// free of characters that are illegal in a Windows filename.
+fn epoch_millis_label() -> String {
   use std::time::{SystemTime, UNIX_EPOCH};
   let millis = SystemTime::now()
     .duration_since(UNIX_EPOCH)

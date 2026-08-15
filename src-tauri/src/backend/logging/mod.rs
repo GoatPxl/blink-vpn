@@ -126,10 +126,20 @@ fn redact_assignment_like(input: &str, key: &str) -> String {
         .map(|(offset, _)| value_start + offset)
         .unwrap_or(output.len());
       let tail = &output[value_start..];
-      let value_end = tail
-        .find(['\n', ',', '}', ' '])
-        .map(|offset| value_start + offset)
-        .unwrap_or(output.len());
+      let value_end = if tail.starts_with('"') {
+        // A quoted value runs to its closing quote. Ending at the first space instead would cut
+        // the redaction short and leave the remainder of the secret in the output — which is
+        // exactly what happens to JSON-shaped diagnostics whose values contain spaces.
+        tail[1..]
+          .find('"')
+          .map(|offset| value_start + 1 + offset + 1)
+          .unwrap_or(output.len())
+      } else {
+        tail
+          .find(['\n', ',', '}', ' '])
+          .map(|offset| value_start + offset)
+          .unwrap_or(output.len())
+      };
       output.replace_range(value_start..value_end, " [REDACTED]");
       search_start = value_start + " [REDACTED]".len();
     }
@@ -151,6 +161,32 @@ mod tests {
     assert!(!output.contains("very-secret-key"));
     assert!(!output.contains("abc123"));
     assert!(output.contains("[REDACTED]"));
+  }
+
+  /// A quoted secret containing a space must be redacted whole.
+  ///
+  /// Terminating the value at the first space left the remainder of the secret in the output,
+  /// which is the shape diagnostics bundles are serialized in.
+  #[test]
+  fn redacts_the_whole_of_a_quoted_value_containing_spaces() {
+    let input = r#"{"api_token": "secret with spaces inside", "region": "nyc1"}"#;
+    let output = redact_sensitive_text(input);
+
+    assert!(!output.contains("secret"), "output still leaked: {output}");
+    assert!(!output.contains("spaces"), "output still leaked: {output}");
+    assert!(!output.contains("inside"), "output still leaked: {output}");
+    assert!(output.contains("[REDACTED]"));
+    // Non-secret fields must survive so the bundle stays useful.
+    assert!(output.contains("nyc1"));
+  }
+
+  #[test]
+  fn redacts_private_key_json_values_without_swallowing_the_rest_of_the_document() {
+    let input = r#"{"private_key": "aGVsbG8gd29ybGQ=", "listen_port": 51820}"#;
+    let output = redact_sensitive_text(input);
+
+    assert!(!output.contains("aGVsbG8gd29ybGQ="));
+    assert!(output.contains("51820"), "unrelated fields must not be swallowed: {output}");
   }
 
   #[test]

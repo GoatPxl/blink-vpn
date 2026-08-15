@@ -13,7 +13,7 @@ Project inspiration:
 
 ## Current Capability Profile
 
-- Windows desktop workflow with DefGuard-managed WireGuard runtime integration
+- Windows desktop workflow driving the WireGuard for Windows tunnel service
 - Rust backend + Tauri + Next.js frontend architecture
 - Multi-provider adapter model
 - DigitalOcean cloud adapter and Docker local adapter
@@ -25,8 +25,7 @@ Project inspiration:
 - Stores and validates provider credentials in Windows Credential Manager (no plaintext secrets in SQLite).
 - Uses a generalized provider orchestration path for node lifecycle operations.
 - Provisions a VPS-like node, waits for readiness, and applies WireGuard bootstrap flows.
-- Creates and manages local WireGuard client tunnels through the DefGuard runtime.
-- Exposes one Settings toggle for `Admin Mode` or `User Mode` when connecting local tunnels.
+- Creates and manages local WireGuard client tunnels through the WireGuard for Windows service.
 - Shows health, diagnostics, and recovery guidance in the dashboard.
 - Supports conservative destroy and force cleanup for interrupted operations.
 
@@ -49,7 +48,7 @@ Prerequisites:
 - Node.js and npm
 - Rust toolchain
 - WireGuard for Windows installed locally
-- DefGuard runtime DLL resources available to the desktop app
+- WireGuard for Windows installed (provides `wireguard.exe` and `wg.exe`)
 - Provider API key for production-style testing (DigitalOcean)
 - Docker Desktop (only when testing dev Docker provider)
 

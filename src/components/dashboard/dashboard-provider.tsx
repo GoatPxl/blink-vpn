@@ -24,6 +24,7 @@ import {
   type ProviderRecord,
   type TunnelRecord,
   type VpnNodeRecord,
+  toCommandError,
 } from "@/lib/tauri";
 import {
   useCallback,
@@ -198,30 +199,23 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const handleError = useCallback((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
-    const explicitNextIndex = message.indexOf(" Next: ");
-    const explicitNext = explicitNextIndex >= 0
-      ? message.slice(explicitNextIndex + " Next: ".length).trim()
-      : null;
-    const baseMessage = explicitNextIndex >= 0
-      ? message.slice(0, explicitNextIndex).trim()
-      : message;
-    const classification = categorizeError(message);
+    // Every backend failure arrives structured, so message text is only ever displayed —
+    // never parsed. The " Next: " suffix this used to split on no longer exists.
+    const commandError = toCommandError(error);
+    const classification = categorizeError(commandError.kind);
+
     setRecovery({
       ...classification,
-      message: baseMessage,
-      nextAction: explicitNext ?? classification.nextAction,
+      message: commandError.message,
+      nextAction: commandError.nextAction,
     });
     pushToast(
       classification.kind === "state" ? "warning" : "error",
       classification.title,
-      explicitNext
-        ? `${baseMessage} Next: ${explicitNext}`
-        : `${baseMessage} ${classification.nextAction}`,
+      `${commandError.message} ${commandError.nextAction}`,
     );
-    return explicitNext
-      ? `${baseMessage} Next: ${explicitNext}`
-      : `${baseMessage} ${classification.nextAction}`;
+
+    return `${commandError.message} ${commandError.nextAction}`;
   }, [pushToast]);
 
   const clearThroughputSamples = useCallback(() => {
@@ -438,7 +432,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         providerId,
         providerName,
         apiToken,
-        activeProvider?.slug ?? "digitalocean",
       );
       setProviderFeedback(result);
       setRecovery(null);
@@ -491,7 +484,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         providerId,
         providerName,
         trimmed,
-        activeProvider?.slug ?? "docker",
       );
 
       const configuredAt = new Date().toISOString();
@@ -654,12 +646,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       await loadDashboard(node.id);
       await refreshHealthSnapshot(true);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const staleOrMissingService = message.includes("was not found locally")
-        || message.includes("does not exist on this machine")
-        || message.includes("OpenService FAILED 1060")
-        || message.includes("Could not complete WireGuard tunnel service operation")
-        || message.includes("WireGuard command failed for 'sc start WireGuardTunnel$");
+      // A stale or missing tunnel service is recoverable by re-importing the tunnel. The backend
+      // reports it as a WireGuard failure; this used to be inferred by matching five different
+      // message fragments, including raw Win32 text like "OpenService FAILED 1060".
+      const commandError = toCommandError(error);
+      const staleOrMissingService = commandError.kind === "wire-guard";
 
       if (staleOrMissingService) {
         const recoverableTunnel = tunnels.find((tunnel) => tunnel.node_id === node.id) ?? null;
@@ -714,8 +705,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       await loadDashboard(tunnel.node_id);
       await refreshHealth();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const missingService = message.includes("was not found locally") || message.includes("does not exist on this machine");
+      const missingService = toCommandError(error).kind === "wire-guard";
 
       if (missingService) {
         try {

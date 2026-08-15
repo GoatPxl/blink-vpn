@@ -258,7 +258,6 @@ export function OnboardingWizard() {
         state.providerId,
         state.providerName,
         apiToken.trim(),
-        currentProviderSlug,
       );
       setState((current) => ({ ...current, tokenSaved: true, tokenValidated: false }));
 

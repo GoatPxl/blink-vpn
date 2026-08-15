@@ -11,7 +11,73 @@ export type NodeLifecycleStatus =
   | "ready"
   | "connected"
   | "error"
-  | "deleting";
+  | "deleting"
+  // The backend emits this for nodes whose remote resource is gone. It was missing from this
+  // union, so those rows rendered unstyled and broke the status filter.
+  | "deleted";
+
+/**
+ * Machine-readable failure category from the backend.
+ *
+ * The UI branches on this. It must never go back to matching on message text: errors used to
+ * cross the boundary as bare strings, so classification meant substring checks against phrases
+ * like "OpenService FAILED 1060", and every backend copy edit silently broke UI recovery.
+ */
+export type CommandErrorKind =
+  | "invalid-state"
+  | "missing-resource"
+  | "provider"
+  | "wire-guard"
+  | "persistence"
+  | "secret-storage"
+  | "invalid-input"
+  | "dependency"
+  | "unknown";
+
+export interface CommandErrorPayload {
+  kind: CommandErrorKind;
+  message: string;
+  next_action: string;
+}
+
+/** A backend failure with its structure intact. */
+export class CommandError extends Error {
+  readonly kind: CommandErrorKind;
+  readonly nextAction: string;
+
+  constructor(payload: CommandErrorPayload) {
+    super(payload.message);
+    this.name = "CommandError";
+    this.kind = payload.kind;
+    this.nextAction = payload.next_action;
+  }
+}
+
+function isCommandErrorPayload(value: unknown): value is CommandErrorPayload {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<CommandErrorPayload>;
+  return typeof candidate.kind === "string"
+    && typeof candidate.message === "string"
+    && typeof candidate.next_action === "string";
+}
+
+/**
+ * Normalize whatever the bridge threw into a `CommandError`.
+ *
+ * Anything unrecognized becomes `unknown` rather than being guessed at from its text.
+ */
+export function toCommandError(error: unknown): CommandError {
+  if (error instanceof CommandError) return error;
+
+  if (isCommandErrorPayload(error)) return new CommandError(error);
+
+  const message = error instanceof Error ? error.message : String(error);
+  return new CommandError({
+    kind: "unknown",
+    message,
+    next_action: "Retry the action. If it keeps failing, export a diagnostics bundle from the Diagnostics page.",
+  });
+}
 
 export type TunnelStatus =
   | "new"
@@ -52,6 +118,8 @@ export interface VpnNodeRecord {
   error_reason: string | null;
   created_at: string;
   updated_at: string;
+  /** UDP port the client dials, as reported by the provider adapter at provision time. */
+  endpoint_port: number | null;
 }
 
 export interface TunnelRecord {
@@ -157,19 +225,28 @@ export interface ProviderPricingResponse {
 
 async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (typeof window === "undefined") {
-    throw new Error("UI is rendering on the server.");
+    throw new CommandError({
+      kind: "dependency",
+      message: "UI is rendering on the server.",
+      next_action: "This view must run in the desktop app window.",
+    });
   }
 
   const tauriWindow = window as TauriWindow;
   if (!tauriWindow.__TAURI_INTERNALS__) {
-    throw new Error("Running in browser mode. Start with npm run tauri:dev to reach Rust.");
+    throw new CommandError({
+      kind: "dependency",
+      message: "Running in browser mode, so the Rust backend is unreachable.",
+      next_action: "Start the desktop app with npm run tauri:dev.",
+    });
   }
 
-  return invoke<T>(command, args);
-}
-
-export async function invokeHello(name: string): Promise<string> {
-  return invokeCommand<string>("hello", { name });
+  // Every rejection leaves this function as a CommandError, so callers never parse message text.
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    throw toCommandError(error);
+  }
 }
 
 export async function checkWireGuardReadiness(): Promise<WireGuardReadiness> {
@@ -188,17 +265,18 @@ export async function installWireGuardWithPrerequisites(): Promise<WireGuardInst
   return invokeCommand<WireGuardInstallResult>("install_wireguard_with_prerequisites");
 }
 
+/**
+ * Register a credential for any provider.
+ *
+ * The backend resolves the adapter from the provider's own record, so this no longer picks a
+ * command name by slug — adding a provider does not mean adding another binding here.
+ */
 export async function registerProviderToken(
   providerId: string,
   providerName: string,
   apiToken: string,
-  providerSlug: string = "digitalocean",
 ): Promise<string> {
-  const command = providerSlug === "docker"
-    ? "register_docker_provider_token"
-    : "register_digitalocean_provider_token";
-
-  return invokeCommand<string>(command, {
+  return invokeCommand<string>("register_provider_token", {
     providerId,
     providerName,
     apiToken,

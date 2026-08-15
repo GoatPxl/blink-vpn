@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 import type {
+  CommandErrorKind,
   ProviderPlanPricing,
   ProviderRecord,
   TunnelRecord,
@@ -111,20 +112,36 @@ export function statusBadge(status: string) {
   return "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface-variant)]";
 }
 
-export function categorizeError(errorMessage: string): { kind: ErrorCategory; title: string; nextAction: string } {
-  if (errorMessage.includes("Provider orchestration failed") || errorMessage.includes("Provider provider")) {
-    return { kind: "provider", title: "Provider issue", nextAction: "Verify the provider token, then validate or re-save it before retrying." };
+/**
+ * Map a backend failure kind onto the UI's display category and heading.
+ *
+ * This is a total switch over `CommandErrorKind`, so adding a kind on the backend surfaces here
+ * as a type error rather than silently falling through to "unknown".
+ *
+ * It replaced a chain of `String.includes` checks against backend message text — phrases like
+ * "Provider orchestration failed" and "OpenService FAILED 1060" — which meant any reworded
+ * message silently downgraded a specific error to a generic one.
+ */
+export function categorizeError(kind: CommandErrorKind): { kind: ErrorCategory; title: string } {
+  switch (kind) {
+    case "provider":
+      return { kind: "provider", title: "Provider issue" };
+    case "persistence":
+    case "missing-resource":
+      return { kind: "database", title: "Local state issue" };
+    case "wire-guard":
+      return { kind: "wireguard", title: "WireGuard issue" };
+    case "invalid-state":
+      return { kind: "state", title: "Lifecycle issue" };
+    case "secret-storage":
+      return { kind: "provider", title: "Credential storage issue" };
+    case "dependency":
+      return { kind: "wireguard", title: "Missing prerequisite" };
+    case "invalid-input":
+      return { kind: "state", title: "Invalid request" };
+    case "unknown":
+      return { kind: "unknown", title: "Operation failed" };
   }
-  if (errorMessage.includes("Database operation failed") || errorMessage.includes("was not found")) {
-    return { kind: "database", title: "Local state issue", nextAction: "Refresh the dashboard. If state is still stale, use Force Cleanup on the affected node." };
-  }
-  if (errorMessage.includes("WireGuard operation failed") || errorMessage.includes("WireGuard is not installed")) {
-    return { kind: "wireguard", title: "WireGuard issue", nextAction: "Repair WireGuard for Windows, then use Force Cleanup to remove stale tunnel artifacts." };
-  }
-  if (errorMessage.includes("Node create flow cannot proceed") || errorMessage.includes("InvalidState")) {
-    return { kind: "state", title: "Lifecycle issue", nextAction: "Use Force Cleanup on the node, then refresh and retry the workflow." };
-  }
-  return { kind: "unknown", title: "Operation failed", nextAction: "Retry the action or refresh the dashboard." };
 }
 
 export function formatBytes(value: number | null | undefined): string {

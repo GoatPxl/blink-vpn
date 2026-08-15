@@ -71,7 +71,7 @@ impl WireGuardManager {
     }
     guard
       .commands
-      .push_back(format!("{} | {}", chrono_like_timestamp(), command));
+      .push_back(format!("{} | {}", epoch_seconds_label(), command));
   }
 
   fn record_last_import_snapshot(
@@ -1233,12 +1233,17 @@ fn format_nonzero_detail(stdout: &str, stderr: &str) -> String {
   safe
 }
 
-fn chrono_like_timestamp() -> String {
+/// Unix epoch seconds, labelled and safe to embed in a filename.
+///
+/// This is not a formatted date despite the name it used to carry; it is a raw second count. It
+/// also used a colon separator, which is illegal in NTFS filenames — and the value is used to
+/// name the exported diagnostics bundle, so every export failed with `ERROR_INVALID_NAME`.
+pub(crate) fn epoch_seconds_label() -> String {
   let epoch = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .map(|value| value.as_secs())
     .unwrap_or(0);
-  format!("epoch:{epoch}")
+  format!("epoch-{epoch}")
 }
 
 #[cfg(test)]

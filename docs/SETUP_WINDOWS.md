@@ -7,7 +7,7 @@
 - npm
 - Rust toolchain
 - WireGuard for Windows
-- DefGuard runtime DLL resources bundled for the desktop app
+- WireGuard for Windows installed (provides `wireguard.exe` and `wg.exe`)
 - Docker Desktop (for Docker adapter workflows)
 
 ## Local Development Setup
@@ -25,7 +25,6 @@ npm run tauri:dev
 ```
 
 3. Open Settings and register provider credentials.
-4. Choose the WireGuard connection mode in Settings: `Admin Mode` for virtual-adapter flows with elevation prompts, or `User Mode` for the installed WireGuard service path.
 5. Validate token, create node, and connect tunnel.
 
 ## Docker Adapter Setup
@@ -59,8 +58,8 @@ npm run tauri:e2e:docker:real
 
 ## Runtime Notes
 
-- WireGuard DLL resources are loaded from [src-tauri/resources-windows/binaries](src-tauri/resources-windows/binaries).
-- The app does not rely on direct WireGuard CLI calls; local tunnel lifecycle is handled through the DefGuard runtime and the selected connection mode.
+- No WireGuard driver DLL is bundled or downloaded. The app requires WireGuard for Windows to be installed and drives tunnels through its service.
+- Tunnel lifecycle uses `wireguard.exe /installtunnelservice` and `sc` for start/stop/query; `wg show` supplies peer metrics.
 - App metadata persists in local app-data SQLite.
 - Secret values remain in secure storage.
 

@@ -17,8 +17,8 @@
 4. Create node and wait for `ready`.
 
 ### Connect
-
-1. Confirm the Settings connection mode is correct for the local machine (`Admin Mode` or `User Mode`).
+1. Confirm WireGuard for Windows is installed and the app can reach `wireguard.exe`.
+1. Confirm WireGuard for Windows is installed and the app can reach `wireguard.exe`.
 2. Create and activate tunnel.
 3. Connect tunnel.
 4. Confirm health panel reports `connected`.

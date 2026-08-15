@@ -95,20 +95,48 @@ impl SecureStorage {
     self.inner.backend_name()
   }
 
+  /// Write a secret and confirm it reads back before reporting success.
+  ///
+  /// The cleanup matters as much as the verification. The credential is already in the store by
+  /// the time a mismatch is detected, so returning an error without removing it left a secret
+  /// that nothing referenced — invisible to the app, undeletable through it, and re-created on
+  /// every retry, leaking one more each time.
+  ///
+  /// Living here rather than in a backend means every store gets the same guarantee, and it can
+  /// be tested without touching the real Windows credential vault.
+  fn store_verified(
+    &self,
+    kind: SecretKind,
+    owner_id: &str,
+    secret: &str,
+  ) -> Result<String, SecretStoreError> {
+    const VERIFY_ATTEMPTS: usize = 2;
+
+    for _ in 0..VERIFY_ATTEMPTS {
+      let secret_ref = self.inner.store_secret(kind, owner_id, secret)?;
+
+      if self.inner.retrieve_secret(&secret_ref)?.as_deref() == Some(secret) {
+        if let Ok(mut guard) = self.session_cache.lock() {
+          guard.insert(secret_ref.clone(), secret.to_string());
+        }
+        return Ok(secret_ref);
+      }
+
+      // Written but unreadable: remove it so a retry cannot leave a second orphan behind.
+      let _ = self.inner.delete_secret(&secret_ref);
+    }
+
+    Err(SecretStoreError::Store {
+      detail: "Secret was written to secure storage but did not read back correctly, after one retry. The incomplete entry was removed. Retry the save, and check Windows Credential Manager health if it persists.".to_string(),
+    })
+  }
+
   pub fn store_digitalocean_api_token(
     &self,
     provider_id: &str,
     token: &str,
   ) -> Result<String, SecretStoreError> {
-    let token_ref = self
-      .inner
-      .store_secret(SecretKind::DigitalOceanApiToken, provider_id, token)?;
-
-    if let Ok(mut guard) = self.session_cache.lock() {
-      guard.insert(token_ref.clone(), token.to_string());
-    }
-
-    Ok(token_ref)
+    self.store_verified(SecretKind::DigitalOceanApiToken, provider_id, token)
   }
 
   pub fn store_provider_api_token(
@@ -159,17 +187,15 @@ impl SecureStorage {
     node_id: &str,
     private_key: &str,
   ) -> Result<String, SecretStoreError> {
-    let key_ref = self
-      .inner
-      .store_secret(SecretKind::ClientPrivateKey, node_id, private_key)?;
-
-    if let Ok(mut guard) = self.session_cache.lock() {
-      guard.insert(key_ref.clone(), private_key.to_string());
-    }
-
-    Ok(key_ref)
+    self.store_verified(SecretKind::ClientPrivateKey, node_id, private_key)
   }
 
+  /// Read a client private key from the credential store.
+  ///
+  /// A miss is reported as a miss. This used to fall back to an in-process cache when the vault
+  /// returned nothing, which meant a wiped or unreadable credential store kept appearing to work
+  /// for the rest of the session and only failed after a restart — hiding the very failure the
+  /// caller needs to see. The token path already behaved this way; the two are now consistent.
   pub fn get_client_private_key(
     &self,
     key_ref: &str,
@@ -182,10 +208,8 @@ impl SecureStorage {
       return Ok(Some(value));
     }
 
-    if let Ok(guard) = self.session_cache.lock() {
-      if let Some(cached) = guard.get(key_ref) {
-        return Ok(Some(cached.clone()));
-      }
+    if let Ok(mut guard) = self.session_cache.lock() {
+      guard.remove(key_ref);
     }
 
     Ok(None)
@@ -214,29 +238,40 @@ impl WindowsCredentialStore {
     }
   }
 
-  fn build_secret_ref_legacy(&self, kind: SecretKind, owner_id: &str) -> String {
-    let owner = sanitize_segment(owner_id);
-    format!("{}:{}:{}", kind.prefix(), owner, Uuid::new_v4())
-  }
-
-  fn build_secret_ref_compact(&self, kind: SecretKind, owner_id: &str) -> String {
+  /// The only reference format written: `kind__owner__uuid`.
+  ///
+  /// A second `kind:owner:uuid` builder existed alongside this one but was never called, so it
+  /// only made the format look ambiguous. Reads still accept the colon form because references
+  /// created by earlier versions are recorded in existing databases — rejecting them would
+  /// strand credentials that are perfectly readable.
+  fn build_secret_ref(&self, kind: SecretKind, owner_id: &str) -> String {
     let owner = sanitize_segment(owner_id);
     format!("{}__{}__{}", kind.prefix(), owner, Uuid::new_v4())
   }
 
-  fn parse_secret_ref(secret_ref: &str) -> Result<(), SecretStoreError> {
-    if secret_ref.trim().is_empty() {
+  /// Reject obviously malformed references before touching the credential API.
+  fn validate_secret_ref(secret_ref: &str) -> Result<(), SecretStoreError> {
+    let trimmed = secret_ref.trim();
+    if trimmed.is_empty() {
       return Err(SecretStoreError::InvalidReference {
         detail: "Secret reference must not be empty.".to_string(),
       });
     }
 
-    let has_legacy_shape = secret_ref.split(':').count() == 3;
-    let has_compact_shape = secret_ref.split("__").count() == 3;
+    // Both the current `kind__owner__uuid` form and the older `kind:owner:uuid` form begin with a
+    // known kind prefix, so checking the prefix covers both without branching on shape.
+    let has_known_kind = [
+      SecretKind::DigitalOceanApiToken.prefix(),
+      SecretKind::ClientPrivateKey.prefix(),
+    ]
+    .iter()
+    .any(|prefix| trimmed.starts_with(prefix));
 
-    if !has_legacy_shape && !has_compact_shape {
+    if !has_known_kind {
       return Err(SecretStoreError::InvalidReference {
-        detail: "Expected secret_ref format kind:owner:uuid or kind__owner__uuid.".to_string(),
+        detail:
+          "Secret reference does not start with a known secret kind. Expected kind__owner__uuid."
+            .to_string(),
       });
     }
 
@@ -251,7 +286,7 @@ impl WindowsCredentialStore {
     value.encode_utf16().chain(std::iter::once(0)).collect()
   }
 
-  fn store_and_verify_secret_ref(&self, secret_ref: &str, secret: &str) -> Result<bool, SecretStoreError> {
+  fn write_secret_ref(&self, secret_ref: &str, secret: &str) -> Result<(), SecretStoreError> {
     let target = Self::to_wide(&self.make_target_name(secret_ref));
     let username = Self::to_wide(secret_ref);
     let mut blob = secret.as_bytes().to_vec();
@@ -284,31 +319,36 @@ impl WindowsCredentialStore {
       });
     }
 
-    let roundtrip = self.retrieve_secret(secret_ref)?;
-    Ok(roundtrip.as_deref() == Some(secret))
+    Ok(())
   }
 }
 
 #[cfg(target_os = "windows")]
 impl SecretStore for WindowsCredentialStore {
+  /// Write a secret, verifying it reads back before reporting success.
+  ///
+  /// The failure path matters as much as the happy path. A mismatched read-back used to return an
+  /// error while leaving the written credential in place: the caller never learned the reference,
+  /// so the secret existed in the vault with nothing pointing at it — invisible, undeletable
+  /// through the app, and re-created on every retry. Each failed attempt leaked another one.
+  ///
+  /// Write the secret and return its reference.
+  ///
+  /// Verification and cleanup are the wrapper's job — see [`SecureStorage::store_verified`] — so
+  /// the same policy applies to every backend rather than only this one.
   fn store_secret(
     &self,
     kind: SecretKind,
     owner_id: &str,
     secret: &str,
   ) -> Result<String, SecretStoreError> {
-    let compact_ref = self.build_secret_ref_compact(kind, owner_id);
-    if self.store_and_verify_secret_ref(&compact_ref, secret)? {
-      return Ok(compact_ref);
-    }
-
-    Err(SecretStoreError::Store {
-      detail: "Secret write succeeded but immediate read-back failed; token was not persisted reliably. Retry the save action and verify Windows Credential Manager health.".to_string(),
-    })
+    let secret_ref = self.build_secret_ref(kind, owner_id);
+    self.write_secret_ref(&secret_ref, secret)?;
+    Ok(secret_ref)
   }
 
   fn retrieve_secret(&self, secret_ref: &str) -> Result<Option<String>, SecretStoreError> {
-    Self::parse_secret_ref(secret_ref)?;
+    Self::validate_secret_ref(secret_ref)?;
     let target = Self::to_wide(&self.make_target_name(secret_ref));
     let mut raw_credential: *mut CREDENTIALW = null_mut();
 
@@ -358,7 +398,7 @@ impl SecretStore for WindowsCredentialStore {
   }
 
   fn delete_secret(&self, secret_ref: &str) -> Result<(), SecretStoreError> {
-    Self::parse_secret_ref(secret_ref)?;
+    Self::validate_secret_ref(secret_ref)?;
     let target = Self::to_wide(&self.make_target_name(secret_ref));
     let delete_ok = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
 
@@ -449,29 +489,46 @@ mod tests {
 
   use super::SecureStorage;
   use super::{SecretKind, SecretStore, SecretStoreError};
+  use std::collections::HashMap;
 
-  struct VolatileNoReadStore;
+  /// Store that reads back exactly once, then loses the value.
+  ///
+  /// Models a credential vault wiped after a successful save: the write verifies, so a reference
+  /// is legitimately handed out, and only a later lookup finds nothing. That is the case where a
+  /// session-cache fallback would paper over a real failure.
+  #[derive(Default)]
+  struct EvaporatingStore {
+    secrets: Arc<std::sync::Mutex<HashMap<String, String>>>,
+  }
 
-  impl SecretStore for VolatileNoReadStore {
+  impl SecretStore for EvaporatingStore {
     fn store_secret(
       &self,
       kind: SecretKind,
       owner_id: &str,
-      _secret: &str,
+      secret: &str,
     ) -> Result<String, SecretStoreError> {
-      Ok(format!("{}:{}:volatile", kind.prefix(), owner_id))
+      let secret_ref = format!("{}__{}__evaporating", kind.prefix(), owner_id);
+      self
+        .secrets
+        .lock()
+        .expect("lock must work")
+        .insert(secret_ref.clone(), secret.to_string());
+      Ok(secret_ref)
     }
 
-    fn retrieve_secret(&self, _secret_ref: &str) -> Result<Option<String>, SecretStoreError> {
-      Ok(None)
+    fn retrieve_secret(&self, secret_ref: &str) -> Result<Option<String>, SecretStoreError> {
+      // Removing on read means the verification read succeeds and every later read misses.
+      Ok(self.secrets.lock().expect("lock must work").remove(secret_ref))
     }
 
-    fn delete_secret(&self, _secret_ref: &str) -> Result<(), SecretStoreError> {
+    fn delete_secret(&self, secret_ref: &str) -> Result<(), SecretStoreError> {
+      self.secrets.lock().expect("lock must work").remove(secret_ref);
       Ok(())
     }
 
     fn backend_name(&self) -> &'static str {
-      "volatile-no-read"
+      "evaporating"
     }
   }
 
@@ -522,7 +579,7 @@ mod tests {
 
   #[test]
   fn token_lookup_does_not_fallback_to_session_cache_when_backend_missing() {
-    let storage = SecureStorage::from_store(Arc::new(VolatileNoReadStore));
+    let storage = SecureStorage::from_store(Arc::new(EvaporatingStore::default()));
 
     let token_ref = storage
       .store_digitalocean_api_token("provider-1", "dop_v1_secret")
@@ -533,5 +590,105 @@ mod tests {
       .expect("token lookup should succeed");
 
     assert!(token.is_none());
+  }
+
+  /// Private keys must report a vault miss as a miss, exactly like tokens.
+  ///
+  /// This used to fall back to an in-process cache, so a wiped credential store kept appearing to
+  /// work until the app restarted — masking the failure at the point it could still be diagnosed.
+  #[test]
+  fn private_key_lookup_does_not_fallback_to_session_cache_when_backend_missing() {
+    let storage = SecureStorage::from_store(Arc::new(EvaporatingStore::default()));
+
+    let key_ref = storage
+      .store_client_private_key("node-1", "wg-private-key")
+      .expect("private key should store");
+
+    let key = storage
+      .get_client_private_key(&key_ref)
+      .expect("private key lookup should succeed");
+
+    assert!(
+      key.is_none(),
+      "a missing credential must not be served from the session cache"
+    );
+  }
+
+  /// Store that always writes but never reads back, and counts what it was asked to delete.
+  ///
+  /// Models the failure the retry logic exists for: the credential lands in the vault but the
+  /// verification read does not see it.
+  #[derive(Default)]
+  struct UnverifiableStore {
+    written: Arc<std::sync::Mutex<Vec<String>>>,
+    deleted: Arc<std::sync::Mutex<Vec<String>>>,
+  }
+
+  impl SecretStore for UnverifiableStore {
+    fn store_secret(
+      &self,
+      kind: SecretKind,
+      owner_id: &str,
+      _secret: &str,
+    ) -> Result<String, SecretStoreError> {
+      let secret_ref = format!(
+        "{}__{}__{}",
+        kind.prefix(),
+        owner_id,
+        self.written.lock().expect("lock must work").len()
+      );
+      self
+        .written
+        .lock()
+        .expect("lock must work")
+        .push(secret_ref.clone());
+      Ok(secret_ref)
+    }
+
+    fn retrieve_secret(&self, _secret_ref: &str) -> Result<Option<String>, SecretStoreError> {
+      Ok(None)
+    }
+
+    fn delete_secret(&self, secret_ref: &str) -> Result<(), SecretStoreError> {
+      self
+        .deleted
+        .lock()
+        .expect("lock must work")
+        .push(secret_ref.to_string());
+      Ok(())
+    }
+
+    fn backend_name(&self) -> &'static str {
+      "unverifiable"
+    }
+  }
+
+  /// A write that cannot be verified must not leave an orphan behind.
+  ///
+  /// The credential is already in the vault by the time verification fails. Returning an error
+  /// without cleaning up left a secret that nothing referenced — invisible to the app,
+  /// undeletable through it, and re-created on every retry.
+  #[test]
+  fn unverifiable_write_is_cleaned_up_rather_than_orphaned() {
+    let deleted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let store = UnverifiableStore {
+      written: Arc::new(std::sync::Mutex::new(Vec::new())),
+      deleted: Arc::clone(&deleted),
+    };
+    let written = Arc::clone(&store.written);
+    let storage = SecureStorage::from_store(Arc::new(store));
+
+    let result = storage.store_digitalocean_api_token("provider-1", "dop_v1_secret");
+
+    assert!(result.is_err(), "an unverifiable write must not report success");
+
+    let written = written.lock().expect("lock must work").clone();
+    let deleted = deleted.lock().expect("lock must work").clone();
+
+    assert!(!written.is_empty(), "the store should have been attempted");
+    assert_eq!(
+      written, deleted,
+      "every reference written must also be deleted, leaving no orphan"
+    );
   }
 }
