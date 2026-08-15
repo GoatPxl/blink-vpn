@@ -388,26 +388,12 @@ impl WireGuardManager {
       self.unregister_legacy_tunnel_service_with_program(tunnel_name, &wireguard_program)?;
     }
 
-    let mut config_dir = std::env::temp_dir();
-    let stamp = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .map(|value| value.as_nanos())
-      .unwrap_or(0);
-    config_dir.push(format!("goatstare-wireguard-import-{stamp}"));
-    fs::create_dir_all(&config_dir).map_err(|source| WireGuardError::Io {
-      action: "create_temp_config_dir",
-      detail: format!(
-        "Could not create temporary WireGuard config directory '{}'.",
-        config_dir.display()
-      ),
-      source,
-    })?;
-
+    let config_dir = tunnel_config_dir()?;
     let config_path = config_dir.join(format!("{tunnel_name}.conf"));
     fs::write(&config_path, config_text).map_err(|source| WireGuardError::Io {
-      action: "write_temp_config",
+      action: "write_tunnel_config",
       detail: format!(
-        "Could not write temporary WireGuard config '{}'.",
+        "Could not write WireGuard config '{}'.",
         config_path.display()
       ),
       source,
@@ -426,15 +412,25 @@ impl WireGuardManager {
     let result = self
       .run_elevating_on_access_denied(&wireguard_program, &install_args)
       .map_err(|source| WireGuardError::Command {
-      command: format!("wireguard /installtunnelservice {config_path_string}"),
-      detail:
-        "Could not import WireGuard tunnel service. If prompted, approve administrator elevation."
-          .to_string(),
-      source,
-    });
+        command: format!("wireguard /installtunnelservice {config_path_string}"),
+        detail:
+          "Could not import WireGuard tunnel service. If prompted, approve administrator elevation."
+            .to_string(),
+        source,
+      });
 
-    let _ = fs::remove_file(&config_path);
-    let _ = fs::remove_dir_all(&config_dir);
+    // The config file is deliberately left in place.
+    //
+    // `/installtunnelservice` records this path in the service's own command line — it does not
+    // copy the file anywhere. Deleting it after import, which is what this used to do, produced a
+    // tunnel service pointing at a file that no longer existed: the import appeared to succeed and
+    // every subsequent start failed. Configs live under a stable app-owned directory now, and are
+    // removed when the tunnel is unregistered.
+    if result.is_err() {
+      // Nothing registered, so leave no private key on disk.
+      let _ = fs::remove_file(&config_path);
+    }
+
     result.map(|_| ())
   }
 
@@ -598,7 +594,7 @@ impl WireGuardManager {
       source,
     });
 
-    match result {
+    let outcome = match result {
       Ok(_) => Ok(()),
       Err(WireGuardError::Command {
         source: CommandExecError::NonZeroExit { code: Some(1060), .. },
@@ -609,7 +605,15 @@ impl WireGuardManager {
         ..
       }) if is_windows_service_missing_detail(&detail) => Ok(()),
       Err(error) => Err(error),
+    };
+
+    // The service is gone (or was never there), so its config should not outlive it — it holds
+    // the client private key.
+    if outcome.is_ok() {
+      remove_tunnel_config(tunnel_name);
     }
+
+    outcome
   }
 }
 
@@ -1011,6 +1015,41 @@ fn wireguard_service_name(tunnel_name: &str) -> String {
   format!("WireGuardTunnel${tunnel_name}")
 }
 
+/// Directory holding the tunnel configs this app has registered.
+///
+/// It must be stable for the lifetime of the tunnel service, because
+/// `/installtunnelservice` stores the path in the service command line and reads it on every
+/// start. `%TEMP%` was used originally and the file was deleted straight after import, which left
+/// services that could never start.
+///
+/// Under `%LOCALAPPDATA%`, so no elevation is needed to write it, and the per-user ACL keeps the
+/// private key out of other users' reach while still readable by the SYSTEM-hosted tunnel service.
+fn tunnel_config_dir() -> Result<PathBuf, WireGuardError> {
+  let base = std::env::var_os("LOCALAPPDATA")
+    .map(PathBuf::from)
+    .unwrap_or_else(std::env::temp_dir);
+
+  let dir = base.join("GoatStare").join("tunnels");
+
+  fs::create_dir_all(&dir).map_err(|source| WireGuardError::Io {
+    action: "create_tunnel_config_dir",
+    detail: format!(
+      "Could not create the WireGuard config directory '{}'.",
+      dir.display()
+    ),
+    source,
+  })?;
+
+  Ok(dir)
+}
+
+/// Remove a tunnel's config once its service is gone, so no private key outlives the tunnel.
+fn remove_tunnel_config(tunnel_name: &str) {
+  if let Ok(dir) = tunnel_config_dir() {
+    let _ = fs::remove_file(dir.join(format!("{tunnel_name}.conf")));
+  }
+}
+
 
 fn validate_tunnel_name(tunnel_name: &str) -> Result<(), WireGuardError> {
   let is_valid = !tunnel_name.trim().is_empty()
@@ -1249,6 +1288,7 @@ pub(crate) fn epoch_seconds_label() -> String {
 #[cfg(test)]
 mod tests {
   use super::{
+    tunnel_config_dir,
     ClientConfigParams, CommandExecError, CommandOutput, CommandRunner,
     DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS, TunnelServiceState,
     WireGuardError, WireGuardManager, build_client_config,
@@ -1256,7 +1296,6 @@ mod tests {
     is_windows_service_missing_detail, parse_sc_state,
     parse_wg_dump_metrics,
   };
-  use std::io;
   use std::sync::{Arc, Mutex};
 
   #[derive(Clone, Default)]
@@ -1531,6 +1570,69 @@ mod tests {
       "wg-node-1".to_string(),
     ]));
     assert!(calls.iter().any(|(_, args)| args.first().is_some_and(|arg| arg == "/installtunnelservice")));
+  }
+
+  /// The config a tunnel service points at must outlive the import.
+  ///
+  /// `/installtunnelservice` records the path in the service command line and reads it on every
+  /// start; it does not copy the file. Deleting it after import — which this used to do — created
+  /// services that imported cleanly and then failed every start, because the file was gone.
+  #[test]
+  fn imported_config_survives_import_and_is_removed_on_unregister() {
+    let runner = MockImportRunner::with_service_exists(false);
+    let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
+
+    wireguard
+      .import_tunnel(
+        "wg-node-1",
+        "[Interface]\nPrivateKey = priv\nAddress = 10.66.0.2/32\n\n[Peer]\nPublicKey = pub\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:51820\nPersistentKeepalive = 25\n",
+      )
+      .expect("import should succeed");
+
+    // The path handed to /installtunnelservice must still exist afterwards.
+    let installed_path = runner
+      .calls()
+      .into_iter()
+      .find(|(_, args)| args.first().is_some_and(|arg| arg == "/installtunnelservice"))
+      .and_then(|(_, args)| args.get(1).cloned())
+      .expect("install call should record a config path");
+
+    assert!(
+      std::path::Path::new(&installed_path).exists(),
+      "the registered config must not be deleted after import: {installed_path}"
+    );
+
+    wireguard
+      .unregister_legacy_tunnel_service_with_program("wg-node-1", "wireguard")
+      .expect("unregister should succeed");
+
+    assert!(
+      !std::path::Path::new(&installed_path).exists(),
+      "the config holds a private key and must not outlive the tunnel: {installed_path}"
+    );
+  }
+
+  /// A failed import must not leave the private key on disk.
+  #[test]
+  fn config_is_removed_when_import_fails() {
+    let runner = MockFailingRunner::new(CommandExecError::NonZeroExit {
+      program: "wireguard".to_string(),
+      code: Some(1),
+      detail: "install refused".to_string(),
+    });
+    let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
+
+    let _ = wireguard.import_tunnel("wg-fail-1", "[Interface]\nPrivateKey = priv\n");
+
+    let leftover = tunnel_config_dir()
+      .expect("config dir should resolve")
+      .join("wg-fail-1.conf");
+
+    assert!(
+      !leftover.exists(),
+      "a failed import must not leave key material behind: {}",
+      leftover.display()
+    );
   }
 
   #[derive(Clone, Default)]
