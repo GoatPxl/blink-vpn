@@ -1538,17 +1538,27 @@ impl Orchestrator {
       }
     }
 
-    let runtime = if let Some(tunnel) = selected_tunnel.as_ref() {      Some(
-        wireguard
-          .read_tunnel_status(&tunnel.name)
-          .map_err(|source| OrchestratorError::WireGuard {
+    // A tunnel with no local service is simply not connected, and health polls every few
+    // seconds. Treating the absence as an error meant a recurring "WireGuard issue" toast for
+    // the entire normal period after a disconnect — unregistering removes the service, so the
+    // very next poll reported a failure — and for any tunnel whose connect never completed.
+    let runtime = match selected_tunnel.as_ref() {
+      Some(tunnel) => match wireguard.read_tunnel_status(&tunnel.name) {
+        Ok(status) => Some(status),
+        Err(WireGuardError::TunnelNotFound { .. }) => None,
+        Err(source) => {
+          return Err(OrchestratorError::WireGuard {
             detail: "Failed reading tunnel runtime for health summary.".to_string(),
             source,
-          })?,
-      )
-    } else {
-      None
+          });
+        }
+      },
+      None => None,
     };
+
+    // Absent runtime means the service is gone, so the node is not connected regardless of what
+    // the stored status says.
+    let service_missing = selected_tunnel.is_some() && runtime.is_none();
 
     let runtime_status = runtime.as_ref().map(|value| match value.state {
       crate::backend::wireguard::TunnelServiceState::Running => TunnelStatus::Connected,
@@ -1570,7 +1580,11 @@ impl Orchestrator {
       rx_bytes: runtime.as_ref().and_then(|value| value.rx_bytes),
       tx_bytes: runtime.as_ref().and_then(|value| value.tx_bytes),
       external_ipv4,
-      tunnel_status: runtime_status.or_else(|| selected_tunnel.map(|tunnel| tunnel.status)),
+      tunnel_status: if service_missing {
+        Some(TunnelStatus::Disconnected)
+      } else {
+        runtime_status.or_else(|| selected_tunnel.map(|tunnel| tunnel.status))
+      },
     })
   }
 
@@ -3194,6 +3208,54 @@ mod tests {
     assert_eq!(user_facing.kind, UserFacingErrorKind::WireGuard);
     assert!(user_facing.message.contains("did not respond to the start request in a timely fashion"));
     assert!(user_facing.next_action.contains("retry Connect"));
+  }
+
+  /// A tunnel with no local service is "not connected", not a failure.
+  ///
+  /// Health polls every few seconds, so returning an error here produced a recurring
+  /// "WireGuard issue" toast throughout the entire normal period after a disconnect — unregister
+  /// removes the service, so the next poll immediately reported a failure — and for any tunnel
+  /// whose connect never completed.
+  #[test]
+  fn health_summary_reports_a_missing_tunnel_service_as_disconnected() {
+    let db = Database::new(test_db_path("health_missing_service"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+
+    db.create_vpn_node("node-health", TEST_PROVIDER_ID, "Health Node", "nyc1")
+      .expect("node should insert");
+    db.transition_vpn_node_status(&"node-health".to_string(), NodeLifecycleStatus::Provisioning, None)
+      .expect("transition to provisioning");
+    db.transition_vpn_node_status(&"node-health".to_string(), NodeLifecycleStatus::Bootstrapping, None)
+      .expect("transition to bootstrapping");
+    db.transition_vpn_node_status(&"node-health".to_string(), NodeLifecycleStatus::Ready, None)
+      .expect("transition to ready");
+    db.update_vpn_node_runtime_details(
+      "node-health",
+      Some("42"),
+      Some("203.0.113.10"),
+      Some("server-pub-key"),
+      Some(51820),
+    )
+    .expect("runtime details should persist");
+
+    db.create_tunnel("tunnel-health", "node-health", "wg-missing", Some("wg-missing"))
+      .expect("tunnel should insert");
+    // The stored status still claims connected, as it would right after a service disappeared.
+    db.update_tunnel_status("tunnel-health", TunnelStatus::Connected, None)
+      .expect("tunnel status should persist");
+
+    // Reports no such service, exactly as `sc query` does for a tunnel that was never installed.
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::missing_service()));
+
+    let summary = Orchestrator::new()
+      .get_health_summary(&wireguard, &db, &secure_storage, "node-health", Some("tunnel-health"))
+      .expect("a missing tunnel service must not fail the health summary");
+
+    assert_eq!(summary.tunnel_status, Some(TunnelStatus::Disconnected));
+    assert_eq!(summary.handshake_age_seconds, None);
   }
 
   /// Full backend path against a real container, stopping short of touching the local machine.
