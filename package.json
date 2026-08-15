@@ -12,6 +12,7 @@
     "tauri:e2e:docker:real:headed": "playwright test --config=playwright.tauri.config.ts --project=tauri-real tests/e2e/dashboard-logical-tauri.spec.ts --headed",
     "backend:test:docker:real": "cargo test --manifest-path src-tauri/Cargo.toml real_docker -- --ignored --nocapture",
     "backend:test:docker:clientconf": "cargo test --manifest-path src-tauri/Cargo.toml real_docker_emits_connectable_client_config -- --ignored --nocapture",
+    "docker:cleanup": "node scripts/docker-cleanup.mjs",
     "e2e:docker:preflight": "docker version",
     "tauri:dev": "tauri dev",
     "tauri:dev:e2e": "tauri dev --features e2e-testing --no-watch",

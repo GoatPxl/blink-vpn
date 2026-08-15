@@ -1093,15 +1093,10 @@ mod tests {
       .unwrap_or(0);
 
     let (payload, server_keypair, client_keypair) = render_real_docker_payload();
+    let node_name = format!("docker-clientconf-{suffix}");
 
     let provisioned = adapter
-      .create_droplet(
-        token,
-        &format!("docker-clientconf-{suffix}"),
-        DOCKER_REGION,
-        "docker-small",
-        &payload,
-      )
+      .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", &payload)
       .expect("docker node should provision");
 
     let contract = adapter
@@ -1141,12 +1136,16 @@ mod tests {
     let path = std::env::temp_dir().join(format!("goatstare-verify-{suffix}.conf"));
     std::fs::write(&path, config.replace("\r\n", "\n")).expect("client config should be writable");
 
+    let container = DockerProviderAdapter::container_name(&node_name, provisioned.droplet_id);
+
     println!("\n=== client config written to: {} ===", path.display());
     println!(
-      "=== endpoint {}:{} | container droplet_id {} ===",
-      contract.server_endpoint_ip, contract.listen_port, provisioned.droplet_id
+      "=== endpoint {}:{} ===",
+      contract.server_endpoint_ip, contract.listen_port
     );
-    println!("=== import it into WireGuard for Windows, then: docker rm -f <container> ===\n");
+    println!("=== import it into WireGuard for Windows to verify the handshake ===");
+    println!("=== when done, clean up with:  docker rm -f {container} ===");
+    println!("=== or remove every GoatStare container:  npm run docker:cleanup ===\n");
   }
 
   /// Two nodes must be able to exist at once.
