@@ -1399,11 +1399,14 @@ mod tests {
   fn docker_endpoint_host_is_reachable_and_not_assumed_loopback() {
     let host = DockerProviderAdapter::docker_endpoint_host();
 
-    assert!(!host.trim().is_empty(), "an endpoint host must always resolve");
-    assert!(
-      host.parse::<std::net::IpAddr>().is_ok() || !host.contains(char::is_whitespace),
-      "endpoint host should be an address or hostname, got '{host}'"
-    );
+    // Must be a dialable address. `0.0.0.0` is a bind address, not a destination, and an empty or
+    // whitespace-bearing value means resolution fell through to something unusable.
+    let parsed = host
+      .parse::<std::net::IpAddr>()
+      .unwrap_or_else(|_| panic!("endpoint host must be an IP address, got '{host}'"));
+
+    assert!(!parsed.is_unspecified(), "0.0.0.0 is not a dialable endpoint");
+    assert!(!parsed.is_multicast(), "a multicast address is not a dialable endpoint");
   }
 
 }
