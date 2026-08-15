@@ -1,23 +1,50 @@
 use super::super::contract::{BootstrapParams, READINESS_MARKER_PATH};
 use super::shared::{FIREWALL_RULES_FRAGMENT, WG_INTERFACE_CONFIG_FRAGMENT};
 
-pub(crate) fn build_docker_init_script(params: &BootstrapParams) -> String {
+/// Docker's equivalent of the cloud-init payload.
+///
+/// On DigitalOcean, cloud-init `write_files` stages the server keys and the sysctl drop-in before
+/// running the bootstrap script. A container has no cloud-init, so this script performs those same
+/// writes itself, up front, and then continues with logic identical to the cloud path. Both
+/// providers therefore reach the same state from one self-contained payload delivered at create
+/// time — no `docker exec`, no staging round-trip.
+pub(crate) fn build_docker_init_script(
+  params: &BootstrapParams,
+  server_private_key: &str,
+  server_public_key: &str,
+) -> String {
   let script_body = render_docker_bootstrap_body(params);
 
   format!(
     r#"#!/usr/bin/env bash
 set -euo pipefail
 
-export DEBIAN_FRONTEND=noninteractive
-apt-get update >/dev/null 2>&1
-apt-get install -y --no-install-recommends wireguard-tools iproute2 iptables >/dev/null 2>&1
-rm -rf /var/lib/apt/lists/*
+umask 077
+mkdir -p /etc/wireguard /var/lib/goatstare
 
-cat > /etc/sysctl.d/99-goatstare-vpn.conf <<'EOF'
+# Equivalent of cloud-init write_files: stage server key material before bootstrap.
+cat > /etc/wireguard/server_private.key <<'GOATSTARE_EOF_PRIVATE'
+{server_private_key}
+GOATSTARE_EOF_PRIVATE
+cat > /etc/wireguard/server_public.key <<'GOATSTARE_EOF_PUBLIC'
+{server_public_key}
+GOATSTARE_EOF_PUBLIC
+chmod 600 /etc/wireguard/server_private.key /etc/wireguard/server_public.key
+
+cat > /etc/sysctl.d/99-goatstare-vpn.conf <<'GOATSTARE_EOF_SYSCTL'
 net.ipv4.ip_forward=1
 net.ipv4.conf.all.forwarding=1
 net.ipv4.conf.default.forwarding=1
-EOF
+GOATSTARE_EOF_SYSCTL
+
+# The dev image ships these preinstalled; the install is a no-op there and a fallback on a bare
+# base image. Tolerate failure so provisioning works offline, then verify the tools below.
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v wg >/dev/null 2>&1; then
+  apt-get update >/dev/null 2>&1 || true
+  apt-get install -y --no-install-recommends wireguard-tools iproute2 iptables >/dev/null 2>&1 || true
+  rm -rf /var/lib/apt/lists/*
+fi
 
 {script_body}
 "#
@@ -39,6 +66,7 @@ WG_IFACE="{iface}"
 WG_PORT="{port}"
 SERVER_CIDR="{server_cidr}"
 CLIENT_CIDR="{client_cidr}"
+CLIENT_PUBLIC_KEY="{client_public_key}"
 MARKER_PATH="{marker}"
 
 umask 077
@@ -71,12 +99,18 @@ SERVER_PUBLIC_KEY=$(tr -d '\r\n' < /etc/wireguard/server_public.key)
 
 chmod 600 /etc/wireguard/server_private.key /etc/wireguard/server_public.key
 
-log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf"
+log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf with baked client peer"
 
 cat > /etc/wireguard/${{WG_IFACE}}.conf <<EOF
 {interface_config_fragment}
 EOF
 chmod 600 /etc/wireguard/${{WG_IFACE}}.conf
+
+log_stage "verify-peer" "confirming client peer is present in ${{WG_IFACE}}.conf"
+grep -q "^PublicKey = ${{CLIENT_PUBLIC_KEY}}$" /etc/wireguard/${{WG_IFACE}}.conf || {{
+  log_stage "verify-peer" "client peer missing from generated config"
+  exit 65
+}}
 
 log_stage "sysctl" "ensuring IPv4 forwarding is enabled"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
@@ -96,6 +130,9 @@ else
   ip link add "${{WG_IFACE}}" type wireguard
   ip addr replace "${{SERVER_CIDR}}" dev "${{WG_IFACE}}"
   wg set "${{WG_IFACE}}" private-key /etc/wireguard/server_private.key listen-port "${{WG_PORT}}"
+  # wg-quick would have applied the [Peer] block from the config; the manual path must add it
+  # explicitly or the server comes up with no peer and rejects every handshake.
+  wg set "${{WG_IFACE}}" peer "${{CLIENT_PUBLIC_KEY}}" allowed-ips "${{CLIENT_CIDR}}"
   ip link set up dev "${{WG_IFACE}}"
 fi
 
@@ -103,6 +140,12 @@ log_stage "verify-interface" "verifying WireGuard interface state"
 ip link show "${{WG_IFACE}}" >/dev/null 2>&1
 ip -o link show "${{WG_IFACE}}" | grep -q 'UP'
 wg show "${{WG_IFACE}}" >/dev/null 2>&1
+
+log_stage "verify-runtime-peer" "confirming client peer is live on ${{WG_IFACE}}"
+wg show "${{WG_IFACE}}" peers | grep -qF "${{CLIENT_PUBLIC_KEY}}" || {{
+  log_stage "verify-runtime-peer" "client peer not present on running interface"
+  exit 66
+}}
 
 log_stage "verify-config" "ensuring /etc/wireguard/${{WG_IFACE}}.conf exists and is non-empty"
 if [ ! -s "/etc/wireguard/${{WG_IFACE}}.conf" ]; then
@@ -130,6 +173,7 @@ log_stage "complete" "bootstrap finished"
     port = params.listen_port,
     server_cidr = params.server_interface_cidr,
     client_cidr = params.client_cidr,
+    client_public_key = params.client_public_key,
     marker = READINESS_MARKER_PATH,
     endpoint = params.server_endpoint_ip,
     interface_config_fragment = WG_INTERFACE_CONFIG_FRAGMENT,

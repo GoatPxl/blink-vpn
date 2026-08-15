@@ -31,7 +31,7 @@ pub enum WireGuardConfigError {
   EmptyClientCidr,
 }
 
-pub fn generate_server_keypair() -> Result<WireGuardKeypair, KeygenError> {
+fn generate_keypair() -> Result<WireGuardKeypair, KeygenError> {
   let private = Key::generate();
   let public = private.public_key();
   let public_str = public.to_string();
@@ -44,6 +44,21 @@ pub fn generate_server_keypair() -> Result<WireGuardKeypair, KeygenError> {
     private_key: private.to_string(),
     public_key: public_str,
   })
+}
+
+/// Server keypair, generated on the Windows host before the node is created.
+///
+/// The private key is baked into the bootstrap payload; it is never generated remotely.
+pub fn generate_server_keypair() -> Result<WireGuardKeypair, KeygenError> {
+  generate_keypair()
+}
+
+/// Client keypair, generated on the Windows host before the node is created.
+///
+/// This must happen *before* the bootstrap render, because the client's public key ships inside
+/// the server's `[Peer]` block. The private key never leaves this machine.
+pub fn generate_client_keypair() -> Result<WireGuardKeypair, KeygenError> {
+  generate_keypair()
 }
 
 pub fn normalize_wireguard_key_material(value: &str) -> String {

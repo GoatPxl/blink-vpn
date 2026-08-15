@@ -1,5 +1,10 @@
 use super::super::contract::{BootstrapParams, READINESS_MARKER_PATH};
 
+/// Server `wg0.conf`, including the client `[Peer]` block.
+///
+/// The peer ships in the payload because the app never contacts the server after create — there
+/// is no second round-trip in which to register the client. `${CLIENT_PUBLIC_KEY}` is set as a
+/// shell variable in the script body from `BootstrapParams::client_public_key`.
 pub(super) const WG_INTERFACE_CONFIG_FRAGMENT: &str = r#"[Interface]
 Address = ${SERVER_CIDR}
 ListenPort = ${WG_PORT}
@@ -7,7 +12,11 @@ PrivateKey = ${SERVER_PRIVATE_KEY}
 SaveConfig = false
 
 PostUp = iptables -A FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -A FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -A POSTROUTING -s ${CLIENT_CIDR} -j MASQUERADE
-PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -D FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -D POSTROUTING -s ${CLIENT_CIDR} -j MASQUERADE"#;
+PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -D FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -D POSTROUTING -s ${CLIENT_CIDR} -j MASQUERADE
+
+[Peer]
+PublicKey = ${CLIENT_PUBLIC_KEY}
+AllowedIPs = ${CLIENT_CIDR}"#;
 
 pub(super) const FIREWALL_RULES_FRAGMENT: &str = r#"iptables -N GOATSTARE-INPUT 2>/dev/null || true
 iptables -F GOATSTARE-INPUT
@@ -55,6 +64,7 @@ WG_IFACE="{iface}"
 WG_PORT="{port}"
 SERVER_CIDR="{server_cidr}"
 CLIENT_CIDR="{client_cidr}"
+CLIENT_PUBLIC_KEY="{client_public_key}"
 MARKER_PATH="{marker}"
 
 umask 077
@@ -74,11 +84,18 @@ fi
 SERVER_PRIVATE_KEY=$(tr -d '\r\n' < /etc/wireguard/server_private.key)
 SERVER_PUBLIC_KEY=$(tr -d '\r\n' < /etc/wireguard/server_public.key)
 
-log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf"
+log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf with baked client peer"
 
 cat > /etc/wireguard/${{WG_IFACE}}.conf <<EOF
 {interface_config_fragment}
 EOF
+chmod 600 /etc/wireguard/${{WG_IFACE}}.conf
+
+log_stage "verify-peer" "confirming client peer is present in ${{WG_IFACE}}.conf"
+grep -q "^PublicKey = ${{CLIENT_PUBLIC_KEY}}$" /etc/wireguard/${{WG_IFACE}}.conf || {{
+  log_stage "verify-peer" "client peer missing from generated config"
+  exit 65
+}}
 
 log_stage "sysctl" "enabling IPv4 forwarding"
 sysctl --system
@@ -109,6 +126,7 @@ log_stage "complete" "bootstrap finished"
     port = params.listen_port,
     server_cidr = params.server_interface_cidr,
     client_cidr = params.client_cidr,
+    client_public_key = params.client_public_key,
     marker = READINESS_MARKER_PATH,
     endpoint = params.server_endpoint_ip,
     interface_config_fragment = WG_INTERFACE_CONFIG_FRAGMENT,

@@ -16,6 +16,11 @@ pub struct BootstrapParams {
   pub server_interface_cidr: String,
   pub client_cidr: String,
   pub interface_name: String,
+  /// Client public key, baked into the server's `[Peer]` block at render time.
+  ///
+  /// The client keypair is generated on the Windows host before the node is created, so the
+  /// server boots already knowing its peer. Nothing is pushed to the server afterwards.
+  pub client_public_key: String,
 }
 
 impl Default for BootstrapParams {
@@ -26,6 +31,9 @@ impl Default for BootstrapParams {
       server_interface_cidr: DEFAULT_SERVER_INTERFACE_CIDR.to_string(),
       client_cidr: DEFAULT_CLIENT_CIDR.to_string(),
       interface_name: DEFAULT_INTERFACE_NAME.to_string(),
+      // Intentionally empty: a placeholder peer key would silently produce a server that
+      // nothing can connect to. Callers must supply the real client public key.
+      client_public_key: String::new(),
     }
   }
 }
@@ -68,6 +76,7 @@ pub(crate) fn validate_bootstrap_params(params: &BootstrapParams) -> Result<(), 
   validate_ipv4(&params.server_endpoint_ip, "server_endpoint_ip")?;
   validate_ipv4_cidr(&params.server_interface_cidr, "server_interface_cidr")?;
   validate_ipv4_cidr(&params.client_cidr, "client_cidr")?;
+  validate_client_public_key(&params.client_public_key)?;
   validate_listen_port(params.listen_port)?;
 
   if params.interface_name.trim().is_empty() {
@@ -129,6 +138,31 @@ pub(crate) fn build_output_contract_from_marker(
     server_public_key: marker.server_public_key,
     listen_port: marker.listen_port,
   })
+}
+
+/// The client public key must be present and well-formed *before* the node is created.
+///
+/// A server rendered without a `[Peer]` block accepts no handshakes, and because the app never
+/// contacts the server after create there is no later opportunity to add one. Failing here is
+/// what keeps that from reaching a provider.
+fn validate_client_public_key(value: &str) -> Result<(), BootstrapError> {
+  if value.trim().is_empty() {
+    return Err(BootstrapError::InvalidParameter {
+      field: "client_public_key",
+      detail:
+        "Client public key is required so the server boots with a [Peer] block. Generate the client keypair before rendering bootstrap."
+          .to_string(),
+    });
+  }
+
+  crate::backend::crypto::keypair::validate_public_key(value).map_err(|source| {
+    BootstrapError::InvalidParameter {
+      field: "client_public_key",
+      detail: format!("Client public key is not valid WireGuard key material: {source}"),
+    }
+  })?;
+
+  Ok(())
 }
 
 fn validate_listen_port(port: u16) -> Result<(), BootstrapError> {

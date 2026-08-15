@@ -17,6 +17,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (9, include_str!("../../../migrations/0009_init_run_logs.sql")),
   (10, include_str!("../../../migrations/0010_tunnel_client_config_metadata.sql")),
   (11, include_str!("../../../migrations/0011_app_settings.sql")),
+  (12, include_str!("../../../migrations/0012_vpn_node_client_key.sql")),
 ];
 
 pub const WIREGUARD_CONNECTION_MODE_SETTING_KEY: &str = "wireguard_connection_mode";
@@ -256,6 +257,13 @@ pub struct VpnNodeRecord {
   pub error_reason: Option<String>,
   pub created_at: String,
   pub updated_at: String,
+  /// Reference to the client private key in Windows Credential Manager. Never serialized to the
+  /// UI — it is backend bookkeeping that lets tunnel creation reuse the keypair that was baked
+  /// into the server's `[Peer]` block at provision time.
+  #[serde(skip_serializing)]
+  pub client_private_key_ref: Option<String>,
+  #[serde(skip_serializing)]
+  pub client_public_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -695,7 +703,8 @@ impl Database {
       .prepare(
         "SELECT id, provider_id, name, region, plan_key, size_slug, price_monthly_usd,
           price_hourly_usd, price_source_timestamp, lifecycle_status, external_ref,
-          public_ipv4, server_public_key, error_reason, created_at, updated_at
+          public_ipv4, server_public_key, error_reason, created_at, updated_at,
+          client_private_key_ref, client_public_key
          FROM vpn_nodes
          ORDER BY created_at ASC",
       )
@@ -733,7 +742,8 @@ impl Database {
       .query_row(
         "SELECT id, provider_id, name, region, plan_key, size_slug, price_monthly_usd,
           price_hourly_usd, price_source_timestamp, lifecycle_status, external_ref,
-          public_ipv4, server_public_key, error_reason, created_at, updated_at
+          public_ipv4, server_public_key, error_reason, created_at, updated_at,
+          client_private_key_ref, client_public_key
          FROM vpn_nodes
          WHERE id = ?1",
         params![id],
@@ -830,6 +840,43 @@ impl Database {
         id: id.to_string(),
         detail: "Runtime detail update skipped because no row matched the id."
           .to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
+  /// Record the client keypair that was baked into this node's server `[Peer]` block.
+  ///
+  /// Written during provisioning, before the node is created, so the tunnel built later reuses
+  /// the same key rather than generating a second one the server has never heard of.
+  pub fn update_vpn_node_client_key(
+    &self,
+    id: &str,
+    client_private_key_ref: Option<&str>,
+    client_public_key: Option<&str>,
+  ) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let changed = connection
+      .execute(
+        "UPDATE vpn_nodes
+         SET client_private_key_ref = ?2,
+             client_public_key = ?3,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1",
+        params![id, client_private_key_ref, client_public_key],
+      )
+      .map_err(|source| DbError::Query {
+        action: "update_vpn_node_client_key",
+        detail: "Failed recording node client key reference.".to_string(),
+        source,
+      })?;
+
+    if changed == 0 {
+      return Err(DbError::NotFound {
+        entity: "vpn_node",
+        id: id.to_string(),
+        detail: "Client key update skipped because no row matched the id.".to_string(),
       });
     }
 
@@ -1283,6 +1330,8 @@ fn map_vpn_node_row(row: &Row<'_>) -> rusqlite::Result<VpnNodeRecord> {
     error_reason: row.get(13)?,
     created_at: row.get(14)?,
     updated_at: row.get(15)?,
+    client_private_key_ref: row.get(16)?,
+    client_public_key: row.get(17)?,
   })
 }
 

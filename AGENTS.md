@@ -1,82 +1,269 @@
-# Project docs and tool references
+# AGENTS.md
 
-## Guidance for agents
-- Always respect the project documentation in this repository and use it as the source of truth for implementation decisions.
-- Prefer the documented architecture, workflows, and conventions over assumptions.
+Operating rules for AI agents working on GoatStare VPN.
 
-## Required execution protocol
-- Start every non-trivial task by restating scope, constraints, and affected components.
-- Ask clarifying questions before editing when behavior, state transitions, security posture, or release risk is ambiguous.
-- Define a verification plan before changes: list exact commands and expected pass criteria.
-- Run verification after changes and report real results, not assumptions.
-- If checks cannot run, state exactly why and what risk remains.
+This file encodes invariants that were learned expensively. Most rules below exist because the
+codebase already violated them once and the project stalled as a result. Where a rule has a
+non-obvious reason, that reason is stated — read it before deciding the rule doesn't apply to you.
 
-## Clarification gate (ask before coding)
-When requirements are incomplete, ask focused questions in these areas:
-- Product behavior: expected user-visible behavior and edge cases.
-- Safety and security: secret handling, privileged operations, and destructive actions.
-- Compatibility: contract or schema constraints that must remain stable.
-- Test acceptance: minimum tests required for this change.
+---
 
-## Minimum validation matrix
-- Frontend-only changes:
-	- `npm run typecheck`
-	- `npm run lint`
-- Rust backend-only changes:
-	- `cargo test --manifest-path src-tauri/Cargo.toml`
-- Cross-boundary changes (frontend + tauri/backend contracts):
-	- `npm run verify:fast`
-	- `cargo test --manifest-path src-tauri/Cargo.toml`
-- Docker provider or tunnel lifecycle changes:
-	- `npm run tauri:e2e:docker:real`
-	- `npm run backend:test:docker:real` (when Docker is available)
+## 1. What this project is
 
-## Reporting contract
-- Include: what changed, what was verified, and what was not verified.
-- Include concrete file paths when describing changes.
-- Include explicit residual risks if any lane was skipped.
+A Windows desktop app that provisions a user's own WireGuard VPN server on a cloud provider and
+connects to it. Rust backend + Tauri v2 + Next.js frontend + SQLite + Windows Credential Manager.
 
-## Major software documentation
+**Phase 1 scope lock. Do not expand without explicit approval.**
 
-### Frontend and app framework
-- Next.js: https://nextjs.org/docs
-- React: https://react.dev/reference/react
-- TypeScript: https://www.typescriptlang.org/docs/
-- Tailwind CSS: https://tailwindcss.com/docs/installation
+| Axis | In scope |
+|---|---|
+| Platform | Windows 10/11 desktop only |
+| Protocol | WireGuard only |
+| Production provider | DigitalOcean |
+| Dev provider | Docker, behind feature flags, local emulation only |
+| Workflows | provision, connect, disconnect, destroy, force-cleanup |
 
-### Desktop and native runtime
-- Tauri: https://v2.tauri.app/
-- Rust: https://doc.rust-lang.org/book/
+Multi-provider *architecture* is in scope now. Additional provider *implementations* are not,
+until asked for.
 
-### Networking and infrastructure
-- WireGuard: https://www.wireguard.com/quickstart/
-- Docker: https://docs.docker.com/
-- DigitalOcean API: https://docs.digitalocean.com/reference/api/
+---
 
-### Testing and tooling
-- Playwright: https://playwright.dev/docs/intro
-- tauri-playwright (Playwright bridge for Tauri native webviews): https://github.com/srsholmes/tauri-playwright
-- Node.js and npm: https://nodejs.org/docs/latest-v20.x/api/
-- SQLite: https://www.sqlite.org/docs.html
+## 2. The provisioning contract — the most important rule in this file
 
-## Project-specific docs
+**Provisioning is write-only.**
 
-### Core project docs
-- Repository README: README.md
-- Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- Windows setup: [`docs/SETUP_WINDOWS.md`](docs/SETUP_WINDOWS.md)
-- Operations runbook: [`docs/OPERATIONS_RUNBOOK.md`](docs/OPERATIONS_RUNBOOK.md)
-- Testing: [`docs/TESTING.md`](docs/TESTING.md)
+1. All key material is generated on the Windows host, before the node is created.
+2. Everything the server needs — its private key, the client's public key, the full interface and
+   peer config — is baked into a single payload and handed to the provider at create time.
+3. After create, the app may only poll **provider metadata**: status, and the endpoint to connect to.
 
+That is the entire contract. The app never talks to the server it provisioned.
 
-### Architectural Decision Protocol
+**Forbidden, without exception:**
 
-1. **Trigger Check**: Before making any architectural decision—including adding dependencies, altering database schemas, modifying API contracts, changing directory structures, or choosing design patterns—consult [`ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-2. **Guidance Evaluation**:
-   - **If guidance exists**: Execute the task strictly according to [`ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-   - **If guidance is missing or ambiguous**: **HALT implementation immediately.** Do not generate application code.
-3. **Escalation Output**: Present a prompt structured as follows:
-   - **Missing Topic**: Briefly define the architectural decision required.
-   - **Options**: Provide 2–3 viable technical choices with pros and cons.
-   - **Proposed Markdown**: Provide the exact text/diff snippet to add to [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) for each option.
-4. **Execution Pause**: Wait for user selection and authorization to update [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) before writing implementation code.
+- SSH, or any other remote shell into a provisioned node.
+- `docker exec` / `docker cp` anywhere in the provisioning path.
+- Reading any file back off the server, including the readiness marker.
+
+**Why.** The original design had the server generate its own keys and the app read them back from
+`/var/lib/goatstare/bootstrap-ready.json`. Reading a file off a fresh droplet requires SSH, which
+the app does not have and should not gain. So the DigitalOcean adapter shipped a hardcoded
+`Unsupported` stub at exactly that step — meaning **every production provision created a billable
+droplet, failed, and rolled back**. Meanwhile the Docker adapter faked its way past the same step
+with `docker exec`, so the dev lane went green while proving nothing. That single design choice
+cost the project months. Do not reintroduce a read-back channel; if a feature appears to need one,
+the design is wrong — stop and raise it.
+
+The readiness marker still gets written by the bootstrap script. It is a **self-check and debugging
+aid only**. Nothing in the app may depend on reading it.
+
+---
+
+## 3. Provider neutrality
+
+- **No `if provider.slug == "..."` outside an adapter.** Ever. That branch is precisely how the
+  Docker path drifted until it shared no meaningful code with production.
+- Adapters report their own endpoint (host + port). The orchestrator must not know that Docker,
+  or `127.0.0.1`, exists.
+- **Docker receives the same generated payload DigitalOcean receives.** Delivery differs — cloud-init
+  `write_files` versus a create-time bind mount — but the script itself is identical. If the two
+  renderers diverge, the dev lane has stopped being evidence.
+- Capability differences belong in the adapter, surfaced as explicit capability errors, not as
+  special cases upstream.
+
+---
+
+## 4. WireGuard on Windows: one backend, one privilege model
+
+**The only supported mechanism is the WireGuard for Windows tunnel service:**
+
+| Operation | Command | Elevation |
+|---|---|---|
+| connect | `wireguard.exe /installtunnelservice <conf>` | 1 UAC prompt |
+| status | `sc query WireGuardTunnel$<name>` | none |
+| stats | `wg show <name> dump` | none |
+| disconnect | `wireguard.exe /uninstalltunnelservice <name>` | 1 UAC prompt |
+
+**Do not reintroduce the `defguard_wireguard_rs` runtime path or `wireguard-nt`.** They were tried
+and reverted. Three independent reasons, all still true:
+
+- `wireguard_nt::Adapter` closes the adapter in `Drop`. Any `WGApi`/`Adapter` created inside a
+  function is destroyed when that function returns, so a tunnel brought up this way cannot survive
+  the call. Nothing holds a handle across calls.
+- `WGApi::new()` sets `adapter: None` and `read_interface_data()` returns `AdapterNotFound` unless
+  `create_interface()` was called on that same instance. Status reads through this path always fail.
+- defguard loads `wireguard.dll` from a hardcoded **CWD-relative** path behind a `LazyLock` with
+  `.expect()`. An installed app's CWD is neither stable nor writable, and once that `LazyLock`
+  panics it stays poisoned for the process lifetime.
+
+`defguard_wireguard_rs` is retained **for key generation only** — it is pure Rust and avoids
+requiring `wg.exe` on PATH just to provision.
+
+**Elevation rules:**
+
+- Elevate for connect and disconnect only. Nothing else.
+- Try direct first; escalate only on access-denied.
+- Connect and disconnect must be **symmetric** — a disconnect that cannot elevate strands the user
+  in a connected state.
+- Never prompt for UAC from inside a polling loop.
+- Never elevate to read status. `sc query` works unelevated.
+- **There is exactly one privilege model.** No admin/user mode setting. The previous toggle was
+  fully wired through migration, DB, commands and UI, and was behaviorally a no-op in both
+  directions — it only ever added confusion.
+
+---
+
+## 5. No parallel implementations
+
+When you replace a mechanism, **delete the old one in the same change.**
+
+This repo accumulated three tunnel backends and roughly fourteen unreachable functions because each
+migration left its predecessor in place "just in case". The result was a 2,800-line module where the
+only way to learn which path executed was to trace four levels of dispatch.
+
+- A `dead_code` warning is a bug, not noise.
+- No commented-out blocks, no unreferenced alternates, no `_v2` siblings.
+- If you genuinely need to keep a fallback, it must be reachable, tested, and documented as to when
+  it fires.
+
+---
+
+## 6. Secrets
+
+- **Never** in SQLite, logs, error messages, diagnostics bundles, test fixtures, snapshots, or any
+  committed file. SQLite stores a `*_ref` pointer; the secret lives in Windows Credential Manager.
+- Redact at the log boundary: API tokens, private keys, `Authorization` headers, and any
+  `[Interface]` section.
+- **A live DigitalOcean API token was previously committed** to `tests/e2e/fixtures/tauri-mocks.ts`,
+  disguised as a fake `token_ref`. It was removed from the tree but remains in git history. Fake
+  credentials in fixtures must be *obviously* fake (`dop_v1_EXAMPLE_NOT_A_REAL_TOKEN`), never a
+  real value with the label changed.
+- Treat all external input as untrusted, including Docker CLI output and provider API responses.
+
+If a change risks exposing a secret, stop and propose a safer alternative.
+
+---
+
+## 7. Errors cross the IPC boundary structured
+
+Tauri commands return `{ kind, message, next_action }` — never a bare formatted string.
+
+**The frontend must never classify errors by matching on backend message text.** It used to, with
+`String.includes` checks against literals like `"OpenService FAILED 1060"` and
+`"Provider orchestration failed"`. Every backend copy edit silently broke UI recovery paths.
+
+Error messages are for humans and must say what failed, the likely cause, and the next recovery
+action. Control flow keys off `kind`.
+
+---
+
+## 8. Coding standards
+
+**General.** Prefer clarity over cleverness. Small, single-purpose functions. Explicit types.
+No placeholder TODO logic unless explicitly marked and justified.
+
+**Rust.**
+- Idiomatic `Result` + `thiserror`. **No `unwrap()`/`expect()` in production paths.**
+- Module boundaries: orchestrator · provider registry + adapters · bootstrap · wireguard ·
+  secure storage · db/repository · logging/diagnostics · crypto.
+- Provider-specific behavior stays inside adapter modules (see §3).
+- Bounded retries with exponential backoff + jitter for transient failures; explicit timeouts.
+- Idempotent provision/connect/disconnect/destroy where practical, with safe rollback on partial
+  failure. **Destroy must report real failures** — never swallow a failed remote delete and return
+  success; that leaves the user paying for an invisible droplet.
+
+**Frontend.**
+- Typed bindings to Tauri commands in `src/lib/tauri.ts`. Bindings are hand-written, so when a Rust
+  type changes, update the TS type in the same change — nothing enforces it.
+- Handle loading, success, and error states explicitly.
+- Never persist secrets to browser-like storage.
+
+**Dependencies.** Minimize. For each addition state: why needed, maintenance/security rationale,
+alternative considered. Prefer deleting two dependencies over adding one.
+
+---
+
+## 9. Verification
+
+Run what your change touches. Report **real results**, including failures.
+
+| Change scope | Commands |
+|---|---|
+| Frontend only | `npm run typecheck` · `npm run lint` |
+| Rust backend only | `cargo test --manifest-path src-tauri/Cargo.toml` |
+| Cross-boundary | both of the above |
+| Docker provider / tunnel lifecycle | `npm run backend:test:docker:real` (requires Docker) |
+
+Required test types for any non-trivial change:
+
+- **Unit** tests for pure logic — state transitions, parsers, config generation.
+- **Integration** tests for repositories and adapters, using mocks/fakes for network and process calls.
+- **Error-path** tests for retries, timeouts, and failure handling.
+- **Redaction** tests proving secrets cannot reach logs or diagnostics.
+
+Rules: deterministic only, no real external API calls in the normal suite, both happy path and key
+failure paths.
+
+**Known-broken lane — do not report as passing.** `npm run tauri:e2e:docker:real` cannot currently
+run: `node_modules/@srsholmes/` is empty while `tests/e2e/fixtures/tauri-real.ts` imports it by hard
+path into `node_modules`, and the harness connects to a POSIX socket `/tmp/tauri-playwright.sock`
+while the Rust plugin listens on `tcp://127.0.0.1:6274`. Fix it deliberately or state that it was
+skipped.
+
+---
+
+## 10. Working protocol
+
+- Start non-trivial work by restating scope, constraints, and affected components.
+- Ask before editing when behavior, state transitions, security posture, or release risk is
+  genuinely ambiguous — not for choices with an obvious default.
+- Before an architectural decision (new dependency, schema change, API contract change, directory
+  restructure), consult [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). If it has no guidance, present
+  2–3 options with trade-offs and the exact doc diff for each, and wait for a decision.
+- Report: what changed, what was verified, what was **not** verified, and residual risk. Use
+  concrete file paths.
+- If a task is incomplete, say so explicitly and say why. Scaling work down is the user's call.
+
+**Docs must stay true.** Several docs currently describe things that do not exist — a
+`GOATSTARE_WG_RUNTIME` env var (no code reference), and a required DLL at
+`resources-windows/binaries/wireguard-amd64.dll`. When you change behavior, update the doc in the
+same commit; when you find a false claim, fix or delete it rather than working around it.
+
+---
+
+## 11. Feature flags
+
+| Flag | Side | Effect |
+|---|---|---|
+| `GOATSTARE_DEV_DOCKER` | backend | Enables the Docker dev provider |
+| `NEXT_PUBLIC_DEV_DOCKER` | frontend | Exposes Docker dev surface in the UI |
+
+The backend flag also auto-reads `.env.local`, `.env`, and `src-tauri/.env`, so it may be on without
+being set in your shell. Docker is **never** a production security boundary.
+
+---
+
+## 12. Reference
+
+**Project docs:** [README.md](README.md) ·
+[ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
+[SETUP_WINDOWS.md](docs/SETUP_WINDOWS.md) ·
+[OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) ·
+[TESTING.md](docs/TESTING.md) ·
+[SECURITY.md](docs/SECURITY.md) ·
+[API_COMMANDS.md](docs/API_COMMANDS.md) ·
+[DB_SCHEMA.md](docs/DB_SCHEMA.md)
+
+**External:**
+[Tauri v2](https://v2.tauri.app/) ·
+[Next.js](https://nextjs.org/docs) ·
+[React](https://react.dev/reference/react) ·
+[Rust](https://doc.rust-lang.org/book/) ·
+[WireGuard](https://www.wireguard.com/quickstart/) ·
+[DigitalOcean API](https://docs.digitalocean.com/reference/api/) ·
+[Docker](https://docs.docker.com/) ·
+[Playwright](https://playwright.dev/docs/intro) ·
+[SQLite](https://www.sqlite.org/docs.html)
+
+> **Next.js note:** this project uses a Next.js version with breaking changes from common training
+> data. Read the relevant guide under `node_modules/next/dist/docs/` before writing frontend code.

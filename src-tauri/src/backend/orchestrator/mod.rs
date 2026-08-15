@@ -8,7 +8,7 @@ use crate::backend::bootstrap::{
   Bootstrap, BootstrapError, BootstrapParams, DEFAULT_CLIENT_CIDR, DEFAULT_INTERFACE_NAME,
   DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_WIREGUARD_PORT,
 };
-use crate::backend::crypto::keypair::{generate_server_keypair, KeygenError};
+use crate::backend::crypto::keypair::{generate_client_keypair, generate_server_keypair, KeygenError};
 use crate::backend::db::Database;
 use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus, WireGuardConnectionMode};
 use crate::backend::logging;
@@ -16,7 +16,6 @@ use crate::backend::provider::{
   BootstrapWaitRequest, NodeInitRequest, ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError,
   ProviderPlanPricing, ProviderRegistry, DEFAULT_REGION, DEFAULT_SIZE,
 };
-use crate::backend::provider::docker::DockerProviderAdapter;
 use crate::backend::secure_storage::SecureStorage;
 use crate::backend::secure_storage::SecretStoreError;
 use crate::backend::wireguard::{
@@ -279,6 +278,14 @@ impl Orchestrator {
       source,
     })?;
 
+    // This lower-level helper provisions a bare droplet without an associated node/tunnel record,
+    // so there is nowhere to persist a client private key. Generate a throwaway peer to keep the
+    // payload well-formed; real connectable nodes come from `create_vpn_node_to_ready`.
+    let client_keypair = generate_client_keypair().map_err(|source| OrchestratorError::Keygen {
+      detail: "Failed to generate WireGuard client keypair for droplet provisioning.".to_string(),
+      source,
+    })?;
+
     let artifact = bootstrap
       .render_cloud_init(&BootstrapParams {
         server_endpoint_ip: "0.0.0.0".to_string(),
@@ -286,6 +293,7 @@ impl Orchestrator {
         server_interface_cidr: DEFAULT_SERVER_INTERFACE_CIDR.to_string(),
         client_cidr: DEFAULT_CLIENT_CIDR.to_string(),
         interface_name: DEFAULT_INTERFACE_NAME.to_string(),
+        client_public_key: client_keypair.public_key.clone(),
       }, &server_keypair.private_key, &server_keypair.public_key)
       .map_err(|source| OrchestratorError::Bootstrap {
         detail: "Could not render bootstrap cloud-init for droplet create.".to_string(),
@@ -582,23 +590,60 @@ impl Orchestrator {
         source,
       })?;
 
+    let server_keypair = generate_server_keypair().map_err(|source| OrchestratorError::Keygen {
+      detail: "Failed to generate WireGuard server keypair for node provisioning.".to_string(),
+      source,
+    })?;
+
+    // The client keypair must exist before the payload is rendered: its public key ships inside
+    // the server's [Peer] block. Because the app never contacts the server after create, there is
+    // no later opportunity to register a peer.
+    let client_keypair = generate_client_keypair().map_err(|source| OrchestratorError::Keygen {
+      detail: "Failed to generate WireGuard client keypair for node provisioning.".to_string(),
+      source,
+    })?;
+
+    let client_private_key_ref = secure_storage
+      .store_client_private_key(&request.node_id, &client_keypair.private_key)
+      .map_err(|source| OrchestratorError::SecretStorage {
+        detail: "Could not persist client private key before provisioning.".to_string(),
+        source,
+      })?;
+
+    db
+      .update_vpn_node_client_key(
+        &request.node_id,
+        Some(&client_private_key_ref),
+        Some(&client_keypair.public_key),
+      )
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed recording client key reference on node.".to_string(),
+        source,
+      })?;
+
     let bootstrap_params = BootstrapParams {
       server_endpoint_ip: "0.0.0.0".to_string(),
       listen_port: DEFAULT_WIREGUARD_PORT,
       server_interface_cidr: DEFAULT_SERVER_INTERFACE_CIDR.to_string(),
       client_cidr: DEFAULT_CLIENT_CIDR.to_string(),
       interface_name: DEFAULT_INTERFACE_NAME.to_string(),
+      client_public_key: client_keypair.public_key.clone(),
     };
 
-    let server_keypair = generate_server_keypair().map_err(|source| OrchestratorError::Keygen {
-      detail: "Failed to generate WireGuard server keypair for node provisioning.".to_string(),
-      source,
-    })?;
-
+    // Both renderers receive the same key material and produce the same server state; only the
+    // delivery mechanism differs (cloud-init write_files vs. a mounted entrypoint script).
     let bootstrap_artifact = if provider_slug == "docker" {
-      bootstrap.render_docker_init(&bootstrap_params)
+      bootstrap.render_docker_init(
+        &bootstrap_params,
+        &server_keypair.private_key,
+        &server_keypair.public_key,
+      )
     } else {
-      bootstrap.render_cloud_init(&bootstrap_params, &server_keypair.private_key, &server_keypair.public_key)
+      bootstrap.render_cloud_init(
+        &bootstrap_params,
+        &server_keypair.private_key,
+        &server_keypair.public_key,
+      )
     }
     .map_err(|source| OrchestratorError::Bootstrap {
       detail: if provider_slug == "docker" {
@@ -918,63 +963,57 @@ impl Orchestrator {
         detail: "Tunnel row is missing during secure key setup.".to_string(),
       })?;
 
-    let (keypair, client_private_key_ref) = match persisted_tunnel.client_private_key_ref.as_deref() {
-      Some(key_ref) => match secure_storage
-        .get_client_private_key(key_ref)
-        .map_err(|source| OrchestratorError::SecretStorage {
-          detail: "Could not load persisted client private key from secure storage.".to_string(),
-          source,
-        })? {
-        Some(private_key) => {
-          let public_key = wireguard
-            .derive_public_key(&private_key)
-            .map_err(|source| OrchestratorError::WireGuard {
-              detail: "Could not derive WireGuard public key from persisted private key.".to_string(),
-              source,
-            })?;
+    // The server was provisioned with one specific client public key baked into its [Peer] block,
+    // and the app cannot reach the server to change it. Generating a fresh keypair here would
+    // therefore produce a tunnel that can never complete a handshake, so this resolves the
+    // existing key or fails — it must never mint a new one.
+    let client_private_key_ref = persisted_tunnel
+      .client_private_key_ref
+      .clone()
+      .or_else(|| node.client_private_key_ref.clone())
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail:
+          "This node has no client key recorded from provisioning, so its server has no matching peer. Destroy and recreate the node."
+            .to_string(),
+      })?;
 
-          (
-            crate::backend::wireguard::ClientKeyPair {
-              private_key,
-              public_key,
-            },
-            key_ref.to_string(),
-          )
-        }
-        None => {
-          let generated = wireguard
-            .generate_client_keypair()
-            .map_err(|source| OrchestratorError::WireGuard {
-              detail: "Could not generate client WireGuard keypair locally.".to_string(),
-              source,
-            })?;
-          let key_ref = secure_storage
-            .store_client_private_key(&request.node_id, &generated.private_key)
-            .map_err(|source| OrchestratorError::SecretStorage {
-              detail: "Could not persist client private key to secure storage.".to_string(),
-              source,
-            })?;
+    let private_key = secure_storage
+      .get_client_private_key(&client_private_key_ref)
+      .map_err(|source| OrchestratorError::SecretStorage {
+        detail: "Could not load persisted client private key from secure storage.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail:
+          "The client private key for this node is missing from Windows Credential Manager. Its server peer can no longer be matched; destroy and recreate the node."
+            .to_string(),
+      })?;
 
-          (generated, key_ref)
-        }
-      },
-      None => {
-        let generated = wireguard
-          .generate_client_keypair()
-          .map_err(|source| OrchestratorError::WireGuard {
-            detail: "Could not generate client WireGuard keypair locally.".to_string(),
-            source,
-          })?;
+    let public_key = wireguard
+      .derive_public_key(&private_key)
+      .map_err(|source| OrchestratorError::WireGuard {
+        detail: "Could not derive WireGuard public key from persisted private key.".to_string(),
+        source,
+      })?;
 
-        let key_ref = secure_storage
-          .store_client_private_key(&request.node_id, &generated.private_key)
-          .map_err(|source| OrchestratorError::SecretStorage {
-            detail: "Could not persist client private key to secure storage.".to_string(),
-            source,
-          })?;
-
-        (generated, key_ref)
+    // Guard against a key that does not match what the server was built with. Without this the
+    // failure surfaces as a silent no-handshake, which is very hard to diagnose.
+    if let Some(provisioned) = node.client_public_key.as_deref() {
+      if provisioned != public_key {
+        return Err(OrchestratorError::InvalidState {
+          node_id: request.node_id.clone(),
+          detail:
+            "The stored client key does not match the peer baked into this node's server. Destroy and recreate the node."
+              .to_string(),
+        });
       }
+    }
+
+    let keypair = crate::backend::wireguard::ClientKeyPair {
+      private_key,
+      public_key,
     };
 
     db
@@ -990,41 +1029,8 @@ impl Orchestrator {
         source,
       })?;
 
-    let provider = db
-      .get_provider(&node.provider_id)
-      .map_err(|source| OrchestratorError::Database {
-        detail: "Failed reading provider before peer wiring for client tunnel creation.".to_string(),
-        source,
-      })?
-      .ok_or_else(|| OrchestratorError::InvalidState {
-        node_id: request.node_id.clone(),
-        detail: "VPN node provider does not exist for client tunnel wiring.".to_string(),
-      })?;
-
-    if provider.slug == "docker" {
-      let droplet_id = node.external_ref.as_ref().ok_or_else(|| OrchestratorError::InvalidState {
-        node_id: request.node_id.clone(),
-        detail: "Docker node is missing external droplet reference; cannot wire client peer.".to_string(),
-      })?;
-
-      let droplet_id = droplet_id.parse::<u64>().map_err(|_| OrchestratorError::InvalidState {
-        node_id: request.node_id.clone(),
-        detail: "Docker node external droplet reference is not a valid droplet id.".to_string(),
-      })?;
-
-      DockerProviderAdapter::wire_client_peer(
-        droplet_id,
-        &keypair.public_key,
-        &request.client_address_cidr,
-      )
-      .map_err(|source| OrchestratorError::Provider {
-        detail: "Could not wire WireGuard client peer into Docker server bootstrap.".to_string(),
-        source: ProviderFlowError::Adapter {
-          detail: "Docker server peer wiring failed during client tunnel creation.".to_string(),
-          source,
-        },
-      })?;
-    }
+    // No peer wiring step. The server already has this client in its [Peer] block from the
+    // bootstrap payload, for every provider — there is nothing provider-specific to do here.
 
     db
       .update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, None)
@@ -2833,6 +2839,8 @@ mod tests {
       error_reason: None,
       created_at: "now".to_string(),
       updated_at: "now".to_string(),
+      client_private_key_ref: None,
+      client_public_key: None,
     };
 
     let endpoint = resolve_server_endpoint_ip_for_connect("docker", &node)
@@ -2861,6 +2869,8 @@ mod tests {
       error_reason: None,
       created_at: "now".to_string(),
       updated_at: "now".to_string(),
+      client_private_key_ref: None,
+      client_public_key: None,
     };
 
     let result = resolve_server_endpoint_ip_for_connect("do", &node);

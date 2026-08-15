@@ -42,13 +42,18 @@ impl Bootstrap {
   pub fn render_docker_init(
     &self,
     params: &BootstrapParams,
+    server_private_key: &str,
+    server_public_key: &str,
   ) -> Result<BootstrapArtifact, BootstrapError> {
     super::contract::validate_bootstrap_params(params)?;
 
-    let init_payload = docker_init::build_docker_init_script(params);
+    let init_payload =
+      docker_init::build_docker_init_script(params, server_private_key, server_public_key);
+    // The server public key is known locally at render time, so this is the real value rather
+    // than a placeholder resolved from a readiness marker the app would have to read back.
     let output_contract_preview = BootstrapOutputContract {
       server_endpoint_ip: params.server_endpoint_ip.clone(),
-      server_public_key: "<resolved-from-readiness-marker>".to_string(),
+      server_public_key: server_public_key.to_string(),
       listen_port: params.listen_port,
     };
 

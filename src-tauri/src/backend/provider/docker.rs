@@ -3,8 +3,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::backend::bootstrap::{
-  Bootstrap, BootstrapOutputContract, BootstrapParams, ReadinessMarker,
-  DEFAULT_INTERFACE_NAME, DEFAULT_WIREGUARD_PORT,
+  BootstrapOutputContract, ReadinessMarker, DEFAULT_INTERFACE_NAME, DEFAULT_WIREGUARD_PORT,
 };
 use crate::backend::crypto::keypair::WireGuardKeypair;
 
@@ -512,20 +511,22 @@ impl DockerProviderAdapter {
     Ok(())
   }
 
+  /// The caller must supply a fully-rendered payload.
+  ///
+  /// This used to fall back to `render_docker_init(&BootstrapParams::default())`. That is no
+  /// longer safe: a default payload carries no client public key, so it would silently provision
+  /// a server with no `[Peer]` block — one that looks healthy and accepts no handshakes. Failing
+  /// loudly here is the point.
   fn resolve_docker_init_payload(init_script: &str) -> Result<String, ProviderAdapterError> {
-    if !init_script.trim().is_empty() {
-      return Ok(init_script.to_string());
+    if init_script.trim().is_empty() {
+      return Err(ProviderAdapterError::Unsupported {
+        detail:
+          "Docker provisioning requires a rendered bootstrap payload containing the client peer. Render bootstrap before calling create."
+            .to_string(),
+      });
     }
 
-    Bootstrap::new()
-      .render_docker_init(&BootstrapParams::default())
-      .map(|artifact| artifact.init_payload)
-      .map_err(|source| ProviderAdapterError::Unsupported {
-        detail: format!(
-          "Could not render default Docker init payload for direct Docker adapter provisioning: {}",
-          source
-        ),
-      })
+    Ok(init_script.to_string())
   }
 
   fn initialize_wireguard_server_in_container(
@@ -610,70 +611,12 @@ impl DockerProviderAdapter {
     }
   }
 
-  fn build_client_peer_update_script(
-    client_public_key: &str,
-    client_address_cidr: &str,
-    interface_name: &str,
-  ) -> Result<String, ProviderAdapterError> {
-    let client_cidr = client_address_cidr.trim();
-    let iface = Self::validate_wireguard_interface_name(interface_name)?;
-
-    if client_cidr.is_empty() {
-      return Err(ProviderAdapterError::Unsupported {
-        detail: "Docker client peer update needs a non-empty client CIDR.".to_string(),
-      });
-    }
-
-    if iface.is_empty() {
-      return Err(ProviderAdapterError::Unsupported {
-        detail: "Docker client peer update needs a non-empty interface name.".to_string(),
-      });
-    }
-
-    let public_key = crate::backend::crypto::keypair::validate_public_key(client_public_key)
-      .map_err(|source| ProviderAdapterError::Unsupported {
-        detail: format!("Docker client peer update needs a valid WireGuard public key: {source}"),
-      })?;
-    let peer_fragment = crate::backend::crypto::keypair::build_client_peer_config_fragment(
-      &public_key,
-      client_cidr,
-    )
-    .map_err(|source| ProviderAdapterError::Unsupported {
-      detail: format!("Docker client peer update could not build a valid config fragment: {source}"),
-    })?;
-
-    let public_key = Self::shell_single_quote(&public_key);
-    let client_cidr = Self::shell_single_quote(client_cidr);
-    let peer_fragment = Self::shell_single_quote(&peer_fragment);
-
-    Ok(format!(
-      "set -eu; mkdir -p /etc/wireguard /var/lib/goatstare; fragment=$(mktemp /tmp/goatstare-peer-XXXXXX.conf); printf %s {peer_fragment} > \"$fragment\"; cat \"$fragment\" >> /etc/wireguard/{iface}.conf; cp \"$fragment\" /var/lib/goatstare/{iface}-client-peer.conf; rm -f \"$fragment\"; ip link show {iface} >/dev/null 2>&1; wg set {iface} peer {public_key} allowed-ips {client_cidr};",
-      peer_fragment = peer_fragment,
-      public_key = public_key,
-      client_cidr = client_cidr,
-    ))
-  }
-
-  pub fn wire_client_peer(
-    droplet_id: u64,
-    client_public_key: &str,
-    client_address_cidr: &str,
-  ) -> Result<(), ProviderAdapterError> {
-    let container_id = Self::container_id_for_droplet(droplet_id)?;
-    let script = Self::build_client_peer_update_script(
-      client_public_key,
-      client_address_cidr,
-      DEFAULT_INTERFACE_NAME,
-    )?;
-
-    let _ = Self::docker_exec(
-      &container_id,
-      &script,
-      "apply WireGuard client peer to Docker server container",
-    )?;
-
-    Ok(())
-  }
+  // `build_client_peer_update_script` and `wire_client_peer` were removed here.
+  //
+  // They pushed the client's public key into a running container with `docker exec` after
+  // provisioning. That has no DigitalOcean equivalent, so it made the Docker lane pass while the
+  // production path stayed broken. The peer now ships inside the bootstrap payload for every
+  // provider, and nothing contacts the server after create.
 }
 
 impl super::ProviderAdapter for DockerProviderAdapter {
@@ -901,7 +844,31 @@ mod tests {
     DockerProviderAdapter, DOCKER_IMAGE, DOCKER_REGION, DOCKER_WIREGUARD_PUBLISH,
   };
   use crate::backend::bootstrap::{Bootstrap, BootstrapParams, READINESS_MARKER_PATH};
-  use crate::backend::crypto::keypair::generate_server_keypair;
+  use crate::backend::crypto::keypair::{
+    generate_client_keypair, generate_server_keypair, WireGuardKeypair,
+  };
+
+  /// Render a real bootstrap payload the way the orchestrator does.
+  ///
+  /// Provisioning no longer accepts an empty script, because a defaulted payload would carry no
+  /// client peer. Returns the payload alongside the keypairs so tests can assert that exactly
+  /// these keys reach the container.
+  fn render_real_docker_payload() -> (String, WireGuardKeypair, WireGuardKeypair) {
+    let server = generate_server_keypair().expect("server keypair should generate for real test");
+    let client = generate_client_keypair().expect("client keypair should generate for real test");
+
+    let params = BootstrapParams {
+      client_public_key: client.public_key.clone(),
+      ..BootstrapParams::default()
+    };
+
+    let payload = Bootstrap::new()
+      .render_docker_init(&params, &server.private_key, &server.public_key)
+      .expect("docker init render should succeed")
+      .init_payload;
+
+    (payload, server, client)
+  }
   use crate::backend::provider::{BootstrapWaitRequest, ProviderAdapter};
   use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -949,8 +916,15 @@ mod tests {
   fn docker_provider_uses_ubuntu_24_base_image() {
     assert_eq!(DOCKER_IMAGE, "ubuntu:24.04");
 
+    let client = generate_client_keypair().expect("client keypair should generate");
+    let server = generate_server_keypair().expect("server keypair should generate");
+    let params = BootstrapParams {
+      client_public_key: client.public_key,
+      ..BootstrapParams::default()
+    };
+
     let install_script = Bootstrap::new()
-      .render_docker_init(&BootstrapParams::default())
+      .render_docker_init(&params, &server.private_key, &server.public_key)
       .expect("docker init render should succeed")
       .init_payload;
     assert!(install_script.contains("apt-get update"));
@@ -990,9 +964,10 @@ mod tests {
       .map(|value| value.as_secs())
       .unwrap_or(0);
     let node_name = format!("docker-bootstrap-phase-{suffix}");
+    let (payload, server_keypair, _client) = render_real_docker_payload();
 
     let provisioned = adapter
-      .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", "")
+      .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", &payload)
       .expect("docker create should succeed with a local daemon");
 
     let contract_result = adapter.wait_for_bootstrap_ready(
@@ -1001,7 +976,7 @@ mod tests {
         droplet_id: provisioned.droplet_id,
         endpoint_ip: provisioned.public_ipv4.clone(),
         readiness_marker_path: READINESS_MARKER_PATH.to_string(),
-        server_keypair: generate_server_keypair().expect("keypair should generate for real test"),
+        server_keypair,
       },
     );
 
@@ -1059,9 +1034,10 @@ mod tests {
       .map(|value| value.as_secs())
       .unwrap_or(0);
     let node_name = format!("docker-connect-phase-{suffix}");
+    let (payload, server_keypair, client_keypair) = render_real_docker_payload();
 
     let provisioned = adapter
-      .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", "")
+      .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", &payload)
       .expect("docker create should succeed with a local daemon");
 
     let contract = adapter
@@ -1071,19 +1047,10 @@ mod tests {
           droplet_id: provisioned.droplet_id,
           endpoint_ip: provisioned.public_ipv4.clone(),
           readiness_marker_path: READINESS_MARKER_PATH.to_string(),
-          server_keypair: generate_server_keypair().expect("keypair should generate for real test"),
+          server_keypair,
         },
       )
       .expect("bootstrap contract should be available");
-
-    let client_keypair = generate_server_keypair().expect("client keypair should generate for real test");
-
-    DockerProviderAdapter::wire_client_peer(
-      provisioned.droplet_id,
-      &client_keypair.public_key,
-      "10.66.0.2/32",
-    )
-    .expect("client peer wiring should succeed");
 
     let container_id = DockerProviderAdapter::container_id_for_droplet(provisioned.droplet_id)
       .expect("container id should resolve for provisioned droplet");
@@ -1096,22 +1063,16 @@ mod tests {
     )
     .expect("server config should be readable from container");
 
-    assert!(server_config.contains("[Interface]") || server_config.contains("[Peer]"));
-    assert!(server_config.contains("PrivateKey =") || server_config.contains("PublicKey ="));
-    assert!(server_config.contains("Address = 10.66.0.1/24") || server_config.contains("AllowedIPs = 10.66.0.2/32"));
-    assert!(server_config.contains("ListenPort = 51820") || server_config.contains("AllowedIPs = 10.66.0.2/32"));
-
-    let peer_fragment_content = DockerProviderAdapter::read_container_text_with_fallback(
-      &container_id,
-      "/var/lib/goatstare/wg0-client-peer.conf",
-      "copy rendered peer fragment artifact from container",
-      "read rendered peer fragment artifact from container via shell fallback",
-    )
-    .expect("peer fragment artifact should be discoverable");
-
-    assert!(peer_fragment_content.contains("[Peer]"));
-    assert!(peer_fragment_content.contains(&format!("PublicKey = {}", client_keypair.public_key)));
-    assert!(peer_fragment_content.contains("AllowedIPs = 10.66.0.2/32"));
+    // The peer arrived in the bootstrap payload. Nothing wired it in afterwards.
+    assert!(server_config.contains("[Interface]"));
+    assert!(server_config.contains("[Peer]"));
+    assert!(server_config.contains("Address = 10.66.0.1/24"));
+    assert!(server_config.contains("ListenPort = 51820"));
+    assert!(
+      server_config.contains(&format!("PublicKey = {}", client_keypair.public_key)),
+      "server must already carry the client peer baked at render time"
+    );
+    assert!(server_config.contains("AllowedIPs = 10.66.0.2/32"));
 
     assert_eq!(contract.server_endpoint_ip, provisioned.public_ipv4);
 
@@ -1120,31 +1081,15 @@ mod tests {
       .expect("docker cleanup should succeed");
   }
 
+  /// Provisioning must refuse an empty payload rather than silently substituting a default one.
+  /// A defaulted payload carries no client peer, which would yield a server that looks healthy
+  /// and accepts no handshakes.
   #[test]
-  fn client_peer_update_script_mentions_peer_and_allowed_ips() {
-    let script = DockerProviderAdapter::build_client_peer_update_script(
-      "client-pub-key",
-      "10.66.0.2/32",
-      "wg0",
-    )
-    .expect("peer update script should build");
+  fn docker_provisioning_requires_a_rendered_payload() {
+    let result = DockerProviderAdapter::resolve_docker_init_payload("   ");
 
-    assert!(script.contains("wg set wg0 peer 'client-pub-key' allowed-ips '10.66.0.2/32'"));
-    assert!(script.contains("[Peer]"));
-    assert!(script.contains("AllowedIPs = %s"));
-    assert!(script.contains("/etc/wireguard/wg0.conf"));
-    assert!(!script.contains("if command -v wg"));
-  }
-
-  #[test]
-  fn client_peer_update_script_rejects_invalid_interface_names() {
-    let result = DockerProviderAdapter::build_client_peer_update_script(
-      "client-pub-key",
-      "10.66.0.2/32",
-      "wg0;rm -rf /",
-    );
-
-    assert!(result.is_err());
+    let err = result.expect_err("an empty payload must be rejected");
+    assert!(err.to_string().contains("client peer"));
   }
 
   #[test]
