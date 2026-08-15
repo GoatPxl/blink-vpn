@@ -84,7 +84,7 @@ export function HealthView({
             <div className="grid gap-4 md:grid-cols-2">
               <MetricCard title="Endpoint" value={health.endpoint_ip ?? "n/a"} detail={`Node ${health.node_id}`} tone="primary" />
               <MetricCard title="External IP" value={health.external_ipv4 ?? "n/a"} detail={`Tunnel ${health.tunnel_id ?? "n/a"}`} tone="secondary" />
-              <MetricCard title="Handshake" value={formatHandshakeAge(health.handshake_age_seconds)} detail={`Tunnel status ${health.tunnel_status ?? "n/a"}`} tone="tertiary" />
+              <MetricCard title="Handshake" value={formatHandshakeAge(health.handshake_age_seconds, health.tunnel_status)} detail={`Tunnel status ${health.tunnel_status ?? "n/a"}`} tone="tertiary" />
               <MetricCard title="Traffic" value={`RX ${formatBytes(health.rx_bytes)} / TX ${formatBytes(health.tx_bytes)}`} detail={`Selected tunnel ${selectedTunnelId || "none"}`} tone="primary" />
             </div>
           ) : <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">Select a node to load health details.</div>}

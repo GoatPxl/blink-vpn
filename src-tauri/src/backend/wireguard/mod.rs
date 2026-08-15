@@ -572,7 +572,19 @@ impl WireGuardManager {
           tunnel_name,
           map_wg_show_dump_error(source, tunnel_name)
         ));
-        PeerMetrics::unavailable()
+
+        // Fall back to the adapter's own counters, which need no elevation. Throughput survives;
+        // handshake age does not, because only the tunnel service knows it.
+        match adapter_byte_counters(tunnel_name) {
+          Some((rx_bytes, tx_bytes)) => {
+            self.record_command(&format!(
+              "adapter counters {} -> rx={} tx={} (handshake age needs elevation)",
+              tunnel_name, rx_bytes, tx_bytes
+            ));
+            PeerMetrics::from_adapter_counters(rx_bytes, tx_bytes)
+          }
+          None => PeerMetrics::unavailable(),
+        }
       }
     };
 
@@ -745,6 +757,70 @@ impl PeerMetrics {
       tx_bytes: None,
     }
   }
+
+  /// Throughput recovered from the network adapter when `wg show` is unavailable.
+  ///
+  /// Handshake age is deliberately absent: it is WireGuard protocol state held by the tunnel
+  /// service, and the adapter knows nothing about it.
+  fn from_adapter_counters(rx_bytes: u64, tx_bytes: u64) -> Self {
+    Self {
+      last_handshake_age_seconds: None,
+      rx_bytes: Some(rx_bytes),
+      tx_bytes: Some(tx_bytes),
+    }
+  }
+}
+
+/// Byte counters for a network adapter, read without elevation.
+///
+/// `wg show` requires administrator because it talks to the tunnel service's restricted pipe. An
+/// adapter's own counters are ordinary interface statistics that any user can read — the numbers
+/// Task Manager shows — so throughput stays visible while the app runs unelevated.
+///
+/// WireGuard for Windows names the adapter after the tunnel, so the tunnel name is the alias to
+/// look for.
+#[cfg(target_os = "windows")]
+fn adapter_byte_counters(adapter_alias: &str) -> Option<(u64, u64)> {
+  use windows_sys::Win32::NetworkManagement::IpHelper::{
+    FreeMibTable, GetIfTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
+  };
+
+  let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+
+  // SAFETY: GetIfTable2 allocates the table and reports success before it is read. The rows form a
+  // contiguous array of NumEntries entries, and the allocation is released on every path below.
+  unsafe {
+    if GetIfTable2(&mut table) != 0 || table.is_null() {
+      return None;
+    }
+
+    let entry_count = (*table).NumEntries as usize;
+    let rows = std::ptr::addr_of!((*table).Table) as *const MIB_IF_ROW2;
+
+    let mut counters = None;
+    for index in 0..entry_count {
+      let row = &*rows.add(index);
+      if wide_string_to_lossy(&row.Alias).eq_ignore_ascii_case(adapter_alias) {
+        counters = Some((row.InOctets, row.OutOctets));
+        break;
+      }
+    }
+
+    FreeMibTable(table as *const core::ffi::c_void);
+    counters
+  }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn adapter_byte_counters(_adapter_alias: &str) -> Option<(u64, u64)> {
+  None
+}
+
+/// Decode a fixed-size, NUL-padded UTF-16 field.
+#[cfg(target_os = "windows")]
+fn wide_string_to_lossy(raw: &[u16]) -> String {
+  let end = raw.iter().position(|unit| *unit == 0).unwrap_or(raw.len());
+  String::from_utf16_lossy(&raw[..end])
 }
 
 #[derive(Debug, Clone)]
@@ -1884,6 +1960,30 @@ mod tests {
   }
 
   #[test]
+  /// An adapter that does not exist yields no counters, rather than zeroes.
+  ///
+  /// Zeroes would read as "connected, no traffic", which is a different and misleading claim.
+  #[test]
+  fn adapter_counters_are_absent_for_an_unknown_adapter() {
+    assert_eq!(
+      super::adapter_byte_counters("goatstare-no-such-adapter-a1b2c3"),
+      None
+    );
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn wide_string_decoding_stops_at_the_nul_terminator() {
+    // The Win32 field is a fixed-size buffer padded with NULs, not a sized string.
+    let mut raw = [0u16; 8];
+    for (index, unit) in "wg0".encode_utf16().enumerate() {
+      raw[index] = unit;
+    }
+
+    assert_eq!(super::wide_string_to_lossy(&raw), "wg0");
+    assert_eq!(super::wide_string_to_lossy(&[0u16; 4]), "");
+  }
+
   /// A running tunnel whose metrics cannot be read is still running.
   ///
   /// `wg show` talks to the tunnel service's pipe, which is restricted to administrators, so an

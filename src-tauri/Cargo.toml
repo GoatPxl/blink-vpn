@@ -27,7 +27,14 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security_Credentials",
+  # Interface byte counters, so throughput stays visible without elevation. `wg show` needs
+  # administrator; these are ordinary interface statistics any user can read.
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+] }
 # Key generation only. The interface runtime from this crate, and the `wireguard-nt` driver
 # bindings that went with it, were removed — see backend/wireguard/mod.rs for why. Tunnels are
 # managed through the WireGuard for Windows service.

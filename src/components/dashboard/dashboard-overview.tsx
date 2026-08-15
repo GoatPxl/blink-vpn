@@ -181,7 +181,7 @@ export function DashboardOverview({
                 <div>
                   <div className="text-sm text-[var(--on-surface-variant)]">Latest Handshake</div>
                   <div className="mt-3 text-[18px] font-semibold tracking-tight text-[var(--on-surface)]">{health?.tunnel_status ?? "Pending"}</div>
-                  <div className="mt-1 text-xs text-[var(--on-surface-variant)]">Last handshake: {formatHandshakeAge(health?.handshake_age_seconds)}</div>
+                  <div className="mt-1 text-xs text-[var(--on-surface-variant)]">Last handshake: {formatHandshakeAge(health?.handshake_age_seconds, health?.tunnel_status)}</div>
                 </div>
                 <AppIcon name="refresh" className="h-4 w-4 text-[var(--on-surface-variant)]" />
               </div>

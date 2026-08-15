@@ -152,8 +152,23 @@ export function formatBytes(value: number | null | undefined): string {
   return `${(kib / 1024).toFixed(1)} MiB`;
 }
 
-export function formatHandshakeAge(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined) return "n/a";
+/**
+ * Handshake age, or why it is missing.
+ *
+ * A missing value means different things depending on the tunnel. Reading it requires `wg show`,
+ * which talks to the tunnel service's restricted pipe and so needs administrator — so on a
+ * *connected* tunnel the number is unavailable rather than zero, and a bare "n/a" beside a working
+ * tunnel reads as a fault. On a tunnel that is not connected there is simply nothing to report.
+ *
+ * Throughput is unaffected either way: adapter byte counters need no elevation.
+ */
+export function formatHandshakeAge(
+  seconds: number | null | undefined,
+  tunnelStatus?: string | null,
+): string {
+  if (seconds === null || seconds === undefined) {
+    return tunnelStatus?.toLowerCase() === "connected" ? "needs admin" : "n/a";
+  }
   if (seconds === 0) return "just now";
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);
