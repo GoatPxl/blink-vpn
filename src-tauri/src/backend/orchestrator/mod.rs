@@ -3258,6 +3258,341 @@ mod tests {
     assert_eq!(summary.handshake_age_seconds, None);
   }
 
+  /// Full backend path against a real DigitalOcean droplet.
+  ///
+  /// **This creates a billable resource.** It is destroyed on every exit path, including panics,
+  /// and the assertions run only after teardown so a failure cannot strand a droplet. Requires
+  /// `GOATSTARE_DO_TEST_TOKEN`.
+  ///
+  /// Proves the production path end to end: keys generated locally, baked into cloud-init, and a
+  /// droplet reaching ready with an endpoint the client can dial — with nothing ever read back
+  /// off the server.
+  #[test]
+  #[ignore = "Creates a real, billable DigitalOcean droplet; needs GOATSTARE_DO_TEST_TOKEN"]
+  fn real_digitalocean_full_backend_path_produces_a_connect_config() {
+    use crate::backend::provider::DigitalOceanProviderAdapter;
+    use crate::backend::wireguard::{build_client_config, ClientConfigParams};
+
+    let token = match std::env::var("GOATSTARE_DO_TEST_TOKEN") {
+      Ok(value) if !value.trim().is_empty() => value,
+      _ => {
+        eprintln!("GOATSTARE_DO_TEST_TOKEN is not set; skipping.");
+        return;
+      }
+    };
+
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_secs())
+      .unwrap_or(0);
+
+    let db = Database::new(test_db_path(&format!("real_do_{suffix}")));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    // Migration 0007 seeds this provider row.
+    const DO_PROVIDER_ID: &str = "provider-1";
+    let token_ref = secure_storage
+      .store_digitalocean_api_token(DO_PROVIDER_ID, &token)
+      .expect("token should store");
+    db.update_provider_token_ref(DO_PROVIDER_ID, Some(&token_ref))
+      .expect("token ref should persist");
+
+    let providers = ProviderRegistry::from_adapter(Arc::new(
+      DigitalOceanProviderAdapter::new().expect("adapter should construct"),
+    ));
+    let orchestrator = Orchestrator::new();
+    let bootstrap = Bootstrap::new();
+    let wireguard = WireGuardManager::new();
+
+    let node_id = format!("node-do-{suffix}");
+    let created = orchestrator.create_vpn_node_to_ready(
+      &providers,
+      &bootstrap,
+      &db,
+      &secure_storage,
+      &CreateVpnNodeRequest {
+        node_id: node_id.clone(),
+        provider_id: DO_PROVIDER_ID.to_string(),
+        node_name: format!("goatstare-e2e-{suffix}"),
+        region: "nyc1".to_string(),
+        plan_key: "s-1vcpu-1gb".to_string(),
+      },
+    );
+
+    // Gather everything needed for assertions while the node still exists, then tear down before
+    // asserting anything. A panic between provisioning and teardown would leave a paid droplet
+    // running.
+    let findings = created.as_ref().ok().map(|created| {
+      let node = db
+        .get_vpn_node(&node_id)
+        .ok()
+        .flatten()
+        .expect("node row should exist");
+
+      let client_config = node
+        .client_private_key_ref
+        .as_deref()
+        .and_then(|key_ref| secure_storage.get_client_private_key(key_ref).ok().flatten())
+        .and_then(|private_key| {
+          build_client_config(&ClientConfigParams {
+            private_key,
+            client_address_cidr: DEFAULT_CLIENT_CIDR.to_string(),
+            dns_server: None,
+            server_public_key: created.server_public_key.clone(),
+            server_endpoint_ip: node.public_ipv4.clone().unwrap_or_default(),
+            server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
+            allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+            persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+          })
+          .ok()
+        });
+
+      (node, created.server_public_key.clone(), client_config)
+    });
+
+    // Teardown first, unconditionally.
+    let cleanup = orchestrator.force_cleanup_vpn_node(
+      &providers,
+      &wireguard,
+      &db,
+      &secure_storage,
+      &node_id,
+    );
+
+    let created = created.unwrap_or_else(|error| panic!("node creation should reach Ready: {error:?}"));
+    let (node, server_public_key, client_config) =
+      findings.expect("findings should exist when creation succeeded");
+
+    let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
+    assert!(
+      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      "the droplet must be destroyed, or it keeps billing: {cleanup:?}"
+    );
+
+    assert_eq!(node.lifecycle_status, NodeLifecycleStatus::Ready);
+    assert!(!created.server_public_key.trim().is_empty());
+
+    // A real droplet endpoint is publicly routable, so a full tunnel is preserved.
+    let endpoint = node.public_ipv4.clone().expect("a public IPv4 should be recorded");
+    assert!(
+      !endpoint_is_locally_scoped(&endpoint),
+      "a DigitalOcean endpoint should be publicly routable, got {endpoint}"
+    );
+    assert_eq!(node.endpoint_port, Some(DEFAULT_WIREGUARD_PORT));
+
+    let config = client_config.expect("a client config should render");
+    assert!(config.contains("[Peer]"));
+    assert!(config.contains(&format!("PublicKey = {server_public_key}")));
+    assert!(config.contains(&format!("Endpoint = {endpoint}:{DEFAULT_WIREGUARD_PORT}")));
+    assert!(
+      config.contains("AllowedIPs = 0.0.0.0/0"),
+      "full tunnel must survive for a public endpoint: {config}"
+    );
+
+    let path = std::env::temp_dir().join(format!("goatstare-do-{suffix}.conf"));
+    std::fs::write(&path, config.replace("\r\n", "\n")).expect("config should be writable");
+    println!("\n=== DigitalOcean client config: {} ===", path.display());
+    println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
+    println!("=== droplet destroyed; this config is kept only as a record ===\n");
+  }
+
+  /// The production path, proven by an actual handshake against a real droplet.
+  ///
+  /// **Creates a billable resource**, destroyed on every exit path. Needs
+  /// `GOATSTARE_DO_TEST_TOKEN` and a Docker daemon.
+  ///
+  /// The previous test stops at "the provider says ready", which is all the app can observe — the
+  /// droplet reports active well before cloud-init finishes. That leaves the important question
+  /// unanswered: did the baked-in payload actually bring WireGuard up? This answers it by
+  /// connecting as a real client.
+  ///
+  /// The client runs in a container, so no Windows elevation is involved. That container is the
+  /// *client*; nothing execs into the provisioned droplet, and no key material is read back from
+  /// it — the config is built entirely from values generated locally.
+  #[test]
+  #[ignore = "Creates a real, billable DigitalOcean droplet; needs GOATSTARE_DO_TEST_TOKEN and Docker"]
+  fn real_digitalocean_server_completes_a_wireguard_handshake() {
+    use crate::backend::provider::DigitalOceanProviderAdapter;
+    use crate::backend::wireguard::{build_client_config, ClientConfigParams};
+    use std::process::Command;
+
+    let token = match std::env::var("GOATSTARE_DO_TEST_TOKEN") {
+      Ok(value) if !value.trim().is_empty() => value,
+      _ => {
+        eprintln!("GOATSTARE_DO_TEST_TOKEN is not set; skipping.");
+        return;
+      }
+    };
+
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_secs())
+      .unwrap_or(0);
+    let client_container = format!("goatstare-do-client-{suffix}");
+
+    let db = Database::new(test_db_path(&format!("real_do_hs_{suffix}")));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    const DO_PROVIDER_ID: &str = "provider-1";
+    let token_ref = secure_storage
+      .store_digitalocean_api_token(DO_PROVIDER_ID, &token)
+      .expect("token should store");
+    db.update_provider_token_ref(DO_PROVIDER_ID, Some(&token_ref))
+      .expect("token ref should persist");
+
+    let providers = ProviderRegistry::from_adapter(Arc::new(
+      DigitalOceanProviderAdapter::new().expect("adapter should construct"),
+    ));
+    let orchestrator = Orchestrator::new();
+    let wireguard = WireGuardManager::new();
+
+    let node_id = format!("node-do-hs-{suffix}");
+    let created = orchestrator.create_vpn_node_to_ready(
+      &providers,
+      &Bootstrap::new(),
+      &db,
+      &secure_storage,
+      &CreateVpnNodeRequest {
+        node_id: node_id.clone(),
+        provider_id: DO_PROVIDER_ID.to_string(),
+        node_name: format!("goatstare-hs-{suffix}"),
+        region: "nyc1".to_string(),
+        plan_key: "s-1vcpu-1gb".to_string(),
+      },
+    );
+
+    // Everything below runs inside a closure so the droplet and container are torn down on every
+    // path, including a panic, before any assertion runs.
+    let outcome: Result<(String, String), String> = (|| {
+      let created = created.as_ref().map_err(|error| format!("create failed: {error:?}"))?;
+
+      let node = db
+        .get_vpn_node(&node_id)
+        .map_err(|error| format!("node lookup failed: {error:?}"))?
+        .ok_or_else(|| "node row should exist".to_string())?;
+
+      let endpoint = node
+        .public_ipv4
+        .clone()
+        .ok_or_else(|| "a public IPv4 should be recorded".to_string())?;
+
+      let private_key = node
+        .client_private_key_ref
+        .as_deref()
+        .ok_or_else(|| "client key reference should be recorded".to_string())
+        .and_then(|key_ref| {
+          secure_storage
+            .get_client_private_key(key_ref)
+            .map_err(|error| format!("key lookup failed: {error:?}"))?
+            .ok_or_else(|| "client private key should be readable".to_string())
+        })?;
+
+      // Route only the tunnel subnet: this client is verifying a handshake, not taking over the
+      // container's default route.
+      let config = build_client_config(&ClientConfigParams {
+        private_key,
+        client_address_cidr: DEFAULT_CLIENT_CIDR.to_string(),
+        dns_server: None,
+        server_public_key: created.server_public_key.clone(),
+        server_endpoint_ip: endpoint.clone(),
+        server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
+        allowed_ips: vec!["10.66.0.0/24".to_string()],
+        persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+      })
+      .map_err(|error| format!("client config should render: {error:?}"))?;
+
+      // Bring the client up and leave it retrying. WireGuard re-sends handshake initiations every
+      // few seconds, so the client simply waits out cloud-init rather than needing to detect it.
+      let run = Command::new("docker")
+        .args([
+          "run", "-d", "--name", &client_container,
+          "--cap-add", "NET_ADMIN",
+          "-e", &format!("WG_CONF={}", config.replace("\r\n", "\n")),
+          "--entrypoint", "/bin/sh",
+          "alpine:latest",
+          "-c",
+          "apk add --no-cache wireguard-tools iproute2 >/dev/null 2>&1; \
+           mkdir -p /etc/wireguard; \
+           printf '%s' \"$WG_CONF\" > /etc/wireguard/wg0.conf; \
+           wg-quick up wg0 >/tmp/up.log 2>&1; \
+           exec tail -f /dev/null",
+        ])
+        .output()
+        .map_err(|error| format!("could not start the client container: {error}"))?;
+
+      if !run.status.success() {
+        return Err(format!(
+          "client container failed to start: {}",
+          String::from_utf8_lossy(&run.stderr).trim()
+        ));
+      }
+
+      // Cloud-init installs WireGuard on a fresh droplet, so allow generous time.
+      //
+      // The probe keys off the *exit status*, never stdout. `docker exec` output does not reach
+      // the caller when the daemon is reached over TCP, which is the case when it runs inside
+      // WSL2 — an earlier version read stdout here and so reported "no handshake" for every run,
+      // regardless of what the server was doing.
+      let deadline = std::time::Instant::now() + Duration::from_secs(300);
+
+      while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(10));
+
+        let handshook = Command::new("docker")
+          .args([
+            "exec", &client_container, "sh", "-c",
+            "test \"$(wg show wg0 latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)\" -gt 0",
+          ])
+          .status()
+          .map(|status| status.success())
+          .unwrap_or(false);
+
+        if handshook {
+          return Ok((endpoint, "confirmed".to_string()));
+        }
+      }
+
+      // Preserve the client's own view for diagnosis, again without relying on exec stdout.
+      let _ = Command::new("docker")
+        .args([
+          "exec", &client_container, "sh", "-c",
+          "{ echo '--- wg-quick ---'; cat /tmp/up.log; echo '--- wg show ---'; wg show; } > /tmp/diag.txt 2>&1",
+        ])
+        .status();
+      let _ = Command::new("docker")
+        .args(["cp", &format!("{client_container}:/tmp/diag.txt"), "./do-handshake-diag.txt"])
+        .status();
+
+      Err(format!(
+        "no handshake completed within 5 minutes against {endpoint}; client state written to do-handshake-diag.txt"
+      ))
+    })();
+
+    // Teardown, unconditionally and before any assertion.
+    let _ = Command::new("docker").args(["rm", "-f", &client_container]).output();
+    let cleanup = orchestrator.force_cleanup_vpn_node(
+      &providers,
+      &wireguard,
+      &db,
+      &secure_storage,
+      &node_id,
+    );
+
+    let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
+    assert!(
+      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      "the droplet must be destroyed, or it keeps billing: {cleanup:?}"
+    );
+
+    let (endpoint, handshake_stamp) = outcome.unwrap_or_else(|failure| panic!("{failure}"));
+
+    println!("\n=== DigitalOcean handshake confirmed ===");
+    println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} latest-handshake={handshake_stamp} ===");
+    println!("=== droplet destroyed ===\n");
+  }
+
   /// Full backend path against a real container, stopping short of touching the local machine.
   ///
   /// Covers what the adapter-level tests cannot: provisioning through the orchestrator, the

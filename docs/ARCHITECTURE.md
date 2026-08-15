@@ -74,7 +74,7 @@ The orchestrator and command layer operate against a shared NodeProvider abstrac
 The contract covers:
 
 - `init`: provision a node, persist the bootstrapping context, and return a bootstrap contract preview.
-- `wait_for_bootstrap_ready`: wait for provider-specific readiness markers and resolve the bootstrap output contract.
+- `wait_for_bootstrap_ready`: wait until the provider reports the node usable and resolve the endpoint. Nothing is read back from the node itself; the server public key is already known locally.
 - `get_status`: report the provider-level node status in a normalized form.
 - `exists`: check whether the node still exists.
 - `delete`: tear down the provider-side node resource.
@@ -118,19 +118,32 @@ State changes are validated in backend transition guards.
 3. Verify WireGuard for Windows is installed on the app host.
 4. Generate WireGuard keypair on the app host (where the app resides) and persist secrets locally.
 5. Provision node with an init script that receives and applies the generated public key.
-6. Wait for bootstrap readiness and verify node-side WireGuard configuration.
+6. Wait until the provider reports the node ready, and record the endpoint it reports.
 7. Configure and activate the client tunnel locally through the WireGuard tunnel service.
 8. Poll health and diagnostics.
 9. Disconnect, destroy, or force-cleanup as required.
 
 ## Key Generation And Bootstrap Requirements
 
-- Key generation location: WireGuard key generation must happen on the same machine where the app runs.
+- Key generation location: WireGuard key generation must happen on the same machine where the app runs. Both keypairs — server and client — are generated before the node is created.
 - Host dependency: the app host must have WireGuard for Windows installed. No driver DLL is bundled or downloaded.
-- Private key handling: private key material remains local to the app host and secure storage boundary.
-- Public key propagation: the generated public key is injected into the provider/node init script payload.
-- Node bootstrap contract: init script must set the public key in node WireGuard config during first boot.
-- Verification: bootstrap readiness must include confirmation that the node has applied the expected public key.
+- Private key handling: private key material remains local to the app host and secure storage boundary. The server's private key is written into the payload; the client's never leaves the machine.
+- Public key propagation: the client's public key is baked into the server's `[Peer]` block at render time, so the node boots already knowing its peer. There is no second round-trip to register it.
+- Node bootstrap contract: the init script applies the supplied keys during first boot and never generates its own.
+- Verification: the node writes a readiness marker as a self-check and debugging aid. The app never reads it — doing so would require a channel into the node that the contract forbids.
+
+### Readiness is provider-observable only
+
+A provider reports a node usable before its first-boot script has finished. A DigitalOcean droplet
+is `active` once the VM is running, which is well before cloud-init has installed WireGuard.
+
+The app cannot close that gap without a channel into the node, so it does not try. The tunnel is
+configured as soon as the endpoint is known, and WireGuard re-sends handshake initiations every few
+seconds until the server answers. A tunnel connected immediately after provisioning may therefore
+show no handshake for a short warm-up period, then complete on its own.
+
+This is why "connected" and "carrying traffic" are reported as separate facts: service state comes
+from `sc query`, and a handshake is only observable once the peer actually responds.
 
 ## Reliability Patterns
 

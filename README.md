@@ -24,10 +24,19 @@ Project inspiration:
 
 - Stores and validates provider credentials in Windows Credential Manager (no plaintext secrets in SQLite).
 - Uses a generalized provider orchestration path for node lifecycle operations.
-- Provisions a VPS-like node, waits for readiness, and applies WireGuard bootstrap flows.
+- Provisions a node on DigitalOcean or the local Docker dev provider, and connects to it. Both paths
+  are verified end to end against real infrastructure, including a completed WireGuard handshake.
 - Creates and manages local WireGuard client tunnels through the WireGuard for Windows service.
 - Shows health, diagnostics, and recovery guidance in the dashboard.
 - Supports conservative destroy and force cleanup for interrupted operations.
+
+### The provisioning contract
+
+Provisioning is write-only. Both keypairs are generated on the Windows host before the node exists,
+and everything the server needs — its private key, the client's public key, the full interface and
+peer config — is baked into a single payload handed to the provider at create time. Afterwards the
+app only polls provider metadata for status and endpoint. It never connects to the server it
+provisioned, so no SSH or remote shell is required or supported.
 
 ## Dev Docker Provider
 
@@ -95,6 +104,17 @@ Remove containers left by an interrupted run:
 ```bash
 npm run docker:cleanup
 ```
+
+Against real DigitalOcean infrastructure. **This creates billable droplets**, destroyed on every
+exit path including panics:
+
+```bash
+GOATSTARE_DO_TEST_TOKEN=<token> npm run backend:test:do:real
+```
+
+It provisions a droplet, connects to it as a real WireGuard client, confirms a handshake, and
+destroys it — proving cloud-init brings the server up from the baked-in payload alone. See
+[Testing](docs/TESTING.md).
 
 ## Documentation
 

@@ -42,8 +42,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 Docker lifecycle or tunnel lifecycle changes:
 
 ```bash
-npm run e2e:docker:preflight
-npm run tauri:e2e:docker:real
+npm run e2e:preflight
+npm run tauri:e2e:provisioning
 npm run backend:test:docker:real
 ```
 

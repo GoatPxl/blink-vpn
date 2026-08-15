@@ -22,8 +22,8 @@ Run and record outcomes for:
 npm run typecheck
 npm run lint
 cargo test --manifest-path src-tauri/Cargo.toml
-npm run e2e:docker:preflight
-npm run tauri:e2e:docker:real
+npm run e2e:preflight
+npm run tauri:e2e:provisioning
 npm run backend:test:docker:real
 ```
 

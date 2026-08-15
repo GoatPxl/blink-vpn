@@ -52,8 +52,8 @@ In app:
 ## E2E Validation Setup
 
 ```bash
-npm run e2e:docker:preflight
-npm run tauri:e2e:docker:real
+npm run e2e:preflight
+npm run tauri:e2e:provisioning
 ```
 
 ## Runtime Notes
