@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 pub fn run() {
-  #[cfg(feature = "e2e-testing")]
-  let builder = tauri::Builder::default().plugin(tauri_plugin_playwright::init());
-
-  #[cfg(not(feature = "e2e-testing"))]
-  let builder = tauri::Builder::default();
-
-  builder
+  // One builder, no test-only variant.
+  //
+  // `tauri-plugin-playwright` used to be registered behind an `e2e-testing` feature. The E2E lane
+  // drives the WebView2 devtools protocol directly instead, so the plugin was an unreachable
+  // second mechanism kept alive by a feature flag — and it shipped a capability reference that a
+  // production build could not resolve.
+  tauri::Builder::default()
     .setup(move |app| {
       let log_level = if cfg!(debug_assertions) {
         log::LevelFilter::Info

@@ -59,28 +59,41 @@ npm install
 npm run tauri:dev
 ```
 
-Run real desktop E2E lane:
+### Tests
+
+Backend unit and integration tests:
 
 ```bash
-npm run frontend:e2e
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-Run Tauri app with Playwright plugin enabled for native-webview E2E work:
-
-```bash
-npm run tauri:dev:e2e
-```
-
-Run real Docker backend adapter integration test (no mock fixtures):
+Backend tests against a real Docker daemon (provision, delete, client config):
 
 ```bash
 npm run backend:test:docker:real
 ```
 
-Run real Tauri Docker flow E2E (no mock fixtures):
+End-to-end through the real app and the real daemon. These drive the WebView2
+devtools protocol directly, so no Tauri test plugin is involved. Check the
+environment first:
 
 ```bash
-npm run tauri:e2e:docker:real
+npm run e2e:preflight
+npm run tauri:e2e:provisioning
+```
+
+Connecting a tunnel installs a WireGuard tunnel service, which needs
+administrator rights. Run this from an elevated terminal, or it stops on a UAC
+prompt Playwright cannot answer:
+
+```bash
+npm run tauri:e2e:connect
+```
+
+Remove containers left by an interrupted run:
+
+```bash
+npm run docker:cleanup
 ```
 
 ## Documentation

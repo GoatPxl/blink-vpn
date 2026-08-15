@@ -203,6 +203,8 @@ Run what your change touches. Report **real results**, including failures.
 | Rust backend only | `cargo test --manifest-path src-tauri/Cargo.toml` |
 | Cross-boundary | both of the above |
 | Docker provider / tunnel lifecycle | `npm run backend:test:docker:real` (requires Docker) |
+| UI or command surface | `npm run tauri:e2e:provisioning` (requires Docker) |
+| Connect / disconnect | `npm run tauri:e2e:connect` (requires Docker **and an elevated shell**) |
 
 Required test types for any non-trivial change:
 
@@ -214,11 +216,15 @@ Required test types for any non-trivial change:
 Rules: deterministic only, no real external API calls in the normal suite, both happy path and key
 failure paths.
 
-**Known-broken lane — do not report as passing.** `npm run tauri:e2e:docker:real` cannot currently
-run: `node_modules/@srsholmes/` is empty while `tests/e2e/fixtures/tauri-real.ts` imports it by hard
-path into `node_modules`, and the harness connects to a POSIX socket `/tmp/tauri-playwright.sock`
-while the Rust plugin listens on `tcp://127.0.0.1:6274`. Fix it deliberately or state that it was
-skipped.
+**A test that cannot fail is worse than no test.** The E2E suite once waited for
+"the expected message *or* any error title", so it passed whether the app worked or not — a run
+that provisioned nothing and connected nothing looked identical to a healthy one. Never accept an
+error state as a success condition, and never assert something that is true for almost any input.
+Assert the specific outcome, and prefer backend state over UI text where both are available.
+
+The E2E lane drives the WebView2 devtools protocol directly (`--remote-debugging-port`). There is
+no Tauri test plugin; `tauri-plugin-playwright` and its `e2e-testing` feature were removed because
+nothing reached them. Do not reintroduce a second harness.
 
 ---
 
