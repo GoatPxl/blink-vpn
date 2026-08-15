@@ -735,6 +735,7 @@ impl Orchestrator {
           Some(&droplet.droplet_id.to_string()),
           Some(&droplet.public_ipv4),
           None,
+          Some(droplet.endpoint_port),
         )
         .map_err(|source| OrchestratorError::Database {
           detail: "Failed storing droplet reference/IP for node record.".to_string(),
@@ -780,6 +781,9 @@ impl Orchestrator {
           Some(&droplet.droplet_id.to_string()),
           Some(&contract.server_endpoint_ip),
           Some(&contract.server_public_key),
+          // The adapter reports the port the client should dial, which for the Docker dev
+          // provider is the published host port rather than the in-container listen port.
+          Some(contract.listen_port),
         )
         .map_err(|source| OrchestratorError::Database {
           detail: "Failed persisting server endpoint and public key.".to_string(),
@@ -1971,7 +1975,7 @@ fn load_connect_config_for_tunnel(
       detail: "VPN node is missing server public key; cannot connect tunnel.".to_string(),
     })?;
 
-  let endpoint_ip = resolve_server_endpoint_ip_for_connect(provider_slug, node)?;
+  let endpoint_ip = resolve_server_endpoint_ip_for_connect(node)?;
 
   let private_key_ref = tunnel
     .client_private_key_ref
@@ -2008,7 +2012,9 @@ fn load_connect_config_for_tunnel(
     dns_server: tunnel.dns_server.clone(),
     server_public_key,
     server_endpoint_ip: endpoint_ip,
-    server_listen_port: DEFAULT_WIREGUARD_PORT,
+    // Reported by the provider adapter at provision time. Falls back to the default only for
+    // nodes created before per-node ports existed.
+    server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
     allowed_ips,
     persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
   };
@@ -2020,14 +2026,14 @@ fn load_connect_config_for_tunnel(
     })
 }
 
+/// The endpoint comes from whatever the provider adapter reported at provision time.
+///
+/// This used to special-case `provider_slug == "docker"` and return a hardcoded `127.0.0.1`.
+/// Adapters now report their own endpoint — Docker persists `127.0.0.1` plus its published host
+/// port like any other node — so the orchestrator no longer needs to know Docker exists.
 fn resolve_server_endpoint_ip_for_connect(
-  provider_slug: &str,
   node: &crate::backend::db::VpnNodeRecord,
 ) -> Result<String, OrchestratorError> {
-  if provider_slug == "docker" {
-    return Ok("127.0.0.1".to_string());
-  }
-
   node.public_ipv4.clone().ok_or_else(|| OrchestratorError::InvalidState {
     node_id: node.id.clone(),
     detail: "VPN node is missing public endpoint IP; cannot connect tunnel.".to_string(),
@@ -2152,6 +2158,7 @@ mod tests {
       Ok(ProvisionedDroplet {
         droplet_id: 42,
         public_ipv4: "203.0.113.90".to_string(),
+        endpoint_port: DEFAULT_WIREGUARD_PORT,
       })
     }
 
@@ -2448,6 +2455,7 @@ mod tests {
         Some("42"),
         Some("203.0.113.10"),
         Some("server-pub-key-123"),
+        Some(51820),
       )
       .expect("runtime details should persist");
     db
@@ -2484,6 +2492,7 @@ mod tests {
         Some("42"),
         Some("203.0.113.10"),
         Some("server-pub-key-123"),
+        Some(51820),
       )
       .expect("runtime details should persist");
     db
@@ -2635,6 +2644,7 @@ mod tests {
         Some("42"),
         Some("203.0.113.10"),
         Some("server-pub-key-123"),
+        Some(51820),
       )
       .expect("runtime details should persist");
 
@@ -2680,6 +2690,7 @@ mod tests {
         Some("42"),
         Some("203.0.113.10"),
         Some("server-pub-key-123"),
+        Some(51820),
       )
       .expect("runtime details should persist");
 
@@ -2819,8 +2830,11 @@ mod tests {
     assert_eq!(state.activate_calls, 0);
   }
 
+  /// The endpoint is whatever the adapter reported, with no provider branching. A Docker node
+  /// persists `127.0.0.1` because its adapter said so, not because the orchestrator special-cases
+  /// the slug.
   #[test]
-  fn connect_endpoint_uses_localhost_for_docker_provider() {
+  fn connect_endpoint_uses_adapter_reported_endpoint_verbatim() {
     let node = crate::backend::db::VpnNodeRecord {
       id: "node-docker".to_string(),
       provider_id: TEST_PROVIDER_ID.to_string(),
@@ -2834,23 +2848,26 @@ mod tests {
       lifecycle_status: NodeLifecycleStatus::Ready,
       provider_status: None,
       external_ref: Some("42".to_string()),
-      public_ipv4: Some("172.18.0.11".to_string()),
+      public_ipv4: Some("127.0.0.1".to_string()),
       server_public_key: Some("server-public-key".to_string()),
       error_reason: None,
       created_at: "now".to_string(),
       updated_at: "now".to_string(),
       client_private_key_ref: None,
       client_public_key: None,
+      endpoint_port: Some(49154),
     };
 
-    let endpoint = resolve_server_endpoint_ip_for_connect("docker", &node)
-      .expect("docker endpoint resolution should succeed");
+    let endpoint = resolve_server_endpoint_ip_for_connect(&node)
+      .expect("endpoint resolution should succeed");
 
     assert_eq!(endpoint, "127.0.0.1");
+    // The published host port travels with the node, so two Docker nodes can coexist.
+    assert_eq!(node.endpoint_port, Some(49154));
   }
 
   #[test]
-  fn connect_endpoint_requires_public_ip_for_non_docker_provider() {
+  fn connect_endpoint_requires_public_ip() {
     let node = crate::backend::db::VpnNodeRecord {
       id: "node-do".to_string(),
       provider_id: TEST_PROVIDER_ID.to_string(),
@@ -2871,9 +2888,10 @@ mod tests {
       updated_at: "now".to_string(),
       client_private_key_ref: None,
       client_public_key: None,
+      endpoint_port: None,
     };
 
-    let result = resolve_server_endpoint_ip_for_connect("do", &node);
+    let result = resolve_server_endpoint_ip_for_connect(&node);
 
     assert!(matches!(result, Err(OrchestratorError::InvalidState { .. })));
   }
@@ -2906,6 +2924,7 @@ mod tests {
         Some("99"),
         Some("203.0.113.10"),
         Some("server-pub-key-123"),
+        Some(51820),
       )
       .expect("runtime details should persist");
 
@@ -3019,6 +3038,7 @@ mod tests {
         Some("42"),
         Some("203.0.113.5"),
         None,
+        Some(51820),
       )
       .expect("runtime details should persist");
     db

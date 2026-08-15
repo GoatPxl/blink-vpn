@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::backend::bootstrap::BootstrapOutputContract;
+use crate::backend::bootstrap::{BootstrapOutputContract, DEFAULT_WIREGUARD_PORT};
 use crate::backend::crypto::keypair::WireGuardKeypair;
 use crate::backend::db::{Database, DbError, ProviderRecord, ProviderStatus};
 use crate::backend::secure_storage::{SecretStoreError, SecureStorage};
@@ -101,6 +101,23 @@ impl DigitalOceanProviderAdapter {
       client,
       config,
     })
+  }
+
+  /// Construct against a specific API base URL so tests can point at a local mock server.
+  #[cfg(test)]
+  fn with_base_url(base_url: &str) -> Result<Self, ProviderAdapterError> {
+    let config = DigitalOceanConfig::phase1_defaults();
+    let client = DigitalOceanApiClient::new_with_timeout(
+      base_url,
+      RetryPolicy::digitalocean_default(),
+      config.request_timeout,
+    )
+    .map_err(|source| ProviderAdapterError::Api {
+      detail: "Unable to initialize DigitalOcean API client.".to_string(),
+      source,
+    })?;
+
+    Ok(Self { client, config })
   }
 }
 
@@ -258,19 +275,59 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     Ok(ProvisionedDroplet {
       droplet_id: active.id,
       public_ipv4,
+      // A droplet's WireGuard listen port is the port the client dials; there is no port
+      // translation in front of it, unlike the Docker dev path.
+      endpoint_port: DEFAULT_WIREGUARD_PORT,
     })
   }
 
+  /// Readiness for DigitalOcean is "the droplet is active and has a public IPv4".
+  ///
+  /// This used to return `Unsupported`, because the design required reading a marker file off the
+  /// droplet — which needs SSH the app does not have. That step is gone: the server's keypair is
+  /// generated locally and baked into cloud-init, so its public key is already known here and
+  /// there is nothing left to retrieve. `create_droplet` above has already polled to active, so
+  /// this only has to confirm the droplet is still healthy and report the endpoint.
   fn wait_for_bootstrap_ready(
     &self,
-    _token: &str,
+    token: &str,
     request: &BootstrapWaitRequest,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
-    Err(ProviderAdapterError::Unsupported {
-      detail: format!(
-        "Cloud-init readiness marker retrieval from '{}' requires a remote retrieval channel and is not yet available in this phase.",
-        request.readiness_marker_path
-      ),
+    let droplet = self
+      .client
+      .get_droplet(token, request.droplet_id)
+      .map_err(|source| ProviderAdapterError::Api {
+        detail: "Could not confirm DigitalOcean droplet state before completing provisioning."
+          .to_string(),
+        source,
+      })?;
+
+    if !droplet.status.trim().eq_ignore_ascii_case("active") {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "DigitalOcean droplet is '{}' rather than active; provisioning cannot complete.",
+          droplet.status
+        ),
+      });
+    }
+
+    let public_ipv4 = if request.endpoint_ip.trim().is_empty() {
+      self
+        .client
+        .extract_public_ipv4(&droplet)
+        .map_err(|source| ProviderAdapterError::Api {
+          detail: "Active droplet did not expose public IPv4.".to_string(),
+          source,
+        })?
+    } else {
+      request.endpoint_ip.clone()
+    };
+
+    Ok(BootstrapOutputContract {
+      server_endpoint_ip: public_ipv4,
+      // Echoed from what the caller generated and baked into cloud-init, not read back.
+      server_public_key: request.server_keypair.public_key.clone(),
+      listen_port: DEFAULT_WIREGUARD_PORT,
     })
   }
 
@@ -317,6 +374,12 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
 pub struct ProvisionedDroplet {
   pub droplet_id: u64,
   pub public_ipv4: String,
+  /// UDP port the *client* should dial to reach this node's WireGuard interface.
+  ///
+  /// Adapters report their own endpoint rather than the orchestrator assuming one. For
+  /// DigitalOcean this is the server's listen port. For Docker it is the ephemeral host port
+  /// published to the container, which differs per node so several can run at once.
+  pub endpoint_port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -928,7 +991,7 @@ mod tests {
 
   use rusqlite::{Connection, params};
 
-  use crate::backend::bootstrap::BootstrapOutputContract;
+  use crate::backend::bootstrap::{BootstrapOutputContract, DEFAULT_WIREGUARD_PORT};
   use crate::backend::db::Database;
   use crate::backend::secure_storage::SecureStorage;
 
@@ -947,6 +1010,78 @@ mod tests {
       .as_nanos();
     path.push(format!("goatstare_provider_{test_name}_{nanos}.sqlite3"));
     path
+  }
+
+  /// DigitalOcean readiness must work without any channel into the droplet.
+  ///
+  /// This previously returned `Unsupported` unconditionally, because the design needed to read a
+  /// marker file off the droplet — which requires SSH the app does not have. Every production
+  /// provision therefore created a billable droplet, failed here, and rolled back. The server
+  /// keypair is now generated locally and baked into cloud-init, so the public key is already
+  /// known and readiness is just "the droplet is active with an IP".
+  #[test]
+  fn digitalocean_bootstrap_ready_uses_locally_known_key_and_droplet_status() {
+    let mut server = mockito::Server::new();
+    let keypair = generate_server_keypair().expect("keypair should generate");
+
+    let droplet = server
+      .mock("GET", "/v2/droplets/4242")
+      .with_status(200)
+      .with_header("content-type", "application/json")
+      .with_body(
+        r#"{"droplet":{"id":4242,"name":"gs-node","status":"active","networks":{"v4":[{"ip_address":"203.0.113.77","type":"public"}]}}}"#,
+      )
+      .create();
+
+    let adapter = super::DigitalOceanProviderAdapter::with_base_url(&server.url())
+      .expect("adapter should construct against mock server");
+
+    let contract = adapter
+      .wait_for_bootstrap_ready(
+        "dop_v1_test_token",
+        &BootstrapWaitRequest {
+          droplet_id: 4242,
+          endpoint_ip: String::new(),
+          readiness_marker_path: "/var/lib/goatstare/bootstrap-ready.json".to_string(),
+          server_keypair: keypair.clone(),
+        },
+      )
+      .expect("readiness should resolve without any remote retrieval channel");
+
+    droplet.assert();
+    assert_eq!(contract.server_endpoint_ip, "203.0.113.77");
+    assert_eq!(contract.listen_port, DEFAULT_WIREGUARD_PORT);
+    // Echoed from what was baked into cloud-init, never fetched from the droplet.
+    assert_eq!(contract.server_public_key, keypair.public_key);
+  }
+
+  #[test]
+  fn digitalocean_bootstrap_ready_rejects_a_droplet_that_is_not_active() {
+    let mut server = mockito::Server::new();
+
+    let _droplet = server
+      .mock("GET", "/v2/droplets/99")
+      .with_status(200)
+      .with_header("content-type", "application/json")
+      .with_body(r#"{"droplet":{"id":99,"name":"gs-node","status":"new","networks":{"v4":[]}}}"#)
+      .create();
+
+    let adapter = super::DigitalOceanProviderAdapter::with_base_url(&server.url())
+      .expect("adapter should construct against mock server");
+
+    let error = adapter
+      .wait_for_bootstrap_ready(
+        "dop_v1_test_token",
+        &BootstrapWaitRequest {
+          droplet_id: 99,
+          endpoint_ip: String::new(),
+          readiness_marker_path: "/var/lib/goatstare/bootstrap-ready.json".to_string(),
+          server_keypair: generate_server_keypair().expect("keypair should generate"),
+        },
+      )
+      .expect_err("a droplet that is not active must not report ready");
+
+    assert!(error.to_string().contains("active"));
   }
 
   #[derive(Clone)]
@@ -992,6 +1127,7 @@ mod tests {
       Ok(ProvisionedDroplet {
         droplet_id: 42,
         public_ipv4: "203.0.113.10".to_string(),
+        endpoint_port: DEFAULT_WIREGUARD_PORT,
       })
     }
 

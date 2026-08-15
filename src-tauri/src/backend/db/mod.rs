@@ -18,6 +18,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (10, include_str!("../../../migrations/0010_tunnel_client_config_metadata.sql")),
   (11, include_str!("../../../migrations/0011_app_settings.sql")),
   (12, include_str!("../../../migrations/0012_vpn_node_client_key.sql")),
+  (13, include_str!("../../../migrations/0013_vpn_node_endpoint_port.sql")),
 ];
 
 pub const WIREGUARD_CONNECTION_MODE_SETTING_KEY: &str = "wireguard_connection_mode";
@@ -264,6 +265,8 @@ pub struct VpnNodeRecord {
   pub client_private_key_ref: Option<String>,
   #[serde(skip_serializing)]
   pub client_public_key: Option<String>,
+  /// UDP port the client dials, as reported by the provider adapter at provision time.
+  pub endpoint_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -704,7 +707,7 @@ impl Database {
         "SELECT id, provider_id, name, region, plan_key, size_slug, price_monthly_usd,
           price_hourly_usd, price_source_timestamp, lifecycle_status, external_ref,
           public_ipv4, server_public_key, error_reason, created_at, updated_at,
-          client_private_key_ref, client_public_key
+          client_private_key_ref, client_public_key, endpoint_port
          FROM vpn_nodes
          ORDER BY created_at ASC",
       )
@@ -743,7 +746,7 @@ impl Database {
         "SELECT id, provider_id, name, region, plan_key, size_slug, price_monthly_usd,
           price_hourly_usd, price_source_timestamp, lifecycle_status, external_ref,
           public_ipv4, server_public_key, error_reason, created_at, updated_at,
-          client_private_key_ref, client_public_key
+          client_private_key_ref, client_public_key, endpoint_port
          FROM vpn_nodes
          WHERE id = ?1",
         params![id],
@@ -815,6 +818,7 @@ impl Database {
     external_ref: Option<&str>,
     public_ipv4: Option<&str>,
     server_public_key: Option<&str>,
+    endpoint_port: Option<u16>,
   ) -> Result<(), DbError> {
     let connection = self.open_connection()?;
     let changed = connection
@@ -823,9 +827,16 @@ impl Database {
          SET external_ref = ?2,
              public_ipv4 = ?3,
              server_public_key = ?4,
+             endpoint_port = COALESCE(?5, endpoint_port),
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?1",
-        params![id, external_ref, public_ipv4, server_public_key],
+        params![
+          id,
+          external_ref,
+          public_ipv4,
+          server_public_key,
+          endpoint_port.map(i64::from)
+        ],
       )
       .map_err(|source| DbError::Query {
         action: "update_vpn_node_runtime_details",
@@ -1332,6 +1343,7 @@ fn map_vpn_node_row(row: &Row<'_>) -> rusqlite::Result<VpnNodeRecord> {
     updated_at: row.get(15)?,
     client_private_key_ref: row.get(16)?,
     client_public_key: row.get(17)?,
+    endpoint_port: row.get::<_, Option<i64>>(18)?.and_then(|value| u16::try_from(value).ok()),
   })
 }
 

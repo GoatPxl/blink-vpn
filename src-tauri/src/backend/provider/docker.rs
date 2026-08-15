@@ -1,11 +1,7 @@
 use std::process::Command;
-use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::backend::bootstrap::{
-  BootstrapOutputContract, ReadinessMarker, DEFAULT_INTERFACE_NAME, DEFAULT_WIREGUARD_PORT,
-};
-use crate::backend::crypto::keypair::WireGuardKeypair;
+use crate::backend::bootstrap::{BootstrapOutputContract, READINESS_MARKER_PATH};
 
 use super::{
   Account, BootstrapWaitRequest, ProviderAdapterError, ProviderDropletStatus, ProviderPlanPricing,
@@ -14,8 +10,40 @@ use super::{
 
 const DOCKER_REGION: &str = "docker-local";
 const DOCKER_IMAGE: &str = "ubuntu:24.04";
-const DOCKER_INIT_SCRIPT_PATH: &str = "/usr/local/bin/goatstare-docker-init.sh";
-const DOCKER_WIREGUARD_PUBLISH: &str = "127.0.0.1:51820:51820/udp";
+
+/// The rendered payload is handed to the container as an environment variable at create time and
+/// written to this path by the entrypoint.
+///
+/// This mirrors how a cloud provider accepts user-data: a string supplied with the create call,
+/// never a file pushed in afterwards. It was previously a read-only bind mount, but a host bind
+/// mount only works when the CLI can translate Windows paths for the daemon — with
+/// `DOCKER_HOST=tcp://...` it cannot, and provisioning failed with `invalid volume specification`.
+/// An environment variable has no such coupling and works against any daemon connection.
+const DOCKER_INIT_PAYLOAD_ENV: &str = "GOATSTARE_INIT_PAYLOAD";
+const DOCKER_INIT_SCRIPT_PATH: &str = "/goatstare-init.sh";
+
+/// Container-internal WireGuard port. The host-side port is allocated per node by Docker.
+const DOCKER_CONTAINER_WIREGUARD_PORT: u16 = 51820;
+const DOCKER_WIREGUARD_PUBLISH: &str = "127.0.0.1::51820/udp";
+
+/// Readiness is observed through Docker's own healthcheck, which Docker runs inside the container
+/// and reports as provider metadata via `docker inspect`. The app never execs anything itself.
+const DOCKER_HEALTH_INTERVAL: &str = "2s";
+const DOCKER_HEALTH_TIMEOUT: &str = "5s";
+const DOCKER_HEALTH_RETRIES: &str = "3";
+
+/// Failures during the start period do not mark the container unhealthy.
+///
+/// This must cover the whole bootstrap, not just container startup: on a bare base image the
+/// script spends ~20s in `apt-get install` before the marker can possibly exist. With a short
+/// start period the healthcheck flipped to `unhealthy` while bootstrap was still legitimately
+/// running, and provisioning aborted on a node that would have come up fine. Real failures are
+/// still caught immediately, because a failing script exits the container.
+const DOCKER_HEALTH_START_PERIOD: &str = "180s";
+
+/// Generous enough to cover an `apt-get install` on a bare base image. Kept in step with
+/// `DOCKER_HEALTH_START_PERIOD`.
+const DOCKER_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Copy)]
 struct DockerPlanSpec {
@@ -68,36 +96,6 @@ pub struct DockerProviderAdapter;
 impl DockerProviderAdapter {
   pub fn new() -> Self {
     Self
-  }
-
-  fn shell_single_quote(value: &str) -> String {
-    let escaped = value.replace('\'', "'\"'\"'");
-    format!("'{}'", escaped)
-  }
-
-  fn validate_wireguard_interface_name(
-    interface_name: &str,
-  ) -> Result<&str, ProviderAdapterError> {
-    let value = interface_name.trim();
-    if value.is_empty() {
-      return Err(ProviderAdapterError::Unsupported {
-        detail: "Docker client peer update needs a non-empty interface name.".to_string(),
-      });
-    }
-
-    if !value
-      .chars()
-      .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-    {
-      return Err(ProviderAdapterError::Unsupported {
-        detail: format!(
-          "Docker client peer update interface name '{}' contains unsupported characters.",
-          value
-        ),
-      });
-    }
-
-    Ok(value)
   }
 
   fn validate_faux_token(token: &str) -> Result<(), ProviderAdapterError> {
@@ -188,11 +186,32 @@ impl DockerProviderAdapter {
     "127.0.0.1"
   }
 
+  /// Shell run by the container entrypoint: materialise the payload, run it, then idle.
+  ///
+  /// The payload arrives as an environment variable, so the container writes its own copy exactly
+  /// as cloud-init writes user-data to disk before running it. `printf '%s'` is used rather than
+  /// `echo` so nothing in the payload is interpreted, and the keepalive lives here rather than in
+  /// the shared script, which must terminate normally under cloud-init.
+  fn build_entrypoint_command() -> String {
+    format!(
+      "set -e; printf '%s' \"${DOCKER_INIT_PAYLOAD_ENV}\" > {DOCKER_INIT_SCRIPT_PATH}; chmod 700 {DOCKER_INIT_SCRIPT_PATH}; {DOCKER_INIT_SCRIPT_PATH}; exec tail -f /dev/null"
+    )
+  }
+
+  /// Build the `docker run` invocation that delivers and executes the bootstrap payload.
+  ///
+  /// Three things make this a faithful emulation of a cloud provider handing over user-data:
+  ///
+  /// - the payload is supplied with the create call, not pushed in later via `docker exec`;
+  /// - the script runs as the entrypoint, so the container's own lifecycle reflects bootstrap
+  ///   success or failure, exactly as a failed cloud-init leaves an unusable droplet;
+  /// - the host port is left for Docker to allocate, so nodes do not contend for one fixed port.
   fn build_container_run_args(
     container_name: &str,
     droplet_label: &str,
     cpus: &str,
     memory: &str,
+    init_payload: &str,
   ) -> Vec<String> {
     vec![
       "run".to_string(),
@@ -213,11 +232,53 @@ impl DockerProviderAdapter {
       cpus.to_string(),
       "--memory".to_string(),
       memory.to_string(),
+      "-e".to_string(),
+      format!("{DOCKER_INIT_PAYLOAD_ENV}={init_payload}"),
+      "--health-cmd".to_string(),
+      format!("test -f {}", READINESS_MARKER_PATH),
+      "--health-interval".to_string(),
+      DOCKER_HEALTH_INTERVAL.to_string(),
+      "--health-timeout".to_string(),
+      DOCKER_HEALTH_TIMEOUT.to_string(),
+      "--health-retries".to_string(),
+      DOCKER_HEALTH_RETRIES.to_string(),
+      "--health-start-period".to_string(),
+      DOCKER_HEALTH_START_PERIOD.to_string(),
+      "--entrypoint".to_string(),
+      "/bin/bash".to_string(),
       DOCKER_IMAGE.to_string(),
-      "sh".to_string(),
       "-c".to_string(),
-      "while true; do sleep 3600; done".to_string(),
+      Self::build_entrypoint_command(),
     ]
+  }
+
+  /// Ask Docker which host port it allocated for the container's WireGuard port.
+  ///
+  /// This is provider metadata, the Docker analogue of DigitalOcean reporting a droplet's public
+  /// IPv4 — not an inspection of anything inside the server.
+  fn resolve_published_wireguard_port(
+    container_id: &str,
+  ) -> Result<u16, ProviderAdapterError> {
+    let raw = Self::run_docker(
+      &[
+        "port",
+        container_id,
+        &format!("{DOCKER_CONTAINER_WIREGUARD_PORT}/udp"),
+      ],
+      "resolve published WireGuard host port for Docker container",
+    )?;
+
+    // `docker port` prints one mapping per line, e.g. `127.0.0.1:49154`.
+    raw
+      .lines()
+      .filter_map(|line| line.trim().rsplit_once(':'))
+      .filter_map(|(_, port)| port.trim().parse::<u16>().ok())
+      .find(|port| *port != 0)
+      .ok_or_else(|| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Docker did not report a published host port for {DOCKER_CONTAINER_WIREGUARD_PORT}/udp (got '{raw}')."
+        ),
+      })
   }
 
   fn container_ids_for_droplet(droplet_id: u64) -> Result<Vec<String>, ProviderAdapterError> {
@@ -266,36 +327,6 @@ impl DockerProviderAdapter {
     .map(|value| value.trim().to_ascii_lowercase())
   }
 
-  fn is_wireguard_port_allocation_error(detail: &str) -> bool {
-    let lowered = detail.to_ascii_lowercase();
-    lowered.contains("port is already allocated")
-      || (lowered.contains("bind") && lowered.contains("51820"))
-  }
-
-  fn list_goatstare_containers_on_wireguard_port() -> Result<Vec<String>, ProviderAdapterError> {
-    let output = Self::run_docker(
-      &[
-        "ps",
-        "-a",
-        "--filter",
-        "label=goatstare.provider=docker",
-        "--filter",
-        "publish=51820/udp",
-        "--format",
-        "{{.ID}}",
-      ],
-      "list GoatStare Docker containers publishing WireGuard UDP port",
-    )?;
-
-    Ok(
-      output
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect(),
-    )
-  }
-
   fn remove_containers(container_ids: &[String], action: &str) -> Result<(), ProviderAdapterError> {
     if container_ids.is_empty() {
       return Ok(());
@@ -332,21 +363,19 @@ impl DockerProviderAdapter {
     Self::remove_containers(&ids, "remove stale Docker container by exact name")
   }
 
-  fn try_cleanup_stale_wireguard_port_containers() -> Result<bool, ProviderAdapterError> {
-    let ids = Self::list_goatstare_containers_on_wireguard_port()?;
-    if ids.is_empty() {
-      return Ok(false);
-    }
+  // Container inspection helpers below are test-only instrumentation.
+  //
+  // They are gated so they cannot drift back into the provisioning path, which must never exec
+  // into or copy out of a provisioned node. Tests use them to verify container state after the
+  // fact, which is observation rather than provisioning.
 
-    Self::remove_containers(&ids, "remove stale GoatStare Docker containers blocking WireGuard UDP port")?;
-    Ok(true)
-  }
-
+  #[cfg(test)]
   fn docker_exec(container_id: &str, script: &str, action: &str) -> Result<String, ProviderAdapterError> {
     // On Windows Docker hosts, `docker exec` can return empty stdout unless stdin stays attached.
     Self::run_docker(&["exec", "-i", container_id, "sh", "-c", script], action)
   }
 
+  #[cfg(test)]
   fn copy_container_file_to_host_text(
     container_id: &str,
     container_path: &str,
@@ -384,6 +413,7 @@ impl DockerProviderAdapter {
     Ok(content)
   }
 
+  #[cfg(test)]
   fn copy_container_file_to_host_text_with_retries(
     container_id: &str,
     container_path: &str,
@@ -414,6 +444,7 @@ impl DockerProviderAdapter {
     }))
   }
 
+  #[cfg(test)]
   fn read_container_text_with_fallback(
     container_id: &str,
     container_path: &str,
@@ -443,74 +474,6 @@ impl DockerProviderAdapter {
     }
   }
 
-  fn copy_host_text_to_container(
-    container_id: &str,
-    content: &str,
-    container_path: &str,
-    action: &str,
-  ) -> Result<(), ProviderAdapterError> {
-    if let Some(parent) = Path::new(container_path).parent().and_then(|value| value.to_str()) {
-      if !parent.trim().is_empty() {
-        let parent_path = Self::shell_single_quote(parent);
-        let _ = Self::docker_exec(
-          container_id,
-          &format!("set -eu; mkdir -p {parent};", parent = parent_path),
-          "prepare destination directory for Docker copy",
-        )?;
-      }
-    }
-
-    let mut host_path = std::env::temp_dir();
-    let stamp = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .map(|value| value.as_nanos())
-      .unwrap_or(0);
-    host_path.push(format!("goatstare-docker-copy-in-{stamp}.tmp"));
-
-    std::fs::write(&host_path, content).map_err(|source| ProviderAdapterError::Unsupported {
-      detail: format!(
-        "Could not write temporary host file '{}' for Docker copy: {}",
-        host_path.display(),
-        source
-      ),
-    })?;
-
-    let source = host_path.to_string_lossy().to_string();
-    let destination = format!("{container_id}:{container_path}");
-    let copy_result = Self::run_docker(&["cp", &source, &destination], action);
-
-    let _ = std::fs::remove_file(&host_path);
-
-    copy_result.map(|_| ())
-  }
-
-  fn stage_docker_init_script(
-    container_id: &str,
-    init_script: &str,
-  ) -> Result<(), ProviderAdapterError> {
-    if init_script.trim().is_empty() {
-      return Err(ProviderAdapterError::Unsupported {
-        detail: "Docker init payload was empty; bootstrap render must provide a non-empty init script."
-          .to_string(),
-      });
-    }
-
-    Self::copy_host_text_to_container(
-      container_id,
-      init_script,
-      DOCKER_INIT_SCRIPT_PATH,
-      "copy Docker init script into container",
-    )?;
-
-    let _ = Self::docker_exec(
-      container_id,
-      &format!("set -eu; chmod 700 {DOCKER_INIT_SCRIPT_PATH};"),
-      "set Docker init script permissions",
-    )?;
-
-    Ok(())
-  }
-
   /// The caller must supply a fully-rendered payload.
   ///
   /// This used to fall back to `render_docker_init(&BootstrapParams::default())`. That is no
@@ -529,94 +492,111 @@ impl DockerProviderAdapter {
     Ok(init_script.to_string())
   }
 
-  fn initialize_wireguard_server_in_container(
-    container_id: &str,
-    keypair: &WireGuardKeypair,
-    readiness_marker_path: &str,
-  ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
-    let _ = Self::docker_exec(
-      container_id,
-      "set -eu; mkdir -p /etc/wireguard;",
-      "prepare WireGuard directory before staging keys",
-    )?;
+  fn container_health(container_id: &str) -> Result<String, ProviderAdapterError> {
+    // Containers without a healthcheck have no .State.Health; the `if` keeps the template valid.
+    Self::run_docker(
+      &[
+        "inspect",
+        "--format",
+        "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+        container_id,
+      ],
+      "inspect Docker container health status",
+    )
+    .map(|value| value.trim().to_ascii_lowercase())
+  }
 
-    Self::copy_host_text_to_container(
-      container_id,
-      &format!("{}\n", keypair.private_key),
-      "/etc/wireguard/server_private.key",
-      "stage server private key in container",
-    )?;
+  /// Tail of the container's output, for surfacing bootstrap failures.
+  ///
+  /// `docker logs` reads what the container already emitted; it does not execute anything, and it
+  /// works on an exited container, which is exactly the case worth diagnosing.
+  ///
+  /// Both streams are merged deliberately: Docker sends container stderr to the CLI's stderr, so
+  /// reading only stdout hid the error output from a failing bootstrap — which is the half that
+  /// actually explains the failure.
+  fn container_log_tail(container_id: &str) -> String {
+    let output = Command::new("docker")
+      .args(["logs", "--tail", "40", container_id])
+      .output();
 
-    Self::copy_host_text_to_container(
-      container_id,
-      &format!("{}\n", keypair.public_key),
-      "/etc/wireguard/server_public.key",
-      "stage server public key in container",
-    )?;
-
-    // init script skips keygen because both key files are already present
-    let _ = Self::docker_exec(
-      container_id,
-      &format!(
-        "set -eu; {script}; for attempt in 1 2 3 4 5; do if [ -f '{marker}' ]; then exit 0; fi; sleep 1; done; exit 62;",
-        script = DOCKER_INIT_SCRIPT_PATH,
-        marker = readiness_marker_path,
-      ),
-      "execute Docker init script",
-    )?;
-
-    match Self::read_container_text_with_fallback(
-      container_id,
-      readiness_marker_path,
-      "copy Docker readiness marker from container",
-      "read Docker readiness marker from container via shell fallback",
-    ) {
-      Ok(marker_content) => {
-        let marker: ReadinessMarker = serde_json::from_str(&marker_content).map_err(|source| {
-          ProviderAdapterError::Unsupported {
-            detail: format!(
-              "Docker bootstrap readiness marker JSON was invalid at '{}': {}",
-              readiness_marker_path, source
-            ),
-          }
-        })?;
-
-        Ok(BootstrapOutputContract {
-          server_endpoint_ip: String::new(),
-          server_public_key: marker.server_public_key,
-          listen_port: marker.listen_port,
-        })
-      }
-      Err(marker_error) => {
-        // If marker retrieval is flaky on the host bridge, treat live interface checks as source of truth.
-        let interface_check = Self::docker_exec(
-          container_id,
-          &format!(
-            "set -eu; ip link show {iface} >/dev/null 2>&1; ip -o link show {iface} | grep -q 'UP'; wg show {iface} >/dev/null 2>&1;",
-            iface = DEFAULT_INTERFACE_NAME,
-          ),
-          "verify Docker WireGuard interface after marker read failure",
-        );
-
-        if interface_check.is_ok() {
-          return Ok(BootstrapOutputContract {
-            server_endpoint_ip: String::new(),
-            server_public_key: keypair.public_key.clone(),
-            listen_port: DEFAULT_WIREGUARD_PORT,
-          });
+    match output {
+      Ok(output) => {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let merged = format!("{}\n{}", stdout.trim_end(), stderr.trim_end());
+        let merged = merged.trim().to_string();
+        if merged.is_empty() {
+          "<no container output yet>".to_string()
+        } else {
+          merged
         }
-
-        Err(marker_error)
       }
+      Err(error) => format!("<logs unavailable: {error}>"),
     }
   }
 
-  // `build_client_peer_update_script` and `wire_client_peer` were removed here.
+  /// Wait for Docker's healthcheck to report the bootstrap marker exists.
+  ///
+  /// This polls provider metadata only — the same shape as polling DigitalOcean for droplet
+  /// status. Docker runs the health probe itself; the app never execs into the container, and no
+  /// key material is read back. The server's public key is already known locally.
+  fn wait_for_container_bootstrap(
+    container_id: &str,
+    timeout: Duration,
+  ) -> Result<(), ProviderAdapterError> {
+    let poll_interval = Duration::from_millis(1000);
+    let started = std::time::Instant::now();
+
+    loop {
+      let status = Self::container_runtime_status(container_id)?;
+
+      // The bootstrap script is the entrypoint, so a failed bootstrap exits the container. That
+      // is the container-world equivalent of a droplet whose cloud-init died.
+      if status == "exited" || status == "dead" {
+        return Err(ProviderAdapterError::Unsupported {
+          detail: format!(
+            "Docker bootstrap failed: container is '{status}'. Recent output:\n{}",
+            Self::container_log_tail(container_id)
+          ),
+        });
+      }
+
+      match Self::container_health(container_id)?.as_str() {
+        "healthy" => return Ok(()),
+        "unhealthy" => {
+          return Err(ProviderAdapterError::Unsupported {
+            detail: format!(
+              "Docker bootstrap did not complete: healthcheck reported unhealthy. Recent output:\n{}",
+              Self::container_log_tail(container_id)
+            ),
+          });
+        }
+        // `none` means the container was created without a healthcheck, which this adapter always
+        // sets. Treat it as still-starting rather than failing, and let the timeout decide.
+        _ => {}
+      }
+
+      if started.elapsed() >= timeout {
+        return Err(ProviderAdapterError::Unsupported {
+          detail: format!(
+            "Docker bootstrap did not become ready within {}s. Recent output:\n{}",
+            timeout.as_secs(),
+            Self::container_log_tail(container_id)
+          ),
+        });
+      }
+
+      std::thread::sleep(poll_interval);
+    }
+  }
+
+  // `build_client_peer_update_script`, `wire_client_peer`, and
+  // `initialize_wireguard_server_in_container` were removed here.
   //
-  // They pushed the client's public key into a running container with `docker exec` after
-  // provisioning. That has no DigitalOcean equivalent, so it made the Docker lane pass while the
-  // production path stayed broken. The peer now ships inside the bootstrap payload for every
-  // provider, and nothing contacts the server after create.
+  // They staged keys with `docker cp`, ran the init script with `docker exec`, and copied the
+  // readiness marker back out. None of that has a DigitalOcean equivalent, so it made the Docker
+  // lane pass while the production path stayed broken. Everything the server needs now ships in
+  // the payload at create time, and the app only polls provider metadata afterwards.
 }
 
 impl super::ProviderAdapter for DockerProviderAdapter {
@@ -697,8 +677,10 @@ impl super::ProviderAdapter for DockerProviderAdapter {
       detail: format!("Unsupported Docker plan '{size_slug}'. Expected docker-small, docker-medium, or docker-large."),
     })?;
 
+    // Nanosecond precision: milliseconds collided when two nodes were provisioned in quick
+    // succession, which tests do routinely.
     let droplet_id = match SystemTime::now().duration_since(UNIX_EPOCH) {
-      Ok(value) => value.as_millis() as u64,
+      Ok(value) => value.as_nanos() as u64,
       Err(_) => 1,
     };
 
@@ -707,54 +689,41 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     let cpus = plan.vcpus.to_string();
     let memory = format!("{}m", plan.memory_mb);
 
-    let run_args = Self::build_container_run_args(&container_name, &droplet_label, &cpus, &memory);
+    // Normalize to LF. A CRLF script fails inside the container with an opaque `bad interpreter`
+    // error, and this code runs on Windows.
+    let docker_init_payload = Self::resolve_docker_init_payload(init_payload)?.replace("\r\n", "\n");
+
+    let run_args = Self::build_container_run_args(
+      &container_name,
+      &droplet_label,
+      &cpus,
+      &memory,
+      &docker_init_payload,
+    );
     let run_arg_refs = run_args.iter().map(String::as_str).collect::<Vec<_>>();
     Self::remove_container_by_exact_name(&container_name)?;
-    let container_id = match Self::run_docker(&run_arg_refs, "create Docker compute container") {
-      Ok(container_id) => container_id,
-      Err(ProviderAdapterError::Unsupported { detail }) if Self::is_wireguard_port_allocation_error(&detail) => {
-        let cleaned = Self::try_cleanup_stale_wireguard_port_containers().map_err(|cleanup_error| {
-          ProviderAdapterError::Unsupported {
-            detail: format!(
-              "{} Also failed to clean stale GoatStare Docker containers that may hold 127.0.0.1:51820/udp: {}",
-              detail,
-              cleanup_error
-            ),
-          }
-        })?;
 
-        if cleaned {
-          Self::remove_container_by_exact_name(&container_name)?;
-          Self::run_docker(&run_arg_refs, "create Docker compute container after stale-port cleanup")
-            .map_err(|source| ProviderAdapterError::Unsupported {
-              detail: format!(
-                "{} Retry after stale GoatStare container cleanup also failed: {}",
-                detail,
-                source
-              ),
-            })?
-        } else {
-          return Err(ProviderAdapterError::Unsupported {
-            detail: format!(
-              "{} Port 51820/udp on localhost is already in use by a non-GoatStare container/service. Stop the conflicting process, then retry Docker node provisioning.",
-              detail
-            ),
-          });
-        }
-      }
-      Err(source) => {
-        return Err(source);
+    // No port-conflict recovery here any more. It used to force-remove *any* GoatStare container
+    // publishing 51820/udp, which silently destroyed a healthy running node whenever a second one
+    // was provisioned. Docker now allocates a free host port per node, so nodes cannot contend.
+    let container_id = Self::run_docker(&run_arg_refs, "create Docker compute container")?;
+
+    let endpoint_port = match Self::resolve_published_wireguard_port(&container_id) {
+      Ok(port) => port,
+      Err(error) => {
+        // Leave nothing half-provisioned behind if the endpoint cannot be determined.
+        let _ = Self::remove_containers(
+          &[container_id.clone()],
+          "remove Docker container after port resolution failure",
+        );
+        return Err(error);
       }
     };
 
-    let docker_init_payload = Self::resolve_docker_init_payload(init_payload)?;
-    Self::stage_docker_init_script(&container_id, &docker_init_payload)?;
-
-    let public_ipv4 = Self::docker_public_endpoint().to_string();
-
     Ok(ProvisionedDroplet {
       droplet_id,
-      public_ipv4,
+      public_ipv4: Self::docker_public_endpoint().to_string(),
+      endpoint_port,
     })
   }
 
@@ -767,18 +736,22 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     let _ = Self::ensure_daemon_available()?;
 
     let container_id = Self::container_id_for_droplet(request.droplet_id)?;
-    let mut contract = Self::initialize_wireguard_server_in_container(
-      &container_id,
-      &request.server_keypair,
-      &request.readiness_marker_path,
-    )?;
-    contract.server_endpoint_ip = if request.endpoint_ip.trim().is_empty() {
-      Self::docker_public_endpoint().to_string()
-    } else {
-      request.endpoint_ip.clone()
-    };
+    Self::wait_for_container_bootstrap(&container_id, DOCKER_BOOTSTRAP_TIMEOUT)?;
 
-    Ok(contract)
+    let endpoint_port = Self::resolve_published_wireguard_port(&container_id)?;
+
+    Ok(BootstrapOutputContract {
+      server_endpoint_ip: if request.endpoint_ip.trim().is_empty() {
+        Self::docker_public_endpoint().to_string()
+      } else {
+        request.endpoint_ip.clone()
+      },
+      // Echoed from what the caller generated, not read back off the server. The app has known
+      // this key since before the container existed.
+      server_public_key: request.server_keypair.public_key.clone(),
+      // The port the *client* dials, which for Docker is the published host port.
+      listen_port: endpoint_port,
+    })
   }
 
   fn droplet_exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError> {
@@ -833,6 +806,8 @@ impl super::ProviderAdapter for DockerProviderAdapter {
       return Ok(());
     }
 
+    // The payload lives only in the container's environment, so removing the container removes
+    // it. Nothing is staged on the host that could outlive the node.
     Self::remove_containers(&ids, "remove Docker compute container")?;
     Ok(())
   }
@@ -841,7 +816,9 @@ impl super::ProviderAdapter for DockerProviderAdapter {
 #[cfg(test)]
 mod tests {
   use super::{
-    DockerProviderAdapter, DOCKER_IMAGE, DOCKER_REGION, DOCKER_WIREGUARD_PUBLISH,
+    DockerProviderAdapter, DOCKER_CONTAINER_WIREGUARD_PORT, DOCKER_IMAGE, DOCKER_INIT_PAYLOAD_ENV,
+    DOCKER_INIT_SCRIPT_PATH,
+    DOCKER_REGION, DOCKER_WIREGUARD_PUBLISH,
   };
   use crate::backend::bootstrap::{Bootstrap, BootstrapParams, READINESS_MARKER_PATH};
   use crate::backend::crypto::keypair::{
@@ -964,7 +941,8 @@ mod tests {
       .map(|value| value.as_secs())
       .unwrap_or(0);
     let node_name = format!("docker-bootstrap-phase-{suffix}");
-    let (payload, server_keypair, _client) = render_real_docker_payload();
+    let (payload, server_keypair, client_keypair) = render_real_docker_payload();
+    let server_public_key_copy = server_keypair.public_key.clone();
 
     let provisioned = adapter
       .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", &payload)
@@ -983,8 +961,18 @@ mod tests {
     match contract_result {
       Ok(contract) => {
         assert_eq!(contract.server_endpoint_ip, provisioned.public_ipv4);
-        assert_eq!(contract.listen_port, 51820);
-        assert!(contract.server_public_key.len() >= 40);
+
+        // The contract reports the port the *client* dials, which for Docker is the ephemeral
+        // published host port, not the container's internal 51820.
+        assert_eq!(contract.listen_port, provisioned.endpoint_port);
+        assert_ne!(
+          contract.listen_port, DOCKER_CONTAINER_WIREGUARD_PORT,
+          "host port should be ephemeral so nodes cannot contend for one fixed port"
+        );
+
+        // The public key was known locally before the container existed; it is echoed, not read
+        // back off the server.
+        assert_eq!(contract.server_public_key, server_public_key_copy);
 
         let container_id = DockerProviderAdapter::container_id_for_droplet(provisioned.droplet_id)
           .expect("container id should resolve for provisioned droplet");
@@ -992,8 +980,10 @@ mod tests {
         DockerProviderAdapter::docker_exec(
           &container_id,
           &format!(
-            "set -eu; ip link show wg0 >/dev/null 2>&1; ip -o link show wg0 | grep -q 'UP'; wg show wg0 >/dev/null 2>&1; wg show wg0 listen-port | grep -qx '51820'; wg show wg0 public-key | grep -qx '{server_public_key}';",
+            "set -eu; ip link show wg0 >/dev/null 2>&1; ip -o link show wg0 | grep -q 'UP'; wg show wg0 >/dev/null 2>&1; wg show wg0 listen-port | grep -qx '{internal_port}'; wg show wg0 public-key | grep -qx '{server_public_key}'; wg show wg0 peers | grep -qF '{client_public_key}';",
+            internal_port = DOCKER_CONTAINER_WIREGUARD_PORT,
             server_public_key = contract.server_public_key,
+            client_public_key = client_keypair.public_key,
           ),
           "validate WireGuard runtime state is active after Docker init",
         )
@@ -1026,7 +1016,7 @@ mod tests {
 
   #[test]
   #[ignore = "Requires local Docker daemon and WireGuard tooling inside the test container"]
-  fn real_docker_connect_phase_wires_client_peer_to_host() {
+  fn real_docker_server_boots_with_client_peer_already_present() {
     let adapter = DockerProviderAdapter::new();
     let token = "dkr_v1_local_dev_mock_token_2026";
     let suffix = SystemTime::now()
@@ -1081,6 +1071,152 @@ mod tests {
       .expect("docker cleanup should succeed");
   }
 
+  /// End-to-end: provision a real container and emit the client config that reaches it.
+  ///
+  /// This is the artifact for manual verification — import the written `.conf` into the Windows
+  /// WireGuard client and confirm a handshake. Every value in it is known locally: the client
+  /// private key and the server public key were both generated here before the container existed,
+  /// and the endpoint is what the adapter reported. Nothing was read back off the server.
+  ///
+  /// The container is deliberately left running so the config can be tested against it. Remove it
+  /// with `docker rm -f` when finished.
+  #[test]
+  #[ignore = "Requires local Docker daemon; leaves a container running for manual verification"]
+  fn real_docker_emits_connectable_client_config() {
+    use crate::backend::wireguard::{build_client_config, ClientConfigParams};
+
+    let adapter = DockerProviderAdapter::new();
+    let token = "dkr_v1_local_dev_mock_token_2026";
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_secs())
+      .unwrap_or(0);
+
+    let (payload, server_keypair, client_keypair) = render_real_docker_payload();
+
+    let provisioned = adapter
+      .create_droplet(
+        token,
+        &format!("docker-clientconf-{suffix}"),
+        DOCKER_REGION,
+        "docker-small",
+        &payload,
+      )
+      .expect("docker node should provision");
+
+    let contract = adapter
+      .wait_for_bootstrap_ready(
+        token,
+        &BootstrapWaitRequest {
+          droplet_id: provisioned.droplet_id,
+          endpoint_ip: provisioned.public_ipv4.clone(),
+          readiness_marker_path: READINESS_MARKER_PATH.to_string(),
+          server_keypair,
+        },
+      )
+      .expect("bootstrap should become ready");
+
+    let config = build_client_config(&ClientConfigParams {
+      private_key: client_keypair.private_key.clone(),
+      client_address_cidr: "10.66.0.2/32".to_string(),
+      dns_server: None,
+      server_public_key: contract.server_public_key.clone(),
+      server_endpoint_ip: contract.server_endpoint_ip.clone(),
+      server_listen_port: contract.listen_port,
+      // Route only the tunnel subnet: this config is for verifying a handshake, not for taking
+      // over the host's default route.
+      allowed_ips: vec!["10.66.0.0/24".to_string()],
+      persistent_keepalive_seconds: 25,
+    })
+    .expect("client config should render");
+
+    assert!(config.contains("[Interface]"));
+    assert!(config.contains("[Peer]"));
+    assert!(config.contains(&format!("PublicKey = {}", contract.server_public_key)));
+    assert!(config.contains(&format!(
+      "Endpoint = {}:{}",
+      contract.server_endpoint_ip, contract.listen_port
+    )));
+
+    let path = std::env::temp_dir().join(format!("goatstare-verify-{suffix}.conf"));
+    std::fs::write(&path, config.replace("\r\n", "\n")).expect("client config should be writable");
+
+    println!("\n=== client config written to: {} ===", path.display());
+    println!(
+      "=== endpoint {}:{} | container droplet_id {} ===",
+      contract.server_endpoint_ip, contract.listen_port, provisioned.droplet_id
+    );
+    println!("=== import it into WireGuard for Windows, then: docker rm -f <container> ===\n");
+  }
+
+  /// Two nodes must be able to exist at once.
+  ///
+  /// Direct regression test for a data-loss bug: the host port was a fixed
+  /// `127.0.0.1:51820:51820/udp`, so a second node could not bind, and the recovery path
+  /// force-removed *any* GoatStare container publishing that port — silently destroying the first,
+  /// healthy node while leaving its database row behind.
+  #[test]
+  #[ignore = "Requires local Docker daemon"]
+  fn real_docker_second_node_does_not_evict_the_first() {
+    let adapter = DockerProviderAdapter::new();
+    let token = "dkr_v1_local_dev_mock_token_2026";
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_nanos())
+      .unwrap_or(0);
+
+    let (payload_one, _s1, _c1) = render_real_docker_payload();
+    let first = adapter
+      .create_droplet(
+        token,
+        &format!("docker-coexist-a-{suffix}"),
+        DOCKER_REGION,
+        "docker-small",
+        &payload_one,
+      )
+      .expect("first docker node should provision");
+
+    let (payload_two, _s2, _c2) = render_real_docker_payload();
+    let second_result = adapter.create_droplet(
+      token,
+      &format!("docker-coexist-b-{suffix}"),
+      DOCKER_REGION,
+      "docker-small",
+      &payload_two,
+    );
+
+    let cleanup = |ids: &[u64]| {
+      for id in ids {
+        let _ = adapter.delete_droplet(token, *id);
+      }
+    };
+
+    let second = match second_result {
+      Ok(second) => second,
+      Err(error) => {
+        cleanup(&[first.droplet_id]);
+        panic!("second docker node should provision alongside the first: {error:?}");
+      }
+    };
+
+    let first_still_exists = adapter
+      .droplet_exists(token, first.droplet_id)
+      .unwrap_or(false);
+    let ports_differ = first.endpoint_port != second.endpoint_port;
+
+    cleanup(&[first.droplet_id, second.droplet_id]);
+
+    assert!(
+      first_still_exists,
+      "provisioning a second node must not remove the first"
+    );
+    assert!(
+      ports_differ,
+      "each node must get its own host port (got {} twice)",
+      first.endpoint_port
+    );
+  }
+
   /// Provisioning must refuse an empty payload rather than silently substituting a default one.
   /// A defaulted payload carries no client peer, which would yield a server that looks healthy
   /// and accepts no handshakes.
@@ -1092,17 +1228,94 @@ mod tests {
     assert!(err.to_string().contains("client peer"));
   }
 
-  #[test]
-  fn docker_container_run_args_publish_wireguard_udp_on_localhost() {
-    let args = DockerProviderAdapter::build_container_run_args(
+  fn demo_run_args() -> Vec<String> {
+    let (payload, _server, _client) = render_real_docker_payload();
+
+    DockerProviderAdapter::build_container_run_args(
       "demo-container",
       "goatstare.droplet_id=42",
       "1",
       "1024m",
-    );
+      &payload,
+    )
+  }
+
+  /// The host port must be left for Docker to allocate.
+  ///
+  /// A fixed `127.0.0.1:51820:51820/udp` meant a second node could not bind, and the recovery
+  /// path force-removed the first node's container to free the port — silently destroying a
+  /// healthy node. An empty host port makes contention impossible.
+  #[test]
+  fn docker_publishes_an_ephemeral_host_port_per_node() {
+    let args = demo_run_args();
 
     assert!(args.contains(&"-p".to_string()));
     assert!(args.contains(&DOCKER_WIREGUARD_PUBLISH.to_string()));
+    assert!(
+      DOCKER_WIREGUARD_PUBLISH.contains("::"),
+      "host port must be left empty so Docker allocates a free one per node"
+    );
+    assert!(
+      !args.iter().any(|arg| arg == "127.0.0.1:51820:51820/udp"),
+      "the fixed host port that caused nodes to evict each other must not come back"
+    );
+  }
+
+  /// The payload is supplied with the create call and run as the entrypoint — the container-world
+  /// equivalent of cloud-init user-data.
+  #[test]
+  fn docker_delivers_payload_as_create_time_user_data() {
+    let args = demo_run_args();
+
+    assert!(args.contains(&"-e".to_string()));
+    assert!(
+      args
+        .iter()
+        .any(|arg| arg.starts_with(&format!("{DOCKER_INIT_PAYLOAD_ENV}=")) && arg.contains("[Peer]")),
+      "the rendered payload must travel with the create call"
+    );
+    assert!(args.contains(&"--entrypoint".to_string()));
+    assert!(args.contains(&"/bin/bash".to_string()));
+    assert!(
+      args.iter().any(|arg| arg.contains(DOCKER_INIT_SCRIPT_PATH)),
+      "the entrypoint must materialise and run the payload"
+    );
+    // Keepalive belongs to the container command, not the shared script, which must terminate
+    // normally under cloud-init.
+    assert!(args.iter().any(|arg| arg.contains("tail -f /dev/null")));
+    assert!(
+      !args.iter().any(|arg| arg.contains("while true; do sleep")),
+      "the container no longer idles waiting to be exec'd into"
+    );
+    // A host bind mount only works when the CLI can translate Windows paths for the daemon, which
+    // fails outright under DOCKER_HOST=tcp://...
+    assert!(
+      !args.contains(&"-v".to_string()),
+      "payload delivery must not depend on host path translation"
+    );
+  }
+
+  /// `printf '%s'` rather than `echo`, so nothing inside the payload is interpreted.
+  #[test]
+  fn entrypoint_materialises_payload_without_interpreting_it() {
+    let command = DockerProviderAdapter::build_entrypoint_command();
+
+    assert!(command.contains(&format!("printf '%s' \"${DOCKER_INIT_PAYLOAD_ENV}\"")));
+    assert!(command.contains(&format!("> {DOCKER_INIT_SCRIPT_PATH}")));
+    assert!(command.contains("chmod 700"));
+    assert!(command.contains("exec tail -f /dev/null"));
+  }
+
+  /// Readiness is observed through Docker's healthcheck, which Docker runs itself and reports as
+  /// provider metadata. The app never execs into the container.
+  #[test]
+  fn docker_reports_readiness_through_its_own_healthcheck() {
+    let args = demo_run_args();
+
+    assert!(args.contains(&"--health-cmd".to_string()));
+    assert!(args.contains(&format!("test -f {READINESS_MARKER_PATH}")));
+    assert!(args.contains(&"--health-interval".to_string()));
+    assert!(args.contains(&"--health-retries".to_string()));
   }
 
   #[test]
