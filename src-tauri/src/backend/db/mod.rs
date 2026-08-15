@@ -23,7 +23,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
 ];
 
 
+// Serialized in lower case to match `as_str`, the value stored in SQLite, and the TypeScript
+// union. The derived default emitted PascalCase, so the same status crossed the IPC boundary in
+// a different form from the one written to the database and documented in the bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ProviderStatus {
   Active,
   Suspended,
@@ -61,7 +65,11 @@ impl TryFrom<&str> for ProviderStatus {
   }
 }
 
+// Serialized in lower case to match `as_str`, the value stored in SQLite, and the TypeScript
+// union. The derived default emitted PascalCase, so the same status crossed the IPC boundary in
+// a different form from the one written to the database and documented in the bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum NodeLifecycleStatus {
   New,
   Provisioning,
@@ -138,7 +146,11 @@ impl TryFrom<&str> for NodeLifecycleStatus {
   }
 }
 
+// Serialized in lower case to match `as_str`, the value stored in SQLite, and the TypeScript
+// union. The derived default emitted PascalCase, so the same status crossed the IPC boundary in
+// a different form from the one written to the database and documented in the bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TunnelStatus {
   New,
   Ready,

@@ -184,9 +184,14 @@ export function DashboardShell({ children }: { children: ReactNode }) {
           </div>
         </main>
 
-        <div className={`fixed right-4 top-4 z-50 flex w-[min(92vw,24rem)] flex-col gap-3 ${toasts.length === 0 ? "pointer-events-none" : ""}`}>
+        {/* Transient per-action feedback. Kept distinguishable from the persistent recovery
+            banner so tests can tell "this action just failed" from "an earlier one did". */}
+        <div
+          data-testid="toast-region"
+          className={`fixed right-4 top-4 z-50 flex w-[min(92vw,24rem)] flex-col gap-3 ${toasts.length === 0 ? "pointer-events-none" : ""}`}
+        >
           {toasts.map((toast) => (
-            <div key={toast.id} className={`rounded-2xl border px-4 py-3 shadow-[var(--shadow-elevated)] ${toast.kind === "success" ? "border-[color:rgba(78,222,163,0.24)] bg-[color:rgba(78,222,163,0.12)] text-[var(--on-surface)]" : toast.kind === "warning" ? "border-[color:rgba(255,185,95,0.24)] bg-[color:rgba(255,185,95,0.12)] text-[var(--on-surface)]" : "border-[color:rgba(255,107,107,0.24)] bg-[color:rgba(255,107,107,0.12)] text-[var(--on-surface)]"}`}>
+            <div key={toast.id} data-testid={`toast-${toast.kind}`} className={`rounded-2xl border px-4 py-3 shadow-[var(--shadow-elevated)] ${toast.kind === "success" ? "border-[color:rgba(78,222,163,0.24)] bg-[color:rgba(78,222,163,0.12)] text-[var(--on-surface)]" : toast.kind === "warning" ? "border-[color:rgba(255,185,95,0.24)] bg-[color:rgba(255,185,95,0.12)] text-[var(--on-surface)]" : "border-[color:rgba(255,107,107,0.24)] bg-[color:rgba(255,107,107,0.12)] text-[var(--on-surface)]"}`}>
               <div className="text-sm font-medium">{toast.title}</div>
               <div className="mt-1 text-sm text-[var(--on-surface)]/90">{toast.message}</div>
             </div>

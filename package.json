@@ -8,15 +8,16 @@
     "start": "next start",
     "lint": "eslint . --ignore-pattern src-tauri/target/**",
     "typecheck": "tsc --noEmit",
-    "tauri:e2e:docker:real": "playwright test --config=playwright.tauri.config.ts --project=tauri-real tests/e2e/dashboard-logical-tauri.spec.ts",
-    "tauri:e2e:docker:real:headed": "playwright test --config=playwright.tauri.config.ts --project=tauri-real tests/e2e/dashboard-logical-tauri.spec.ts --headed",
+    "tauri:e2e:docker:real": "playwright test --config=playwright.tauri.config.ts --project=tauri-real",
     "backend:test:docker:real": "cargo test --manifest-path src-tauri/Cargo.toml real_docker -- --ignored --nocapture",
     "backend:test:docker:clientconf": "cargo test --manifest-path src-tauri/Cargo.toml real_docker_emits_connectable_client_config -- --ignored --nocapture",
     "docker:cleanup": "node scripts/docker-cleanup.mjs",
     "e2e:docker:preflight": "docker version",
     "tauri:dev": "tauri dev",
     "tauri:dev:e2e": "tauri dev --features e2e-testing --no-watch",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:e2e:provisioning": "playwright test --config=playwright.tauri.config.ts --project=tauri-real tests/e2e/dashboard-provisioning-tauri.spec.ts",
+    "tauri:e2e:connect": "playwright test --config=playwright.tauri.config.ts --project=tauri-real tests/e2e/dashboard-connect-tauri.spec.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

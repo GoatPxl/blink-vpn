@@ -1,3 +1,6 @@
+// Playwright fixtures receive a callback named `use`. The React hooks lint rule reads that as a
+// hook call; it is not one, and this file contains no React.
+/* eslint-disable react-hooks/rules-of-hooks */
 import { chromium, expect, test as base, type Browser, type Page } from "@playwright/test";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
@@ -29,6 +32,25 @@ async function connectWithRetry(endpoint: string, timeoutMs: number): Promise<Br
   }
 
   throw new Error(`Failed to connect to CDP endpoint ${endpoint} within ${timeoutMs}ms. Last error: ${String(lastError)}`);
+}
+
+/**
+ * Kill any app instance left over from a previous run or a manual launch.
+ *
+ * Without this the fixture attaches to whatever already holds the debug port, which may be an
+ * older build — so a run can silently test stale code and report failures that were fixed.
+ */
+async function killExistingAppInstances(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const killer = spawn("taskkill", ["/IM", "goatstare-vpn-app.exe", "/T", "/F"], {
+      stdio: "ignore",
+    });
+    killer.on("exit", () => resolve());
+    killer.on("error", () => resolve());
+  });
+
+  // Give Windows a moment to release the debug port before the new instance claims it.
+  await sleep(1500);
 }
 
 function startTauriProcess(cwd: string): ChildProcessWithoutNullStreams {
@@ -76,6 +98,8 @@ export const test = base.extend<TauriFixtures>({
       throw new Error(`Unsupported test mode: ${mode}`);
     }
 
+    await killExistingAppInstances();
+
     const tauriProcess = startTauriProcess(process.cwd());
     let browser: Browser | null = null;
 
@@ -84,6 +108,14 @@ export const test = base.extend<TauriFixtures>({
       const context = browser.contexts()[0] ?? await browser.newContext();
       const page = context.pages()[0] ?? await context.newPage();
       await page.waitForLoadState("domcontentloaded");
+
+      // The Tauri bridge is injected by the host, not the page, so it can lag the load event.
+      // Tests call commands directly, and without this they race it and see `undefined`.
+      await page.waitForFunction(
+        "typeof window.__TAURI_INTERNALS__ !== 'undefined'",
+        undefined,
+        { timeout: 60_000 },
+      );
 
       await use(page);
     } finally {

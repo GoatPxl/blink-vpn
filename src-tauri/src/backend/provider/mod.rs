@@ -56,6 +56,7 @@ pub trait ProviderAdapter: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ProviderDropletStatus {
   New,
   Active,
