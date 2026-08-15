@@ -13,20 +13,16 @@ import {
   type VpnNodeRecord,
 } from "./shared";
 import { maskTokenReference } from "./shared";
-import type { WireGuardConnectionMode } from "@/lib/tauri";
 
 export function SettingsView({
   dockerDevEnabled,
   dockerFauxToken,
   setDockerFauxToken,
   dockerFauxTokenConfigured,
-  wireGuardConnectionMode,
-  wireGuardModeLocked,
   configuredProvider,
   providerId,
   providers,
   nodes,
-  onChangeWireGuardConnectionMode,
   onSelectProvider,
   apiToken,
   setApiToken,
@@ -44,13 +40,10 @@ export function SettingsView({
   dockerFauxToken: string;
   setDockerFauxToken: (value: string) => void;
   dockerFauxTokenConfigured: boolean;
-  wireGuardConnectionMode: WireGuardConnectionMode;
-  wireGuardModeLocked: boolean;
   configuredProvider: ProviderRecord | null;
   providerId: string;
   providers: ProviderRecord[];
   nodes: VpnNodeRecord[];
-  onChangeWireGuardConnectionMode: (mode: WireGuardConnectionMode) => Promise<void>;
   onSelectProvider: (providerId: string) => void;
   apiToken: string;
   setApiToken: (value: string) => void;
@@ -164,59 +157,6 @@ export function SettingsView({
           <span className="mx-2">›</span>
           <span>Provider Integration</span>
         </div>
-        <Card
-          title="WireGuard Connection Mode"
-          description="Choose how GoatStare connects local WireGuard tunnels on this device. This setting applies globally."
-        >
-          <div className="space-y-4">
-            <Field
-              label="Connection Mode"
-              hint={wireGuardModeLocked
-                ? "Disconnect the active tunnel before switching modes."
-                : "Admin Mode uses the app-managed virtual adapter path. User Mode uses the installed WireGuard service path."}
-            >
-              <div className="inline-flex rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-1">
-                {[
-                  {
-                    value: "admin" as const,
-                    title: "Admin Mode",
-                    detail: "Virtual adapter flow with Windows elevation prompts when required.",
-                  },
-                  {
-                    value: "user" as const,
-                    title: "User Mode",
-                    detail: "Installed WireGuard service path without app-managed adapter creation.",
-                  },
-                ].map((option) => {
-                  const active = wireGuardConnectionMode === option.value;
-                  return (
-                    <button
-                      key={option.value}
-                      type="button"
-                      onClick={() => void onChangeWireGuardConnectionMode(option.value)}
-                      disabled={busyAction !== null || wireGuardModeLocked || active}
-                      className={`min-w-[220px] rounded-[18px] px-4 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${active
-                        ? "bg-[var(--primary)] text-[#10131b]"
-                        : "bg-transparent text-[var(--on-surface)] hover:bg-[color:rgba(255,255,255,0.05)]"
-                      }`}
-                    >
-                      <div className="text-sm font-semibold tracking-tight">{option.title}</div>
-                      <div className={`mt-1 text-xs ${active ? "text-[#10131b]/75" : "text-[var(--on-surface-variant)]"}`}>{option.detail}</div>
-                    </button>
-                  );
-                })}
-              </div>
-            </Field>
-            <div className="rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">
-              <div className="font-medium text-[var(--on-surface)]">Current mode: {wireGuardConnectionMode === "admin" ? "Admin Mode" : "User Mode"}</div>
-              <p className="mt-2">
-                {wireGuardConnectionMode === "admin"
-                  ? "Use this when local tunnel creation should happen through GoatStare-managed adapter configuration and elevation prompts are acceptable."
-                  : "Use this when local tunnel connection should rely on the installed WireGuard service path for this device."}
-              </p>
-            </div>
-          </div>
-        </Card>
         <Card
           title="Provider API Keys"
           description="This page exists to collect API keys. Choose provider, paste key, save, then validate."

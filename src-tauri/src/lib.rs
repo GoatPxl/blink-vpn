@@ -89,8 +89,6 @@ pub fn run() {
       commands::system::open_wireguard_install_page,
       commands::system::install_wireguard_with_prerequisites,
       commands::system::check_wireguard_readiness,
-      commands::system::get_wireguard_connection_mode,
-      commands::system::set_wireguard_connection_mode,
       commands::system::check_docker_readiness,
       commands::system::register_digitalocean_provider_token,
       commands::system::register_docker_provider_token,

@@ -13,20 +13,17 @@ import {
   forceCleanupVpnNode,
   getDiagnosticsBundle,
   getHealthPanelData,
-  getWireGuardConnectionMode,
   listProviders,
   listTunnelsForNode,
   listVpnNodes,
   registerProviderToken,
   resumeProvider as resumeProviderCommand,
-  setWireGuardConnectionMode as setWireGuardConnectionModeCommand,
   suspendProvider as suspendProviderCommand,
   validateProviderToken,
   type DockerReadiness,
   type ProviderRecord,
   type TunnelRecord,
   type VpnNodeRecord,
-  type WireGuardConnectionMode,
 } from "@/lib/tauri";
 import {
   useCallback,
@@ -77,7 +74,6 @@ type DashboardContextValue = {
   health: HealthPanelData | null;
   diagnostics: DiagnosticsBundle | null;
   diagnosticsExportPath: string;
-  wireGuardConnectionMode: WireGuardConnectionMode;
   providerId: string;
   providerName: string;
   selectProviderId: (providerId: string) => void;
@@ -100,7 +96,6 @@ type DashboardContextValue = {
   throughputSamples: ThroughputSample[];
   loadDashboard: (preferredSelectedNodeId?: string) => Promise<void>;
   refreshHealth: () => Promise<void>;
-  saveWireGuardConnectionMode: (mode: WireGuardConnectionMode) => Promise<void>;
   saveToken: (apiToken: string) => Promise<void>;
   validateToken: () => Promise<void>;
   suspendProvider: (provider: ProviderRecord) => Promise<void>;
@@ -140,7 +135,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [throughputSamples, setThroughputSamples] = useState<ThroughputSample[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsBundle | null>(null);
   const [diagnosticsExportPath, setDiagnosticsExportPath] = useState("No export yet.");
-  const [wireGuardConnectionMode, setWireGuardConnectionMode] = useState<WireGuardConnectionMode>("admin");
   const [providerId, setProviderId] = useState(DEFAULT_PROVIDER_ID);
   const [providerName, setProviderName] = useState(DEFAULT_PROVIDER_NAME);
   const [providerAccessState, setProviderAccessState] = useState<ProviderAccessState>("unknown");
@@ -327,17 +321,15 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const loadDashboard = useCallback(async (preferredSelectedNodeId?: string) => {
     setBusyAction("refresh");
     try {
-      const [loadedNodes, loadedDiagnostics, loadedProviders, loadedWireGuardConnectionMode] = await Promise.all([
+      const [loadedNodes, loadedDiagnostics, loadedProviders] = await Promise.all([
         listVpnNodes(),
         getDiagnosticsBundle(),
         listProviders(),
-        getWireGuardConnectionMode(),
       ]);
 
       setNodes(loadedNodes);
       setDiagnostics(loadedDiagnostics);
       setProviders(loadedProviders);
-      setWireGuardConnectionMode(loadedWireGuardConnectionMode);
 
       const configuredProvider = loadedProviders.find((provider) => provider.id === providerIdRef.current)
         ?? loadedProviders[0]
@@ -436,26 +428,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const refreshHealth = useCallback(async () => {
     await refreshHealthSnapshot(false);
   }, [refreshHealthSnapshot]);
-
-  const saveWireGuardConnectionMode = useCallback(async (mode: WireGuardConnectionMode) => {
-    setBusyAction("save-wireguard-mode");
-    try {
-      const persistedMode = await setWireGuardConnectionModeCommand(mode);
-      setWireGuardConnectionMode(persistedMode);
-      setRecovery(null);
-      pushToast(
-        "success",
-        "WireGuard mode updated",
-        persistedMode === "admin"
-          ? "Admin Mode will use the app-managed virtual adapter flow."
-          : "User Mode will use the installed WireGuard service path.",
-      );
-    } catch (error) {
-      handleError(error);
-    } finally {
-      setBusyAction(null);
-    }
-  }, [handleError, pushToast]);
 
   const saveToken = useCallback(async (apiToken: string) => {
     setBusyAction("save-token");
@@ -1025,7 +997,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     health,
     diagnostics,
     diagnosticsExportPath,
-    wireGuardConnectionMode,
     providerId,
     providerName,
     selectProviderId,
@@ -1048,7 +1019,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     throughputSamples,
     loadDashboard,
     refreshHealth,
-    saveWireGuardConnectionMode,
     saveToken,
     validateToken,
     suspendProvider,

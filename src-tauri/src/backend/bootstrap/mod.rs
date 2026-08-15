@@ -3,11 +3,10 @@ mod core;
 mod renderers;
 
 pub use contract::{
-  BootstrapArtifact, BootstrapError, BootstrapOutputContract, BootstrapParams,
+  BootstrapError, BootstrapOutputContract, BootstrapParams,
   DEFAULT_CLIENT_CIDR, DEFAULT_INTERFACE_NAME, DEFAULT_SERVER_INTERFACE_CIDR,
   DEFAULT_WIREGUARD_PORT, READINESS_MARKER_PATH,
 };
-pub use contract::ReadinessMarker;
 pub use core::Bootstrap;
 
 #[cfg(test)]

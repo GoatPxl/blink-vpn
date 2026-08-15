@@ -10,7 +10,7 @@ use crate::backend::bootstrap::{
 };
 use crate::backend::crypto::keypair::{generate_client_keypair, generate_server_keypair, KeygenError};
 use crate::backend::db::Database;
-use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus, WireGuardConnectionMode};
+use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus};
 use crate::backend::logging;
 use crate::backend::provider::{
   BootstrapWaitRequest, NodeInitRequest, ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError,
@@ -390,13 +390,8 @@ impl Orchestrator {
       source,
     })?;
 
-    let connection_mode = load_wireguard_connection_mode(
-      db,
-      "Failed loading WireGuard connection mode before force cleanup flow.",
-    )?;
-
     for tunnel in &tunnels {
-      let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &tunnel.name);
+      let _ = wireguard.unregister_tunnel(&tunnel.name);
     }
 
     let local_tunnels_removed = tunnels.len();
@@ -1169,11 +1164,6 @@ impl Orchestrator {
         },
       })?;
 
-    let connection_mode = load_wireguard_connection_mode(
-      db,
-      "Failed loading WireGuard connection mode before connect flow.",
-    )?;
-
     if tunnel.node_id != request.node_id {
       return Err(OrchestratorError::InvalidState {
         node_id: request.node_id.clone(),
@@ -1189,7 +1179,7 @@ impl Orchestrator {
       // Best-effort migration cleanup for legacy/randomized tunnel services.
       // Ignore cleanup errors so connect can still proceed.
       if previous_tunnel_name != canonical_tunnel_name {
-        let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &previous_tunnel_name);
+        let _ = wireguard.unregister_tunnel(&previous_tunnel_name);
       }
 
       db
@@ -1222,7 +1212,7 @@ impl Orchestrator {
     wireguard.record_connect_trace_snapshot(&canonical_tunnel_name, &connect_config);
 
     if tunnel.status == TunnelStatus::Connected && node.lifecycle_status == NodeLifecycleStatus::Connected {
-      if let Ok(runtime) = wireguard.read_tunnel_status_for_mode(connection_mode, &canonical_tunnel_name) {
+      if let Ok(runtime) = wireguard.read_tunnel_status(&canonical_tunnel_name) {
         if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
           return Ok(());
         }
@@ -1230,7 +1220,7 @@ impl Orchestrator {
     }
 
     let mut imported_in_this_connect = false;
-    match wireguard.read_tunnel_status_for_mode(connection_mode, &canonical_tunnel_name) {
+    match wireguard.read_tunnel_status(&canonical_tunnel_name) {
       Ok(runtime) => {
         if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
           persist_tunnel_stats_snapshot(db, &request.tunnel_id, &runtime)?;
@@ -1241,14 +1231,14 @@ impl Orchestrator {
       }
       Err(WireGuardError::TunnelNotFound { .. }) => {
         wireguard
-          .import_tunnel_for_mode(connection_mode, &canonical_tunnel_name, &connect_config)
+          .import_tunnel(&canonical_tunnel_name, &connect_config)
           .map_err(|source| OrchestratorError::WireGuard {
             detail: "Could not import client tunnel into WireGuard for Windows during connect flow."
               .to_string(),
             source,
           })?;
 
-        match wireguard.read_tunnel_status_for_mode(connection_mode, &canonical_tunnel_name) {
+        match wireguard.read_tunnel_status(&canonical_tunnel_name) {
           Ok(_) => {}
           Err(source @ WireGuardError::TunnelNotFound { .. }) => {
             return Err(OrchestratorError::WireGuard {
@@ -1276,10 +1266,10 @@ impl Orchestrator {
       }
     }
 
-    if let Err(source) = wireguard.activate_tunnel_for_mode(connection_mode, &canonical_tunnel_name) {
+    if let Err(source) = wireguard.activate_tunnel(&canonical_tunnel_name) {
       if matches!(source, WireGuardError::TunnelNotFound { .. }) && !imported_in_this_connect {
         wireguard
-          .import_tunnel_for_mode(connection_mode, &canonical_tunnel_name, &connect_config)
+          .import_tunnel(&canonical_tunnel_name, &connect_config)
           .map_err(|import_source| OrchestratorError::WireGuard {
             detail: "Could not import client tunnel after missing-service activation response."
               .to_string(),
@@ -1287,14 +1277,14 @@ impl Orchestrator {
           })?;
 
         wireguard
-          .activate_tunnel_for_mode(connection_mode, &canonical_tunnel_name)
+          .activate_tunnel(&canonical_tunnel_name)
           .map_err(|activate_source| OrchestratorError::WireGuard {
             detail: "Could not activate WireGuard tunnel service after re-import.".to_string(),
             source: activate_source,
           })?;
       } else {
         if imported_in_this_connect {
-          let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &canonical_tunnel_name);
+          let _ = wireguard.unregister_tunnel(&canonical_tunnel_name);
           let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel activation failed; service was removed."));
         }
 
@@ -1306,7 +1296,7 @@ impl Orchestrator {
     }
 
     let runtime = wireguard
-      .read_tunnel_status_for_mode(connection_mode, &canonical_tunnel_name)
+      .read_tunnel_status(&canonical_tunnel_name)
       .map_err(|source| OrchestratorError::WireGuard {
         detail: "Could not verify tunnel runtime state after connect.".to_string(),
         source,
@@ -1332,7 +1322,7 @@ impl Orchestrator {
       return Ok(());
     }
 
-    let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &canonical_tunnel_name);
+    let _ = wireguard.unregister_tunnel(&canonical_tunnel_name);
     let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel runtime did not report Running; service was removed."));
 
     Err(OrchestratorError::InvalidState {
@@ -1385,11 +1375,6 @@ impl Orchestrator {
         },
       })?;
 
-    let connection_mode = load_wireguard_connection_mode(
-      db,
-      "Failed loading WireGuard connection mode before disconnect flow.",
-    )?;
-
     if tunnel.node_id != request.node_id {
       return Err(OrchestratorError::InvalidState {
         node_id: request.node_id.clone(),
@@ -1398,14 +1383,14 @@ impl Orchestrator {
     }
 
     wireguard
-      .deactivate_tunnel_for_mode(connection_mode, &tunnel.name)
+      .deactivate_tunnel(&tunnel.name)
       .map_err(|source| OrchestratorError::WireGuard {
         detail: "Could not deactivate WireGuard tunnel service in disconnect flow.".to_string(),
         source,
       })?;
 
     wireguard
-      .unregister_tunnel_for_mode(connection_mode, &tunnel.name)
+      .unregister_tunnel(&tunnel.name)
       .map_err(|source| OrchestratorError::WireGuard {
         detail: "Could not unregister WireGuard tunnel service in disconnect flow.".to_string(),
         source,
@@ -1448,14 +1433,9 @@ impl Orchestrator {
         source,
       })?;
 
-    let connection_mode = load_wireguard_connection_mode(
-      db,
-      "Failed loading WireGuard connection mode before force-disconnect flow.",
-    )?;
-
     for tunnel in tunnels {
-      let _ = wireguard.deactivate_tunnel_for_mode(connection_mode, &tunnel.name);
-      let _ = wireguard.unregister_tunnel_for_mode(connection_mode, &tunnel.name);
+      let _ = wireguard.deactivate_tunnel(&tunnel.name);
+      let _ = wireguard.unregister_tunnel(&tunnel.name);
       let _ = db.update_tunnel_stats_snapshot(&tunnel.id, None, None, None);
       let _ = db.update_tunnel_status(&tunnel.id, TunnelStatus::Disconnected, Some("Best-effort force disconnect requested from dashboard."));
     }
@@ -1485,12 +1465,7 @@ impl Orchestrator {
         },
       })?;
 
-    let connection_mode = load_wireguard_connection_mode(
-      db,
-      "Failed loading WireGuard connection mode before tunnel status read.",
-    )?;
-
-    let status = match wireguard.read_tunnel_status_for_mode(connection_mode, &tunnel.name) {
+    let status = match wireguard.read_tunnel_status(&tunnel.name) {
       Ok(runtime) => runtime,
       Err(WireGuardError::TunnelNotFound { .. }) => TunnelRuntimeStatus {
         tunnel_name: tunnel.name.clone(),
@@ -1552,35 +1527,25 @@ impl Orchestrator {
         .next(),
     };
 
-    if let Some(tunnel) = selected_tunnel.as_ref() {
-      let connection_mode = load_wireguard_connection_mode(
-        db,
-        "Failed loading WireGuard connection mode before health summary trace capture.",
-      )?;
-      if let Ok(provider) = db.get_provider(&node.provider_id) {
+    if let Some(tunnel) = selected_tunnel.as_ref() {      if let Ok(provider) = db.get_provider(&node.provider_id) {
         if let Some(provider) = provider {
           if let Ok(config) = load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, tunnel) {
             // Populate diagnostics trace even when only health polling occurs.
             wireguard.record_connect_trace_snapshot(&tunnel.name, &config);
           } else {
-            let _ = wireguard.capture_runtime_connect_trace_snapshot_for_mode(connection_mode, &tunnel.name);
+            let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
           }
         } else {
-          let _ = wireguard.capture_runtime_connect_trace_snapshot_for_mode(connection_mode, &tunnel.name);
+          let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
         }
       } else {
-        let _ = wireguard.capture_runtime_connect_trace_snapshot_for_mode(connection_mode, &tunnel.name);
+        let _ = wireguard.capture_runtime_connect_trace_snapshot(&tunnel.name);
       }
     }
 
-    let runtime = if let Some(tunnel) = selected_tunnel.as_ref() {
-      let connection_mode = load_wireguard_connection_mode(
-        db,
-        "Failed loading WireGuard connection mode before health summary runtime read.",
-      )?;
-      Some(
+    let runtime = if let Some(tunnel) = selected_tunnel.as_ref() {      Some(
         wireguard
-          .read_tunnel_status_for_mode(connection_mode, &tunnel.name)
+          .read_tunnel_status(&tunnel.name)
           .map_err(|source| OrchestratorError::WireGuard {
             detail: "Failed reading tunnel runtime for health summary.".to_string(),
             source,
@@ -1807,14 +1772,9 @@ impl Orchestrator {
           source,
         })?;
 
-      let connection_mode = load_wireguard_connection_mode(
-        db,
-        "Failed loading WireGuard connection mode during startup reconciliation.",
-      )?;
-
       let mut any_connected = false;
       for tunnel in tunnels {
-        match wireguard.read_tunnel_status_for_mode(connection_mode, &tunnel.name) {
+        match wireguard.read_tunnel_status(&tunnel.name) {
           Ok(runtime) => {
             any_connected |= runtime.state == crate::backend::wireguard::TunnelServiceState::Running;
             let _ = persist_tunnel_stats_snapshot(db, &tunnel.id, &runtime);
@@ -1942,6 +1902,68 @@ fn persist_tunnel_stats_snapshot(
     })
 }
 
+/// Whether a resolved endpoint lives on this machine.
+///
+/// Judged from the endpoint itself rather than the provider slug, so the orchestrator stays
+/// provider-neutral: any adapter that reports a loopback endpoint gets the same treatment.
+fn endpoint_is_loopback(endpoint: &str) -> bool {
+  endpoint
+    .trim()
+    .parse::<std::net::IpAddr>()
+    .map(|address| address.is_loopback())
+    .unwrap_or(false)
+}
+
+/// Narrow a default route to the tunnel subnet when the server is on this machine.
+///
+/// A full-tunnel route (`0.0.0.0/0`) to a loopback endpoint sends the host's entire default route
+/// into a server reachable only *through* that same host. For the local Docker dev provider that
+/// means all traffic depends on the container's onward NAT, and a failure there takes the machine
+/// off the network — with the app that caused it now unreachable over that network too.
+///
+/// A real provider endpoint is untouched, so full-tunnel remains the behaviour that matters in
+/// production.
+fn scope_allowed_ips_for_endpoint(
+  allowed_ips: Vec<String>,
+  endpoint: &str,
+  client_address_cidr: &str,
+) -> Vec<String> {
+  if !endpoint_is_loopback(endpoint) {
+    return allowed_ips;
+  }
+
+  let carries_default_route = allowed_ips
+    .iter()
+    .any(|entry| matches!(entry.trim(), "0.0.0.0/0" | "::/0"));
+
+  if !carries_default_route {
+    return allowed_ips;
+  }
+
+  // Keep only the tunnel's own subnet, derived from the client address so it tracks the
+  // configured CIDR rather than a hardcoded range.
+  let subnet = tunnel_subnet_for_client(client_address_cidr);
+  log::warn!(
+    "event=connect.allowed_ips.scoped endpoint_is_loopback=true scoped_to={} reason=default_route_to_local_endpoint",
+    subnet
+  );
+
+  vec![subnet]
+}
+
+/// `10.66.0.2/32` -> `10.66.0.0/24`: the subnet shared with the server.
+fn tunnel_subnet_for_client(client_address_cidr: &str) -> String {
+  let address = client_address_cidr.split('/').next().unwrap_or_default().trim();
+
+  match address.parse::<std::net::Ipv4Addr>() {
+    Ok(ipv4) => {
+      let octets = ipv4.octets();
+      format!("{}.{}.{}.0/24", octets[0], octets[1], octets[2])
+    }
+    Err(_) => DEFAULT_CLIENT_CIDR.to_string(),
+  }
+}
+
 fn parse_allowed_ips_csv(raw: Option<&str>) -> Vec<String> {
   let mut parsed = raw
     .unwrap_or_default()
@@ -1963,7 +1985,7 @@ fn parse_allowed_ips_csv(raw: Option<&str>) -> Vec<String> {
 
 fn load_connect_config_for_tunnel(
   secure_storage: &SecureStorage,
-  provider_slug: &str,
+  _provider_slug: &str,
   node: &crate::backend::db::VpnNodeRecord,
   tunnel: &crate::backend::db::TunnelRecord,
 ) -> Result<String, OrchestratorError> {
@@ -2004,7 +2026,11 @@ fn load_connect_config_for_tunnel(
     .filter(|value| !value.trim().is_empty())
     .unwrap_or_else(|| DEFAULT_CLIENT_CIDR.to_string());
 
-  let allowed_ips = parse_allowed_ips_csv(tunnel.allowed_ips.as_deref());
+  let allowed_ips = scope_allowed_ips_for_endpoint(
+    parse_allowed_ips_csv(tunnel.allowed_ips.as_deref()),
+    &endpoint_ip,
+    &client_address_cidr,
+  );
 
   let config = ClientConfigParams {
     private_key,
@@ -2434,10 +2460,6 @@ mod tests {
 
   fn setup_connected_node_and_tunnel(db: &Database) {
     db
-      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
-      .expect("wireguard connection mode should switch to user for test");
-
-    db
       .create_vpn_node("node-connect", TEST_PROVIDER_ID, "Node Connect", "nyc1")
       .expect("node should insert");
     db
@@ -2470,10 +2492,6 @@ mod tests {
   }
 
   fn setup_ready_node_and_tunnel(db: &Database, secure_storage: &SecureStorage) {
-    db
-      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
-      .expect("wireguard connection mode should switch to user for test");
-
     db
       .create_vpn_node("node-ready", TEST_PROVIDER_ID, "Node Ready", "nyc1")
       .expect("node should insert");
@@ -2715,10 +2733,6 @@ mod tests {
     let db = Database::new(test_db_path("connect_missing_tunnel"));
     db.run_migrations().expect("migrations should succeed");
     db
-      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
-      .expect("wireguard connection mode should switch to user for test");
-
-    db
       .update_provider_token_ref(TEST_PROVIDER_ID, Some("do-token:provider-1:abc"))
       .expect("provider token ref should update");
     db
@@ -2867,6 +2881,45 @@ mod tests {
   }
 
   #[test]
+  /// A default route to a server on this machine would take the host off the network.
+  #[test]
+  fn full_tunnel_is_scoped_to_the_subnet_for_a_loopback_endpoint() {
+    let scoped = scope_allowed_ips_for_endpoint(
+      vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+      "127.0.0.1",
+      "10.66.0.2/32",
+    );
+
+    assert_eq!(scoped, vec!["10.66.0.0/24".to_string()]);
+  }
+
+  /// Full-tunnel is the point of a real VPN and must survive untouched.
+  #[test]
+  fn full_tunnel_is_preserved_for_a_real_provider_endpoint() {
+    let allowed = vec!["0.0.0.0/0".to_string(), "::/0".to_string()];
+    let scoped = scope_allowed_ips_for_endpoint(allowed.clone(), "203.0.113.10", "10.66.0.2/32");
+
+    assert_eq!(scoped, allowed);
+  }
+
+  /// A split-tunnel selection is the user's choice and is left alone either way.
+  #[test]
+  fn split_tunnel_selection_is_left_untouched_on_loopback() {
+    let allowed = vec!["10.66.0.0/24".to_string()];
+    let scoped = scope_allowed_ips_for_endpoint(allowed.clone(), "127.0.0.1", "10.66.0.2/32");
+
+    assert_eq!(scoped, allowed);
+  }
+
+  #[test]
+  fn tunnel_subnet_is_derived_from_the_configured_client_address() {
+    assert_eq!(tunnel_subnet_for_client("10.66.0.2/32"), "10.66.0.0/24");
+    assert_eq!(tunnel_subnet_for_client("192.168.240.7/32"), "192.168.240.0/24");
+    // Unparseable input falls back to the documented default rather than inventing a route.
+    assert_eq!(tunnel_subnet_for_client("not-an-address"), DEFAULT_CLIENT_CIDR);
+  }
+
+  #[test]
   fn connect_endpoint_requires_public_ip() {
     let node = crate::backend::db::VpnNodeRecord {
       id: "node-do".to_string(),
@@ -2900,10 +2953,6 @@ mod tests {
   fn reconcile_flags_deleted_droplet() {
     let db = Database::new(test_db_path("reconcile_deleted_droplet"));
     db.run_migrations().expect("migrations should succeed");
-    db
-      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
-      .expect("wireguard connection mode should switch to user for test");
-
     let secure_storage = SecureStorage::dev_mock();
     setup_provider_and_token(&db, &secure_storage);
     db
@@ -3020,10 +3069,6 @@ mod tests {
   fn force_cleanup_removes_partial_provisioning_state() {
     let db = Database::new(test_db_path("force_cleanup_partial"));
     db.run_migrations().expect("migrations should succeed");
-    db
-      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
-      .expect("wireguard connection mode should switch to user for test");
-
     let secure_storage = SecureStorage::dev_mock();
     setup_provider_and_token(&db, &secure_storage);
     db
@@ -3308,13 +3353,3 @@ fn canonical_tunnel_name_for_node(node_name: &str) -> String {
   }
 }
 
-fn load_wireguard_connection_mode(
-  db: &Database,
-  detail: &str,
-) -> Result<WireGuardConnectionMode, OrchestratorError> {
-  db.get_wireguard_connection_mode()
-    .map_err(|source| OrchestratorError::Database {
-      detail: detail.to_string(),
-      source,
-    })
-}

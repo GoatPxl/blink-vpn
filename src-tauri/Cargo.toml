@@ -25,13 +25,14 @@ tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
-keyring = "3"
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
 tauri-plugin-playwright = { version = "0.4.1", optional = true }
+# Key generation only. The interface runtime from this crate, and the `wireguard-nt` driver
+# bindings that went with it, were removed — see backend/wireguard/mod.rs for why. Tunnels are
+# managed through the WireGuard for Windows service.
 defguard_wireguard_rs = "0.11"
-wireguard-nt = "0.5"
 
 [dev-dependencies]
 mockito = "1"

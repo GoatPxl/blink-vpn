@@ -21,7 +21,6 @@ export type TunnelStatus =
   | "error"
   | "deleting";
 
-export type WireGuardConnectionMode = "admin" | "user";
 
 export type ProviderStatus = "active" | "suspended";
 
@@ -125,10 +124,6 @@ export interface WireGuardInstallResult {
   next_action: string;
 }
 
-export interface WireGuardConnectionModeResponse {
-  mode: WireGuardConnectionMode;
-}
-
 export interface DockerReadiness {
   installed: boolean;
   daemon_reachable: boolean;
@@ -179,18 +174,6 @@ export async function invokeHello(name: string): Promise<string> {
 
 export async function checkWireGuardReadiness(): Promise<WireGuardReadiness> {
   return invokeCommand<WireGuardReadiness>("check_wireguard_readiness");
-}
-
-export async function getWireGuardConnectionMode(): Promise<WireGuardConnectionMode> {
-  const response = await invokeCommand<WireGuardConnectionModeResponse>("get_wireguard_connection_mode");
-  return response.mode;
-}
-
-export async function setWireGuardConnectionMode(
-  mode: WireGuardConnectionMode,
-): Promise<WireGuardConnectionMode> {
-  const response = await invokeCommand<WireGuardConnectionModeResponse>("set_wireguard_connection_mode", { mode });
-  return response.mode;
 }
 
 export async function checkDockerReadiness(): Promise<DockerReadiness> {

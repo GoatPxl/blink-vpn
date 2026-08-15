@@ -19,9 +19,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (11, include_str!("../../../migrations/0011_app_settings.sql")),
   (12, include_str!("../../../migrations/0012_vpn_node_client_key.sql")),
   (13, include_str!("../../../migrations/0013_vpn_node_endpoint_port.sql")),
+  (14, include_str!("../../../migrations/0014_drop_wireguard_connection_mode.sql")),
 ];
 
-pub const WIREGUARD_CONNECTION_MODE_SETTING_KEY: &str = "wireguard_connection_mode";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ProviderStatus {
@@ -188,43 +188,6 @@ impl TryFrom<&str> for TunnelStatus {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum WireGuardConnectionMode {
-  Admin,
-  User,
-}
-
-impl WireGuardConnectionMode {
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::Admin => "admin",
-      Self::User => "user",
-    }
-  }
-}
-
-impl Display for WireGuardConnectionMode {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-    f.write_str(self.as_str())
-  }
-}
-
-impl TryFrom<&str> for WireGuardConnectionMode {
-  type Error = DbError;
-
-  fn try_from(value: &str) -> Result<Self, DbError> {
-    match value {
-      "admin" => Ok(Self::Admin),
-      "user" => Ok(Self::User),
-      other => Err(DbError::Decode {
-        context: "app_settings.wireguard_connection_mode",
-        detail: format!(
-          "Encountered unsupported WireGuard connection mode '{other}'. Recover by updating app_settings to 'admin' or 'user'."
-        ),
-      }),
-    }
-  }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProviderRecord {
@@ -469,67 +432,6 @@ impl Database {
         .to_string(),
       source,
     })
-  }
-
-  pub fn get_wireguard_connection_mode(&self) -> Result<WireGuardConnectionMode, DbError> {
-    let connection = self.open_connection()?;
-    let raw_value = connection
-      .query_row(
-        "SELECT value FROM app_settings WHERE key = ?1",
-        params![WIREGUARD_CONNECTION_MODE_SETTING_KEY],
-        |row| row.get::<_, String>(0),
-      )
-      .optional()
-      .map_err(|source| DbError::Query {
-        action: "get_wireguard_connection_mode",
-        detail: "Failed reading WireGuard connection mode from app settings.".to_string(),
-        source,
-      })?
-      .unwrap_or_else(|| WireGuardConnectionMode::Admin.as_str().to_string());
-
-    WireGuardConnectionMode::try_from(raw_value.as_str())
-  }
-
-  pub fn set_wireguard_connection_mode(
-    &self,
-    mode: WireGuardConnectionMode,
-  ) -> Result<(), DbError> {
-    let connection = self.open_connection()?;
-    connection
-      .execute(
-        "INSERT INTO app_settings (key, value, updated_at)
-         VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-         ON CONFLICT(key) DO UPDATE SET
-           value = excluded.value,
-           updated_at = excluded.updated_at",
-        params![WIREGUARD_CONNECTION_MODE_SETTING_KEY, mode.as_str()],
-      )
-      .map_err(|source| DbError::Query {
-        action: "set_wireguard_connection_mode",
-        detail: "Failed persisting WireGuard connection mode to app settings.".to_string(),
-        source,
-      })?;
-
-    Ok(())
-  }
-
-  pub fn has_connected_tunnels(&self) -> Result<bool, DbError> {
-    let connection = self.open_connection()?;
-    let connected = connection
-      .query_row(
-        "SELECT 1 FROM tunnels WHERE status = ?1 LIMIT 1",
-        params![TunnelStatus::Connected.as_str()],
-        |_| Ok(1_i64),
-      )
-      .optional()
-      .map_err(|source| DbError::Query {
-        action: "has_connected_tunnels",
-        detail: "Failed checking for connected tunnels before settings update.".to_string(),
-        source,
-      })?
-      .is_some();
-
-    Ok(connected)
   }
 
   pub fn get_provider(&self, id: &str) -> Result<Option<ProviderRecord>, DbError> {
@@ -1393,7 +1295,7 @@ fn map_init_run_log_row(row: &Row<'_>) -> rusqlite::Result<InitRunLogRecord> {
 
 #[cfg(test)]
 mod tests {
-  use super::{Database, DbError, NodeLifecycleStatus, ProviderStatus, TunnelStatus, WireGuardConnectionMode};
+  use super::{Database, DbError, NodeLifecycleStatus, ProviderStatus, TunnelStatus};
 
   use std::path::PathBuf;
   use std::time::{SystemTime, UNIX_EPOCH};
@@ -1412,32 +1314,6 @@ mod tests {
     let db = Database::new(test_db_path(test_name));
     db.run_migrations().expect("migrations should succeed");
     db
-  }
-
-  #[test]
-  fn wireguard_connection_mode_defaults_to_admin() {
-    let db = setup_db("wireguard_connection_mode_defaults_to_admin");
-
-    let mode = db
-      .get_wireguard_connection_mode()
-      .expect("default wireguard connection mode should load");
-
-    assert_eq!(mode, WireGuardConnectionMode::Admin);
-  }
-
-  #[test]
-  fn wireguard_connection_mode_can_be_updated() {
-    let db = setup_db("wireguard_connection_mode_can_be_updated");
-
-    db
-      .set_wireguard_connection_mode(WireGuardConnectionMode::User)
-      .expect("mode update should persist");
-
-    let mode = db
-      .get_wireguard_connection_mode()
-      .expect("updated wireguard connection mode should load");
-
-    assert_eq!(mode, WireGuardConnectionMode::User);
   }
 
   #[test]
