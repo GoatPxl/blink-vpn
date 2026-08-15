@@ -3159,6 +3159,163 @@ mod tests {
     assert!(user_facing.message.contains("did not respond to the start request in a timely fashion"));
     assert!(user_facing.next_action.contains("retry Connect"));
   }
+
+  /// Full backend path against a real container, stopping short of touching the local machine.
+  ///
+  /// Covers what the adapter-level tests cannot: provisioning through the orchestrator, the
+  /// client keypair persisting across node creation and tunnel creation, and the connect config
+  /// the WireGuard layer would be handed. Everything here is server-side or in-memory — no tunnel
+  /// service is installed and no local interface is created.
+  #[test]
+  #[ignore = "Requires local Docker daemon; provisions a real container"]
+  fn real_docker_full_backend_path_produces_a_connect_config() {
+    use crate::backend::provider::docker::DockerProviderAdapter;
+
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_nanos())
+      .unwrap_or(0);
+
+    let db = Database::new(test_db_path(&format!("real_docker_backend_{suffix}")));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    // Migration 0007 already seeds this provider row.
+    const DOCKER_PROVIDER_ID: &str = "provider-docker";
+    let token_ref = secure_storage
+      .store_digitalocean_api_token(DOCKER_PROVIDER_ID, "dkr_v1_local_dev_mock_token_2026")
+      .expect("faux token should store");
+    db.update_provider_token_ref(DOCKER_PROVIDER_ID, Some(&token_ref))
+      .expect("token ref should persist");
+
+    let providers = ProviderRegistry::from_adapter(Arc::new(DockerProviderAdapter::new()));
+    let orchestrator = Orchestrator::new();
+    let bootstrap = Bootstrap::new();
+    let wireguard = WireGuardManager::new();
+
+    let node_id = format!("node-e2e-{suffix}");
+    let created = orchestrator.create_vpn_node_to_ready(
+      &providers,
+      &bootstrap,
+      &db,
+      &secure_storage,
+      &CreateVpnNodeRequest {
+        node_id: node_id.clone(),
+        provider_id: DOCKER_PROVIDER_ID.to_string(),
+        node_name: format!("e2e-{suffix}"),
+        region: "docker-local".to_string(),
+        plan_key: "docker-small".to_string(),
+      },
+    );
+
+    // Always tear the container down, whatever the assertions do.
+    let cleanup = || {
+      let _ = orchestrator.force_cleanup_vpn_node(
+        &providers,
+        &wireguard,
+        &db,
+        &secure_storage,
+        &node_id,
+      );
+    };
+
+    let created = match created {
+      Ok(created) => created,
+      Err(error) => {
+        cleanup();
+        panic!("node creation should reach Ready: {error:?}");
+      }
+    };
+
+    let outcome = (|| -> Result<String, String> {
+      let node = db
+        .get_vpn_node(&node_id)
+        .map_err(|error| format!("node lookup failed: {error:?}"))?
+        .ok_or_else(|| "node row should exist".to_string())?;
+
+      // The client key was generated at provision time and recorded against the node.
+      let client_public_key = node
+        .client_public_key
+        .clone()
+        .ok_or_else(|| "node should record the client public key".to_string())?;
+      if node.client_private_key_ref.is_none() {
+        return Err("node should record the client private key reference".to_string());
+      }
+
+      // Docker publishes an ephemeral host port, so the endpoint must not be the container's own.
+      let endpoint_port = node
+        .endpoint_port
+        .ok_or_else(|| "node should record the endpoint port".to_string())?;
+      if endpoint_port == DEFAULT_WIREGUARD_PORT {
+        return Err(format!(
+          "expected an ephemeral published port, got the container port {endpoint_port}"
+        ));
+      }
+
+      let tunnel_id = format!("tunnel-e2e-{suffix}");
+      orchestrator
+        .create_and_activate_client_tunnel(
+          &wireguard,
+          &db,
+          &secure_storage,
+          &CreateClientTunnelRequest {
+            tunnel_id: tunnel_id.clone(),
+            node_id: node_id.clone(),
+            tunnel_name: format!("wg-e2e-{suffix}"),
+            client_address_cidr: DEFAULT_CLIENT_CIDR.to_string(),
+            dns_server: None,
+            // Ask for a full tunnel, as the dashboard does.
+            allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+          },
+        )
+        .map_err(|error| format!("tunnel creation should succeed: {error:?}"))?;
+
+      let tunnel = db
+        .get_tunnel(&tunnel_id)
+        .map_err(|error| format!("tunnel lookup failed: {error:?}"))?
+        .ok_or_else(|| "tunnel row should exist".to_string())?;
+
+      // Tunnel creation must reuse the provisioned key, not mint a new one the server has never
+      // heard of.
+      let derived = wireguard
+        .derive_public_key(
+          &secure_storage
+            .get_client_private_key(
+              tunnel
+                .client_private_key_ref
+                .as_deref()
+                .ok_or_else(|| "tunnel should carry a key reference".to_string())?,
+            )
+            .map_err(|error| format!("key lookup failed: {error:?}"))?
+            .ok_or_else(|| "client private key should be readable".to_string())?,
+        )
+        .map_err(|error| format!("public key derivation failed: {error:?}"))?;
+
+      if derived != client_public_key {
+        return Err("tunnel key must match the peer baked into the server".to_string());
+      }
+
+      load_connect_config_for_tunnel(&secure_storage, "docker", &node, &tunnel)
+        .map_err(|error| format!("connect config should render: {error:?}"))
+    })();
+
+    cleanup();
+
+    let config = outcome.unwrap_or_else(|failure| panic!("{failure}"));
+
+    assert!(config.contains("[Interface]"));
+    assert!(config.contains("[Peer]"));
+    assert!(
+      config.contains(&format!("PublicKey = {}", created.server_public_key)),
+      "config must target the provisioned server key"
+    );
+    // The loopback guard must have narrowed the requested default route.
+    assert!(
+      config.contains("AllowedIPs = 10.66.0.0/24"),
+      "a default route to a loopback endpoint must be scoped to the tunnel subnet: {config}"
+    );
+    assert!(!config.contains("0.0.0.0/0"), "full tunnel must not survive: {config}");
+  }
 }
 
 fn select_plan_pricing<'a>(
