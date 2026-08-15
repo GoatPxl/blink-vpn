@@ -24,7 +24,18 @@ const DOCKER_INIT_SCRIPT_PATH: &str = "/goatstare-init.sh";
 
 /// Container-internal WireGuard port. The host-side port is allocated per node by Docker.
 const DOCKER_CONTAINER_WIREGUARD_PORT: u16 = 51820;
-const DOCKER_WIREGUARD_PUBLISH: &str = "127.0.0.1::51820/udp";
+
+/// Publish on every interface of the daemon's host, not just its loopback.
+///
+/// Binding `127.0.0.1` binds loopback *in the daemon's own network namespace*. When the daemon
+/// runs inside WSL2 — reached over `DOCKER_HOST=tcp://...` rather than through Docker Desktop —
+/// that loopback is WSL2's, not Windows'. WSL2 forwards TCP to the Windows localhost but not UDP,
+/// so every WireGuard handshake sent to `127.0.0.1:<port>` was silently discarded: the container
+/// was healthy, its peer configured, and its iptables INPUT counters stayed at zero.
+const DOCKER_WIREGUARD_PUBLISH: &str = "0.0.0.0::51820/udp";
+
+/// Explicit override for the address the client should dial to reach published containers.
+const DOCKER_ENDPOINT_HOST_ENV: &str = "GOATSTARE_DOCKER_ENDPOINT_HOST";
 
 /// Readiness is observed through Docker's own healthcheck, which Docker runs inside the container
 /// and reports as provider metadata via `docker inspect`. The app never execs anything itself.
@@ -182,8 +193,75 @@ impl DockerProviderAdapter {
     format!("{name}-{droplet_id}")
   }
 
-  fn docker_public_endpoint() -> &'static str {
-    "127.0.0.1"
+  /// Address the *client* should dial to reach a published container port.
+  ///
+  /// This is not always `127.0.0.1`. It depends on where the daemon runs relative to this
+  /// machine, and getting it wrong produces a container that looks perfectly healthy while every
+  /// packet sent to it disappears.
+  ///
+  /// Resolved in order:
+  /// 1. `GOATSTARE_DOCKER_ENDPOINT_HOST`, for setups this cannot infer.
+  /// 2. A non-loopback host in `DOCKER_HOST`, which is the daemon's address by definition.
+  /// 3. The WSL2 VM's address, when the daemon reports a WSL2 kernel. Published ports live on
+  ///    that VM's interfaces, and Windows can reach them there but not via its own loopback.
+  /// 4. `127.0.0.1`, correct for a daemon that publishes onto this machine directly.
+  fn docker_endpoint_host() -> String {
+    if let Some(explicit) = std::env::var(DOCKER_ENDPOINT_HOST_ENV)
+      .ok()
+      .map(|value| value.trim().to_string())
+      .filter(|value| !value.is_empty())
+    {
+      return explicit;
+    }
+
+    if let Some(host) = Self::docker_host_from_env() {
+      return host;
+    }
+
+    if let Some(host) = Self::wsl_daemon_host() {
+      return host;
+    }
+
+    "127.0.0.1".to_string()
+  }
+
+  /// Host portion of a `tcp://host:port` DOCKER_HOST, when it is not loopback.
+  fn docker_host_from_env() -> Option<String> {
+    let raw = std::env::var("DOCKER_HOST").ok()?;
+    let without_scheme = raw.split("://").nth(1)?;
+    let host = without_scheme.split(':').next()?.trim();
+
+    if host.is_empty() || host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
+      return None;
+    }
+
+    Some(host.to_string())
+  }
+
+  /// The WSL2 VM's IPv4 address, if the daemon is running inside WSL2.
+  ///
+  /// The address is assigned per WSL2 boot, so it is resolved at provision time and stored with
+  /// the node rather than assumed to be stable.
+  fn wsl_daemon_host() -> Option<String> {
+    let kernel = Self::run_docker(
+      &["info", "--format", "{{.KernelVersion}}"],
+      "read Docker daemon kernel version",
+    )
+    .ok()?;
+
+    if !kernel.to_ascii_lowercase().contains("microsoft-standard-wsl") {
+      return None;
+    }
+
+    let output = Command::new("wsl.exe").args(["hostname", "-I"]).output().ok()?;
+    if !output.status.success() {
+      return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+      .split_whitespace()
+      .find_map(|candidate| candidate.parse::<std::net::Ipv4Addr>().ok())
+      .map(|address| address.to_string())
   }
 
   /// Shell run by the container entrypoint: materialise the payload, run it, then idle.
@@ -722,7 +800,7 @@ impl super::ProviderAdapter for DockerProviderAdapter {
 
     Ok(ProvisionedDroplet {
       droplet_id,
-      public_ipv4: Self::docker_public_endpoint().to_string(),
+      public_ipv4: Self::docker_endpoint_host(),
       endpoint_port,
     })
   }
@@ -742,7 +820,7 @@ impl super::ProviderAdapter for DockerProviderAdapter {
 
     Ok(BootstrapOutputContract {
       server_endpoint_ip: if request.endpoint_ip.trim().is_empty() {
-        Self::docker_public_endpoint().to_string()
+        Self::docker_endpoint_host()
       } else {
         request.endpoint_ip.clone()
       },
@@ -1318,8 +1396,14 @@ mod tests {
   }
 
   #[test]
-  fn docker_public_endpoint_is_localhost() {
-    assert_eq!(DockerProviderAdapter::docker_public_endpoint(), "127.0.0.1");
+  fn docker_endpoint_host_is_reachable_and_not_assumed_loopback() {
+    let host = DockerProviderAdapter::docker_endpoint_host();
+
+    assert!(!host.trim().is_empty(), "an endpoint host must always resolve");
+    assert!(
+      host.parse::<std::net::IpAddr>().is_ok() || !host.contains(char::is_whitespace),
+      "endpoint host should be an address or hostname, got '{host}'"
+    );
   }
 
 }

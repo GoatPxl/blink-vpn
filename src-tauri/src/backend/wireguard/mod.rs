@@ -484,8 +484,15 @@ impl WireGuardManager {
     }
   }
 
+  /// Remove the tunnel service. `wireguard.exe /uninstalltunnelservice` stops it first.
+  ///
+  /// This used to run `sc stop` beforehand, which was redundant and expensive: each elevated call
+  /// is a separate consent prompt, so unregistering cost two where one would do. Combined with
+  /// the caller that also stopped the tunnel before unregistering, disconnect fired several
+  /// prompts in a row.
   fn unregister_tunnel_service(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.deactivate_tunnel_service(tunnel_name)?;
+    self.ensure_installed()?;
+    validate_tunnel_name(tunnel_name)?;
     self.unregister_legacy_tunnel_service(tunnel_name)
   }
 
@@ -1610,6 +1617,35 @@ mod tests {
       !std::path::Path::new(&installed_path).exists(),
       "the config holds a private key and must not outlive the tunnel: {installed_path}"
     );
+  }
+
+  /// Unregistering must issue exactly one privileged command.
+  ///
+  /// `/uninstalltunnelservice` stops the service as part of removing it, so the `sc stop` that
+  /// used to run first was redundant. Each elevated call is its own consent prompt, and with the
+  /// caller also stopping the tunnel beforehand, disconnect fired a run of them.
+  #[test]
+  fn unregister_issues_a_single_privileged_command() {
+    let runner = MockImportRunner::with_service_exists(true);
+    let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
+
+    wireguard
+      .unregister_tunnel("wg-node-1")
+      .expect("unregister should succeed");
+
+    let calls = runner.calls();
+
+    let stops = calls
+      .iter()
+      .filter(|(program, args)| program.contains("sc") && args.first().is_some_and(|arg| arg == "stop"))
+      .count();
+    assert_eq!(stops, 0, "uninstall already stops the service: {calls:?}");
+
+    let uninstalls = calls
+      .iter()
+      .filter(|(_, args)| args.first().is_some_and(|arg| arg == "/uninstalltunnelservice"))
+      .count();
+    assert_eq!(uninstalls, 1, "exactly one uninstall should run: {calls:?}");
   }
 
   /// A failed import must not leave the private key on disk.

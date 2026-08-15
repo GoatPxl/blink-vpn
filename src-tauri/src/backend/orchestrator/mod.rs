@@ -1382,13 +1382,8 @@ impl Orchestrator {
       });
     }
 
-    wireguard
-      .deactivate_tunnel(&tunnel.name)
-      .map_err(|source| OrchestratorError::WireGuard {
-        detail: "Could not deactivate WireGuard tunnel service in disconnect flow.".to_string(),
-        source,
-      })?;
-
+    // Unregister alone: it stops the service as part of removing it. Stopping separately first
+    // only bought a second elevation prompt.
     wireguard
       .unregister_tunnel(&tunnel.name)
       .map_err(|source| OrchestratorError::WireGuard {
@@ -1434,7 +1429,7 @@ impl Orchestrator {
       })?;
 
     for tunnel in tunnels {
-      let _ = wireguard.deactivate_tunnel(&tunnel.name);
+      // Unregister stops the service as part of removal, so one elevated call does both.
       let _ = wireguard.unregister_tunnel(&tunnel.name);
       let _ = db.update_tunnel_stats_snapshot(&tunnel.id, None, None, None);
       let _ = db.update_tunnel_status(&tunnel.id, TunnelStatus::Disconnected, Some("Best-effort force disconnect requested from dashboard."));
@@ -1906,33 +1901,41 @@ fn persist_tunnel_stats_snapshot(
     })
 }
 
-/// Whether a resolved endpoint lives on this machine.
+/// Whether an endpoint is reachable only through this machine's own network.
 ///
+/// Loopback, RFC1918, and link-local endpoints all describe a server that sits behind this host
+/// rather than out on the internet — a local container, a VM on a host-only network, a lab box.
 /// Judged from the endpoint itself rather than the provider slug, so the orchestrator stays
-/// provider-neutral: any adapter that reports a loopback endpoint gets the same treatment.
-fn endpoint_is_loopback(endpoint: &str) -> bool {
-  endpoint
-    .trim()
-    .parse::<std::net::IpAddr>()
-    .map(|address| address.is_loopback())
-    .unwrap_or(false)
+/// provider-neutral. A real VPN server has a publicly routable endpoint, so this never matches
+/// one.
+fn endpoint_is_locally_scoped(endpoint: &str) -> bool {
+  match endpoint.trim().parse::<std::net::IpAddr>() {
+    Ok(std::net::IpAddr::V4(address)) => {
+      address.is_loopback()
+        || address.is_private()
+        || address.is_link_local()
+        || address.is_unspecified()
+    }
+    Ok(std::net::IpAddr::V6(address)) => address.is_loopback() || address.is_unspecified(),
+    Err(_) => false,
+  }
 }
 
-/// Narrow a default route to the tunnel subnet when the server is on this machine.
+/// Narrow a default route to the tunnel subnet when the server is not publicly routable.
 ///
-/// A full-tunnel route (`0.0.0.0/0`) to a loopback endpoint sends the host's entire default route
-/// into a server reachable only *through* that same host. For the local Docker dev provider that
-/// means all traffic depends on the container's onward NAT, and a failure there takes the machine
-/// off the network — with the app that caused it now unreachable over that network too.
+/// A full-tunnel route (`0.0.0.0/0`) to a local endpoint sends the host's entire default route
+/// into a server reachable only *through* that same host. For the Docker dev provider that means
+/// all traffic depends on the container's onward NAT, and a failure there takes the machine off
+/// the network — with the app that caused it now unreachable over that network too.
 ///
-/// A real provider endpoint is untouched, so full-tunnel remains the behaviour that matters in
-/// production.
+/// A real provider endpoint is publicly routable and is untouched, so full-tunnel remains the
+/// behaviour that matters in production.
 fn scope_allowed_ips_for_endpoint(
   allowed_ips: Vec<String>,
   endpoint: &str,
   client_address_cidr: &str,
 ) -> Vec<String> {
-  if !endpoint_is_loopback(endpoint) {
+  if !endpoint_is_locally_scoped(endpoint) {
     return allowed_ips;
   }
 
@@ -1948,7 +1951,7 @@ fn scope_allowed_ips_for_endpoint(
   // configured CIDR rather than a hardcoded range.
   let subnet = tunnel_subnet_for_client(client_address_cidr);
   log::warn!(
-    "event=connect.allowed_ips.scoped endpoint_is_loopback=true scoped_to={} reason=default_route_to_local_endpoint",
+    "event=connect.allowed_ips.scoped endpoint_is_locally_scoped=true scoped_to={} reason=default_route_to_local_endpoint",
     subnet
   );
 
@@ -2906,6 +2909,37 @@ mod tests {
     assert_eq!(scoped, allowed);
   }
 
+  /// A server on a private network is behind this host just as a loopback one is.
+  ///
+  /// The Docker dev provider reports the WSL2 VM's RFC1918 address when the daemon lives there,
+  /// so scoping cannot key on loopback alone.
+  #[test]
+  fn full_tunnel_is_scoped_for_private_and_link_local_endpoints() {
+    for endpoint in ["172.20.34.93", "192.168.1.50", "10.0.0.7", "169.254.10.1"] {
+      let scoped = scope_allowed_ips_for_endpoint(
+        vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+        endpoint,
+        "10.66.0.2/32",
+      );
+
+      assert_eq!(
+        scoped,
+        vec!["10.66.0.0/24".to_string()],
+        "a default route to {endpoint} must be scoped"
+      );
+    }
+  }
+
+  #[test]
+  fn public_endpoints_are_not_treated_as_locally_scoped() {
+    assert!(!endpoint_is_locally_scoped("203.0.113.10"));
+    assert!(!endpoint_is_locally_scoped("8.8.8.8"));
+    assert!(endpoint_is_locally_scoped("127.0.0.1"));
+    assert!(endpoint_is_locally_scoped("172.20.34.93"));
+    // A hostname cannot be judged, so it is left alone rather than guessed at.
+    assert!(!endpoint_is_locally_scoped("vpn.example.com"));
+  }
+
   /// A split-tunnel selection is the user's choice and is left alone either way.
   #[test]
   fn split_tunnel_selection_is_left_untouched_on_loopback() {
@@ -3116,7 +3150,9 @@ mod tests {
     assert_eq!(delete_calls, 1);
 
     let wireguard_state = wireguard_runner.state.lock().expect("lock should work");
-    assert_eq!(wireguard_state.deactivate_calls, 1);
+    // Unregister stops the service as part of removing it, so cleanup issues one privileged
+    // command rather than a stop followed by an uninstall.
+    assert_eq!(wireguard_state.deactivate_calls, 0);
     assert_eq!(wireguard_state.unregister_calls, 1);
   }
 
