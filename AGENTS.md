@@ -81,8 +81,18 @@ aid only**. Nothing in the app may depend on reading it.
 |---|---|---|
 | connect | `wireguard.exe /installtunnelservice <conf>` | 1 UAC prompt |
 | status | `sc query WireGuardTunnel$<name>` | none |
-| stats | `wg show <name> dump` | none |
+| stats | `wg show <name> dump` | **required** — best-effort only |
 | disconnect | `wireguard.exe /uninstalltunnelservice <name>` | 1 UAC prompt |
+
+**`wg show` needs administrator.** It talks to the tunnel service's pipe, which is restricted, so
+an unelevated app gets `Unable to access interface: Permission denied`. Peer metrics are therefore
+enrichment, never load-bearing: whether a tunnel is up is decided by `sc query`, which needs no
+elevation. Treating a failed metrics read as fatal made the app report an error for a tunnel that
+had installed, started, and completed a handshake correctly.
+
+The tunnel config passed to `/installtunnelservice` must **outlive the import**. The path is
+recorded in the service's command line and read on every start; it is not copied. Configs live
+under `%LOCALAPPDATA%\GoatStare\tunnels\` and are removed when the tunnel is unregistered.
 
 **Do not reintroduce the `defguard_wireguard_rs` runtime path or `wireguard-nt`.** They were tried
 and reverted. Three independent reasons, all still true:

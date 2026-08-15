@@ -59,7 +59,7 @@ npm run tauri:e2e:docker:real
 ## Runtime Notes
 
 - No WireGuard driver DLL is bundled or downloaded. The app requires WireGuard for Windows to be installed and drives tunnels through its service.
-- Tunnel lifecycle uses `wireguard.exe /installtunnelservice` and `sc` for start/stop/query; `wg show` supplies peer metrics.
+- Tunnel lifecycle uses `wireguard.exe /installtunnelservice` and `sc` for start/stop/query. `wg show` supplies peer metrics but requires administrator, so handshake and byte counters are unavailable when the app runs unelevated; the tunnel still works.
 - App metadata persists in local app-data SQLite.
 - Secret values remain in secure storage.
 

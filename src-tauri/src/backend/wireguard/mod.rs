@@ -543,17 +543,38 @@ impl WireGuardManager {
       });
     }
 
+    // Peer metrics are supplementary, and reading them is a privileged operation.
+    //
+    // `wg show` talks to the tunnel service's pipe, which is restricted to administrators, so an
+    // unelevated app gets "Unable to access interface: Permission denied". Treating that as fatal
+    // failed the whole connect on a tunnel whose service had installed and started correctly —
+    // the app reported an error for a working tunnel.
+    //
+    // Whether the tunnel is up is decided by `sc query`, which needs no elevation. Handshake age
+    // and byte counters are enrichment: absent when they cannot be read, never a reason to fail.
     self.record_command(&format!("wg show {} dump", tunnel_name));
-    let dump = self
-      .runner
-      .run("wg", &["show", tunnel_name, "dump"], None)
-      .map_err(|source| map_wg_show_dump_error(source, tunnel_name))?;
+    let peer_metrics = match self.runner.run("wg", &["show", tunnel_name, "dump"], None) {
+      Ok(dump) => {
+        let now_unix_seconds = SystemTime::now()
+          .duration_since(UNIX_EPOCH)
+          .map(|value| value.as_secs())
+          .unwrap_or(0);
 
-    let now_unix_seconds = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .map(|value| value.as_secs())
-      .unwrap_or(0);
-    let peer_metrics = parse_wg_dump_metrics(now_unix_seconds, &dump.stdout)?;
+        parse_wg_dump_metrics(now_unix_seconds, &dump.stdout).unwrap_or_else(|_| {
+          self.record_command(&format!("wg show {} dump -> unparseable output", tunnel_name));
+          PeerMetrics::unavailable()
+        })
+      }
+      Err(source) => {
+        // Recorded rather than raised, so the reason is visible in diagnostics.
+        self.record_command(&format!(
+          "wg show {} dump -> metrics unavailable ({})",
+          tunnel_name,
+          map_wg_show_dump_error(source, tunnel_name)
+        ));
+        PeerMetrics::unavailable()
+      }
+    };
 
     Ok(TunnelRuntimeStatus {
       tunnel_name: tunnel_name.to_string(),
@@ -712,6 +733,18 @@ struct PeerMetrics {
   last_handshake_age_seconds: Option<u64>,
   rx_bytes: Option<u64>,
   tx_bytes: Option<u64>,
+}
+
+impl PeerMetrics {
+  /// Metrics could not be read. Distinct from "read successfully, no peer activity yet" only in
+  /// the diagnostics trace, which records why.
+  fn unavailable() -> Self {
+    Self {
+      last_handshake_age_seconds: None,
+      rx_bytes: None,
+      tx_bytes: None,
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -1848,6 +1881,81 @@ mod tests {
         detail: "unsupported mock command".to_string(),
       })
     }
+  }
+
+  #[test]
+  /// A running tunnel whose metrics cannot be read is still running.
+  ///
+  /// `wg show` talks to the tunnel service's pipe, which is restricted to administrators, so an
+  /// unelevated app gets "Permission denied". Raising that failed connect on a tunnel that had
+  /// installed and started correctly — the app reported an error for a working tunnel.
+  #[test]
+  fn running_tunnel_reports_connected_when_peer_metrics_are_not_readable() {
+    /// Service is running, but `wg show` is refused, as it is for a non-elevated caller.
+    #[derive(Clone, Default)]
+    struct MetricsDeniedRunner;
+
+    impl CommandRunner for MetricsDeniedRunner {
+      fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        _stdin: Option<&str>,
+      ) -> Result<CommandOutput, CommandExecError> {
+        let program_name = std::path::Path::new(program)
+          .file_stem()
+          .and_then(|value| value.to_str())
+          .unwrap_or(program);
+
+        if program_name == "wg" && args == ["--version"] {
+          return Ok(CommandOutput { stdout: "wireguard-tools v1".to_string(), stderr: String::new() });
+        }
+
+        if program_name == "wireguard" && args == ["/help"] {
+          return Ok(CommandOutput { stdout: "WireGuard for Windows".to_string(), stderr: String::new() });
+        }
+
+        if program_name == "sc" && args.first().is_some_and(|arg| *arg == "query") {
+          return Ok(CommandOutput {
+            stdout: "STATE              : 4  RUNNING".to_string(),
+            stderr: String::new(),
+          });
+        }
+
+        if program_name == "wg" && args.first().is_some_and(|arg| *arg == "show") {
+          return Err(CommandExecError::NonZeroExit {
+            program: "wg".to_string(),
+            code: Some(1),
+            detail: "Unable to access interface Primary-Node-wg: Permission denied".to_string(),
+          });
+        }
+
+        Err(CommandExecError::NonZeroExit {
+          program: program_name.to_string(),
+          code: Some(1),
+          detail: "unsupported mock command".to_string(),
+        })
+      }
+    }
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MetricsDeniedRunner));
+
+    let status = wireguard
+      .read_tunnel_status("Primary-Node-wg")
+      .expect("unreadable metrics must not fail the status read");
+
+    assert_eq!(status.state, TunnelServiceState::Running);
+    assert_eq!(status.last_handshake_age_seconds, None);
+    assert_eq!(status.rx_bytes, None);
+    assert_eq!(status.tx_bytes, None);
+
+    // The reason must be recoverable from diagnostics rather than silently dropped.
+    let snapshot = wireguard.debug_snapshot();
+    assert!(
+      snapshot.commands.iter().any(|entry| entry.contains("metrics unavailable")),
+      "the trace should record why metrics were missing: {:?}",
+      snapshot.commands
+    );
   }
 
   #[test]
