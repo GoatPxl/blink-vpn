@@ -83,7 +83,8 @@ pub fn run() {
       commands::system::install_wireguard_with_prerequisites,
       commands::system::check_wireguard_readiness,
       commands::system::check_docker_readiness,
-      commands::system::register_provider_token,
+      commands::system::register_provider_credential,
+      commands::system::list_provider_credential_fields,
       commands::system::list_provider_regions,
       commands::system::list_provider_pricing,
       commands::system::list_providers,
@@ -112,8 +113,8 @@ pub fn run() {
       commands::system::list_app_locations,
       commands::system::reveal_app_location,
       commands::system::validate_provider_token,
-      commands::system::provision_provider_droplet,
-      commands::system::delete_provider_droplet
+      commands::system::provision_provider_node,
+      commands::system::delete_provider_node
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

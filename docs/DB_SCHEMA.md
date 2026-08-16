@@ -43,7 +43,10 @@ Columns:
 - `name` TEXT NOT NULL
 - `region` TEXT NOT NULL
 - `lifecycle_status` TEXT NOT NULL
-- `external_ref` TEXT NULL
+- `external_ref` TEXT NULL — the provider's own identifier for the node, opaque above the adapter.
+  A DigitalOcean droplet id (`42`), an EC2 `<region>/<instance-id>` (`us-east-1/i-0abc123def4567890`),
+  or a Docker container id. Nothing outside the owning adapter parses it; it was briefly read back as
+  a `u64`, and the parse failure branch skipped the remote delete while reporting success.
 - `public_ipv4` TEXT NULL
 - `server_public_key` TEXT NULL
 - `error_reason` TEXT NULL
@@ -206,6 +209,8 @@ Current migration sequence in [src-tauri/migrations](src-tauri/migrations):
 15. Tunnel `connected_at`
 16. Provider validation result
 17. Activity events *(replaces init run logs)*
+18. Backfill legacy correlation ids
+19. Amazon EC2 provider seed
 
 Migration rules:
 

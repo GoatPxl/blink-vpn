@@ -23,6 +23,7 @@ them down before asserting anything, so a failed assertion cannot strand a dropl
 | Real Docker backend | provisioning, bootstrap readiness, teardown against a live daemon | needs Docker |
 | Real Tauri E2E | the app itself — UI, commands, backend, daemon | needs Docker |
 | Real DigitalOcean | the production path against a live droplet | **billable** |
+| Real Amazon EC2 | the production path against a live instance | **billable** |
 
 ## Required Verification Matrix
 
@@ -34,7 +35,8 @@ them down before asserting anything, so a failed assertion cannot strand a dropl
 | Docker provider / bootstrap | `npm run backend:test:docker:real` |
 | UI or command surface | `npm run tauri:e2e:provisioning` |
 | Connect / disconnect | `npm run tauri:e2e:connect` (**elevated shell**) |
-| Provider adapter or cloud-init | `npm run backend:test:do:real` (**billable**) |
+| DigitalOcean adapter or cloud-init | `npm run backend:test:do:real` (**billable**) |
+| Amazon EC2 adapter or cloud-init | `npm run backend:test:ec2:real` (**billable**) |
 
 ## Frontend unit lane
 
@@ -107,6 +109,43 @@ Two tests:
 - **Handshake** — the production path proven end to end. A client container connects to the droplet
   and completes a real WireGuard handshake, confirming that cloud-init brought the server up from
   the baked-in payload alone.
+
+### Amazon EC2
+
+```bash
+GOATSTARE_AWS_TEST_ACCESS_KEY_ID=<key> \
+GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY=<secret> \
+npm run backend:test:ec2:real
+```
+
+`GOATSTARE_AWS_TEST_REGION` overrides the default `us-east-1`.
+
+**Creates real, billable resources** — a `t3.micro` instance *and* a public IPv4 address, which AWS
+bills separately. The test destroys both on every exit path, including panics, and asserts only
+after teardown.
+
+EC2 leaves **two** resources behind rather than one: the instance and the security group created
+alongside it. A security group cannot be deleted until its instance has finished releasing its
+network interface, so teardown waits for termination first. The adapter reports a group it could not
+remove rather than swallowing it — a silent success there is how an account accumulates orphans.
+
+Confirm nothing is left over if a run is interrupted:
+
+```bash
+aws ec2 describe-instances --region us-east-1 \
+  --filters "Name=tag:goatstare,Values=phase1" "Name=instance-state-name,Values=pending,running,stopping,stopped"
+aws ec2 describe-security-groups --region us-east-1 --filters "Name=tag:goatstare,Values=phase1"
+```
+
+Every resource this app creates carries the `goatstare=phase1` tag, which is what makes that sweep
+possible.
+
+The lane asserts an instance reaches ready with an endpoint and a locally-generated server key, that
+`external_ref` records `<region>/<instance-id>`, and that the rendered client config carries a full
+tunnel — with nothing read back off the server. There is no EC2 handshake test: the handshake lane
+proves cloud-init brings WireGuard up from the baked-in payload, and both providers render the
+*identical* script through `render_cloud_init`, so the DigitalOcean handshake test already covers
+that behavior. What differs for EC2 is resource orchestration, which is what this lane exercises.
 
 The client runs in a container so no Windows elevation is needed. It is the *client*; nothing execs
 into the provisioned droplet.

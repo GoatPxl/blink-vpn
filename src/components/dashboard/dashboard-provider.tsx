@@ -23,7 +23,7 @@ import {
   listProviders,
   listTunnelsForNode,
   listVpnNodes,
-  registerProviderToken,
+  registerProviderCredential,
   resumeProvider as resumeProviderCommand,
   revealAppLocation,
   suspendProvider as suspendProviderCommand,
@@ -169,7 +169,7 @@ type DashboardContextValue = {
   loadDashboard: (preferredSelectedNodeId?: string) => Promise<void>;
   refreshHealth: () => Promise<void>;
   /** Saves and validates in one step. Resolves true only when the key was stored. */
-  saveToken: (apiToken: string, targetProviderId?: string) => Promise<boolean>;
+  saveToken: (credentials: Record<string, string>, targetProviderId?: string) => Promise<boolean>;
   /** Checks one provider's key and records the result against that provider alone. */
   validateProviderKey: (providerId: string) => Promise<string | null>;
   /** Which provider is being checked right now, so only that row shows a busy state. */
@@ -702,13 +702,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
    *
    * Returns whether the key was stored, so the caller knows whether it is safe to clear the field.
    */
-  const saveToken = useCallback(async (apiToken: string, targetProviderId?: string) => {
+  const saveToken = useCallback(async (credentials: Record<string, string>, targetProviderId?: string) => {
     const provider = targetProviderId ?? providerId;
     const name = providers.find((entry) => entry.id === provider)?.name ?? providerName;
 
     setBusyAction("save-token");
     try {
-      await registerProviderToken(provider, name, apiToken);
+      await registerProviderCredential(provider, name, credentials);
       setRecovery(null);
     } catch (error) {
       setProviderFeedback(handleError(error));

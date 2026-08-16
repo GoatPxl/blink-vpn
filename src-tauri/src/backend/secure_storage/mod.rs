@@ -15,14 +15,26 @@ use windows_sys::Win32::Security::Credentials::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretKind {
-  DigitalOceanApiToken,
+  /// A provider's credential, whatever shape that provider needs.
+  ///
+  /// Named after DigitalOcean while it was the only production provider, which meant an AWS key
+  /// pair would have been filed under `do-token`.
+  ProviderCredential,
   ClientPrivateKey,
 }
+
+/// The reference prefix written for credentials before the kind was renamed.
+///
+/// Never written any more, but every existing install has its provider credential recorded under a
+/// `do-token__…` reference in `providers.token_ref`. Dropping it from the read allowlist would make
+/// `validate_secret_ref` reject those references outright, locking users out of a credential that
+/// is sitting readable in Credential Manager.
+const LEGACY_PROVIDER_CREDENTIAL_PREFIX: &str = "do-token";
 
 impl SecretKind {
   fn prefix(self) -> &'static str {
     match self {
-      Self::DigitalOceanApiToken => "do-token",
+      Self::ProviderCredential => "provider-cred",
       Self::ClientPrivateKey => "wg-client-key",
     }
   }
@@ -132,26 +144,19 @@ impl SecureStorage {
     })
   }
 
-  pub fn store_digitalocean_api_token(
+  /// Store a provider credential and return the reference to record on the provider row.
+  ///
+  /// The value is opaque here — a bare token for a single-field provider, a JSON object for one
+  /// that needs several. Only the adapter interprets it.
+  pub fn store_provider_credential(
     &self,
     provider_id: &str,
-    token: &str,
+    credential: &str,
   ) -> Result<String, SecretStoreError> {
-    self.store_verified(SecretKind::DigitalOceanApiToken, provider_id, token)
+    self.store_verified(SecretKind::ProviderCredential, provider_id, credential)
   }
 
-  pub fn store_provider_api_token(
-    &self,
-    provider_id: &str,
-    token: &str,
-  ) -> Result<String, SecretStoreError> {
-    self.store_digitalocean_api_token(provider_id, token)
-  }
-
-  pub fn get_digitalocean_api_token(
-    &self,
-    token_ref: &str,
-  ) -> Result<Option<String>, SecretStoreError> {
+  pub fn get_provider_credential(&self, token_ref: &str) -> Result<Option<String>, SecretStoreError> {
     let resolved = self.inner.retrieve_secret(token_ref)?;
     if let Some(value) = resolved {
       if let Ok(mut guard) = self.session_cache.lock() {
@@ -167,20 +172,12 @@ impl SecureStorage {
     Ok(None)
   }
 
-  pub fn get_provider_api_token(&self, token_ref: &str) -> Result<Option<String>, SecretStoreError> {
-    self.get_digitalocean_api_token(token_ref)
-  }
-
-  pub fn delete_digitalocean_api_token(&self, token_ref: &str) -> Result<(), SecretStoreError> {
+  pub fn delete_provider_credential(&self, token_ref: &str) -> Result<(), SecretStoreError> {
     self.inner.delete_secret(token_ref)?;
     if let Ok(mut guard) = self.session_cache.lock() {
       guard.remove(token_ref);
     }
     Ok(())
-  }
-
-  pub fn delete_provider_api_token(&self, token_ref: &str) -> Result<(), SecretStoreError> {
-    self.delete_digitalocean_api_token(token_ref)
   }
 
   pub fn store_client_private_key(
@@ -262,8 +259,9 @@ impl WindowsCredentialStore {
     // Both the current `kind__owner__uuid` form and the older `kind:owner:uuid` form begin with a
     // known kind prefix, so checking the prefix covers both without branching on shape.
     let has_known_kind = [
-      SecretKind::DigitalOceanApiToken.prefix(),
+      SecretKind::ProviderCredential.prefix(),
       SecretKind::ClientPrivateKey.prefix(),
+      LEGACY_PROVIDER_CREDENTIAL_PREFIX,
     ]
     .iter()
     .any(|prefix| trimmed.starts_with(prefix));
@@ -535,7 +533,7 @@ mod tests {
     let storage = SecureStorage::dev_mock();
 
     let token_ref = storage
-      .store_digitalocean_api_token("provider-1", "dop_v1_secret")
+      .store_provider_credential("provider-1", "dop_v1_secret")
       .expect("token should store in mock backend");
 
     let key_ref = storage
@@ -543,7 +541,7 @@ mod tests {
       .expect("private key should store in mock backend");
 
     let token = storage
-      .get_digitalocean_api_token(&token_ref)
+      .get_provider_credential(&token_ref)
       .expect("token lookup should succeed")
       .expect("token should exist");
     let key = storage
@@ -555,7 +553,7 @@ mod tests {
     assert_eq!(key, "wg-private-key");
 
     storage
-      .delete_digitalocean_api_token(&token_ref)
+      .delete_provider_credential(&token_ref)
       .expect("token delete should succeed");
     storage
       .delete_client_private_key(&key_ref)
@@ -563,7 +561,7 @@ mod tests {
 
     assert!(
       storage
-        .get_digitalocean_api_token(&token_ref)
+        .get_provider_credential(&token_ref)
         .expect("token lookup should succeed")
         .is_none()
     );
@@ -580,11 +578,11 @@ mod tests {
     let storage = SecureStorage::from_store(Arc::new(EvaporatingStore::default()));
 
     let token_ref = storage
-      .store_digitalocean_api_token("provider-1", "dop_v1_secret")
+      .store_provider_credential("provider-1", "dop_v1_secret")
       .expect("token should store");
 
     let token = storage
-      .get_digitalocean_api_token(&token_ref)
+      .get_provider_credential(&token_ref)
       .expect("token lookup should succeed");
 
     assert!(token.is_none());
@@ -672,7 +670,7 @@ mod tests {
     let written = Arc::clone(&store.written);
     let storage = SecureStorage::from_store(Arc::new(store));
 
-    let result = storage.store_digitalocean_api_token("provider-1", "dop_v1_secret");
+    let result = storage.store_provider_credential("provider-1", "dop_v1_secret");
 
     assert!(result.is_err(), "an unverifiable write must not report success");
 

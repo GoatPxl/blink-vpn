@@ -22,7 +22,7 @@ import {
   validateKeepalive,
   type ProviderKeyStatus,
 } from "@/lib/settings-display";
-import type { TunnelSettings, WireGuardReadiness } from "@/lib/tauri";
+import { listProviderCredentialFields, type CredentialField, type TunnelSettings, type WireGuardReadiness } from "@/lib/tauri";
 
 const STATUS_CLASSES: Record<ProviderKeyStatus, string> = {
   verified: "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]",
@@ -54,7 +54,7 @@ export function SettingsView({
   providers: ProviderRecord[];
   nodes: VpnNodeRecord[];
   validatingProviderId: string | null;
-  onSaveKey: (providerId: string, key: string) => Promise<boolean>;
+  onSaveKey: (providerId: string, credentials: Record<string, string>) => Promise<boolean>;
   onRevalidate: (provider: ProviderRecord) => Promise<void>;
   onSuspendProvider: (provider: ProviderRecord) => Promise<void>;
   onResumeProvider: (provider: ProviderRecord) => Promise<void>;
@@ -203,6 +203,9 @@ export function SettingsView({
 
       {modalProvider ? (
         <KeyModal
+          // Remount on provider change so the credential inputs reset with it. Switching provider
+          // must not carry a half-typed value across to a different account's form.
+          key={modalProvider.id}
           provider={modalProvider}
           providers={visibleProviders}
           onChangeProvider={setKeyModalProviderId}
@@ -402,13 +405,38 @@ function KeyModal({
   providers: ProviderRecord[];
   onChangeProvider: (providerId: string) => void;
   onClose: () => void;
-  onSave: (providerId: string, key: string) => Promise<boolean>;
+  onSave: (providerId: string, credentials: Record<string, string>) => Promise<boolean>;
   busyAction: DashboardBusyAction;
 }) {
-  const [key, setKey] = useState("");
-  const [reveal, setReveal] = useState(false);
-  const isDocker = provider.slug === "docker";
+  // The fields come from the provider's adapter rather than from a slug comparison here, so a
+  // provider needing two of them (an AWS access key id and its secret) needs no change in this file.
+  const [fields, setFields] = useState<CredentialField[] | null>(null);
+  const [fieldsError, setFieldsError] = useState<string | null>(null);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const busy = busyAction !== null;
+
+  // The modal is remounted per provider (see its `key`), so there is no stale state to clear here.
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const loaded = await listProviderCredentialFields(provider.id);
+        if (!cancelled) setFields(loaded);
+      } catch (error) {
+        if (!cancelled) {
+          setFieldsError(error instanceof Error ? error.message : "Could not load this provider's credential fields.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [provider.id]);
+
+  const allFilled = (fields ?? []).length > 0 && (fields ?? []).every((field) => (values[field.key] ?? "").trim() !== "");
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]" onClick={onClose} aria-hidden="true">
@@ -439,30 +467,47 @@ function KeyModal({
             </Field>
           ) : null}
 
-          <Field label="API key">
-            <div className="flex gap-2">
-              <input
-                // A key is one line and should not sit on screen in plaintext; this was a
-                // full-height textarea.
-                type={reveal ? "text" : "password"}
-                value={key}
-                onChange={(event) => setKey(event.target.value)}
-                placeholder={isDocker ? "dkr_v1_..." : "dop_v1_..."}
-                autoComplete="off"
-                spellCheck={false}
-                disabled={busy}
-                className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 font-mono text-[var(--on-surface)] outline-none"
-              />
-              <Button tone="secondary" onClick={() => setReveal((current) => !current)} className="px-3 py-2 text-xs">
-                {reveal ? "Hide" : "Show"}
-              </Button>
-            </div>
-            <p className="mt-1 text-xs text-[var(--on-surface-variant)]">
-              {isDocker
-                ? "Local-only placeholder for the Docker development provider."
-                : "Needs read and write access to Droplets."}
-            </p>
-          </Field>
+          {fieldsError ? (
+            <p className="text-sm text-[var(--error)]">{fieldsError}</p>
+          ) : fields === null ? (
+            <p className="text-sm text-[var(--on-surface-variant)]">Loading credential fields…</p>
+          ) : (
+            fields.map((field) => {
+              const reveal = revealed[field.key] ?? false;
+              return (
+                <Field key={field.key} label={field.label}>
+                  <div className="flex gap-2">
+                    <input
+                      // A credential value is one line and should not sit on screen in plaintext;
+                      // this was a full-height textarea.
+                      type={field.secret && !reveal ? "password" : "text"}
+                      value={values[field.key] ?? ""}
+                      onChange={(event) =>
+                        setValues((current) => ({ ...current, [field.key]: event.target.value }))
+                      }
+                      placeholder={field.placeholder}
+                      autoComplete="off"
+                      spellCheck={false}
+                      disabled={busy}
+                      className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 font-mono text-[var(--on-surface)] outline-none"
+                    />
+                    {field.secret ? (
+                      <Button
+                        tone="secondary"
+                        onClick={() => setRevealed((current) => ({ ...current, [field.key]: !reveal }))}
+                        className="px-3 py-2 text-xs"
+                      >
+                        {reveal ? "Hide" : "Show"}
+                      </Button>
+                    ) : null}
+                  </div>
+                  {field.help ? (
+                    <p className="mt-1 text-xs text-[var(--on-surface-variant)]">{field.help}</p>
+                  ) : null}
+                </Field>
+              );
+            })
+          )}
         </div>
 
         <div className="mt-6 flex items-center justify-end gap-2">
@@ -470,13 +515,16 @@ function KeyModal({
           <Button
             onClick={() => {
               void (async () => {
-                const stored = await onSave(provider.id, key.trim());
+                const trimmed = Object.fromEntries(
+                  (fields ?? []).map((field) => [field.key, (values[field.key] ?? "").trim()]),
+                );
+                const stored = await onSave(provider.id, trimmed);
                 // Only clear on a save that actually stored something — a failed save used to wipe
                 // what was typed.
                 if (stored) onClose();
               })();
             }}
-            disabled={busy || !key.trim()}
+            disabled={busy || !allFilled}
           >
             {busyAction === "save-token" ? "Saving" : busyAction === "validate-token" ? "Checking" : "Save & validate"}
           </Button>

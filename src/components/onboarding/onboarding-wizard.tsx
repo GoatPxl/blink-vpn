@@ -6,11 +6,13 @@ import {
   checkWireGuardReadiness,
   createVpnNode,
   installWireGuardWithPrerequisites,
+  listProviderCredentialFields,
   listProviders,
   listVpnNodes,
   openWireGuardInstallPage,
-  registerProviderToken,
+  registerProviderCredential,
   validateProviderToken,
+  type CredentialField,
   type ProviderPlanPricing,
   type ProviderRegion,
   type WireGuardInstallResult,
@@ -45,7 +47,10 @@ export function OnboardingWizard() {
   const [wireGuardInstallBusy, setWireGuardInstallBusy] = useState(false);
   const [wireGuardInstallMessage, setWireGuardInstallMessage] = useState("");
 
-  const [apiToken, setApiToken] = useState("");
+  // Credential inputs are declared by the provider's adapter, so this step renders one field for
+  // DigitalOcean and two for AWS without branching on a provider slug here.
+  const [credentialFields, setCredentialFields] = useState<CredentialField[]>([]);
+  const [credentialValues, setCredentialValues] = useState<Record<string, string>>({});
   const [tokenMessage, setTokenMessage] = useState("No token action yet.");
   const [tokenBusy, setTokenBusy] = useState(false);
   const [storedProviderTokenRef, setStoredProviderTokenRef] = useState<string | null>(null);
@@ -87,6 +92,29 @@ export function OnboardingWizard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isHydrated, state.providerId, step]);
 
+  // The adapter decides which credential inputs this provider needs.
+  useEffect(() => {
+    if (!isHydrated) return;
+    if (step < 2) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const fields = await listProviderCredentialFields(state.providerId);
+        if (cancelled) return;
+        setCredentialFields(fields);
+        setCredentialValues({});
+      } catch (error) {
+        if (cancelled) return;
+        setTokenMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isHydrated, state.providerId, step]);
+
   useEffect(() => {
     if (!isHydrated) return;
     if (step !== 3) return;
@@ -104,11 +132,12 @@ export function OnboardingWizard() {
     return selectedRegionPricing.find((entry) => entry.plan_key === state.plan) ?? null;
   }, [selectedRegionPricing, state.plan]);
 
-  const hasUnsavedTokenInput = apiToken.trim().length > 0;
+  const hasUnsavedTokenInput = Object.values(credentialValues).some((value) => value.trim().length > 0);
   const hasStoredProviderToken = !!storedProviderTokenRef;
   const currentProviderName = state.providerName || "Provider";
-  const currentProviderSlug = state.providerName.toLowerCase() === "docker" ? "docker" : "digitalocean";
-  const tokenPlaceholder = currentProviderSlug === "docker" ? "dkr_v1_..." : "dop_v1_...";
+  const allCredentialFieldsFilled =
+    credentialFields.length > 0 &&
+    credentialFields.every((field) => (credentialValues[field.key] ?? "").trim().length > 0);
 
   async function syncStoredProviderTokenState(validateStoredToken = false) {
     try {
@@ -268,17 +297,19 @@ export function OnboardingWizard() {
   }
 
   async function onSaveToken() {
-    if (!apiToken.trim()) {
-      setTokenMessage(`Enter a ${currentProviderName} token to continue.`);
+    if (!allCredentialFieldsFilled) {
+      setTokenMessage(`Fill in every ${currentProviderName} credential field to continue.`);
       return;
     }
 
     setTokenBusy(true);
     try {
-      const saveResult = await registerProviderToken(
+      const saveResult = await registerProviderCredential(
         state.providerId,
         state.providerName,
-        apiToken.trim(),
+        Object.fromEntries(
+          credentialFields.map((field) => [field.key, (credentialValues[field.key] ?? "").trim()]),
+        ),
       );
       setState((current) => ({ ...current, tokenSaved: true, tokenValidated: false }));
 
@@ -287,7 +318,7 @@ export function OnboardingWizard() {
       await syncStoredProviderTokenState();
       setTokenMessage(`${saveResult} ${validateResult}`);
       setState((current) => ({ ...current, tokenSaved: true, tokenValidated: true }));
-      setApiToken("");
+      setCredentialValues({});
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const needsResave = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
@@ -532,27 +563,30 @@ export function OnboardingWizard() {
 
           {step === 2 ? (
             <div className="space-y-4">
-              <p className="text-sm text-[var(--on-surface-variant)]">Add your {currentProviderName} API token to provision and manage the VPN node.</p>
-              <label className="block space-y-2 text-sm text-[var(--on-surface-variant)]">
-                <span>API Token</span>
-                <input
-                  type="password"
-                  value={apiToken}
-                  onChange={(event) => {
-                    const nextValue = event.target.value;
-                    setApiToken(nextValue);
-                    if (nextValue) {
-                      setState((current) => ({
-                        ...current,
-                        tokenSaved: false,
-                        tokenValidated: false,
-                      }));
-                    }
-                  }}
-                  className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none"
-                  placeholder={tokenPlaceholder}
-                />
-              </label>
+              <p className="text-sm text-[var(--on-surface-variant)]">Add your {currentProviderName} credentials to provision and manage the VPN node.</p>
+              {credentialFields.map((field) => (
+                <label key={field.key} className="block space-y-2 text-sm text-[var(--on-surface-variant)]">
+                  <span>{field.label}</span>
+                  <input
+                    type={field.secret ? "password" : "text"}
+                    value={credentialValues[field.key] ?? ""}
+                    onChange={(event) => {
+                      const nextValue = event.target.value;
+                      setCredentialValues((current) => ({ ...current, [field.key]: nextValue }));
+                      if (nextValue) {
+                        setState((current) => ({
+                          ...current,
+                          tokenSaved: false,
+                          tokenValidated: false,
+                        }));
+                      }
+                    }}
+                    className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none"
+                    placeholder={field.placeholder}
+                  />
+                  {field.help ? <span className="block text-xs">{field.help}</span> : null}
+                </label>
+              ))}
               <div className="flex flex-wrap gap-3">
                 <button type="button" onClick={() => void onSaveToken()} disabled={tokenBusy} className="inline-flex items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[#10131b] disabled:opacity-50">Save + Validate Token</button>
                 <button type="button" onClick={() => void onValidateToken()} disabled={tokenBusy || hasUnsavedTokenInput || (!state.tokenSaved && !hasStoredProviderToken)} className="inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 text-sm text-[var(--on-surface)] disabled:opacity-50">Validate Token</button>

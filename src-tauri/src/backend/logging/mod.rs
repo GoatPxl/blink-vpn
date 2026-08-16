@@ -45,6 +45,11 @@ pub fn redact_sensitive_text(input: &str) -> String {
   output = redact_assignment_like(&output, "authorization");
   output = redact_assignment_like(&output, "token_ref");
   output = redact_assignment_like(&output, "api_token");
+  // AWS credentials are stored as a field set, so the secret travels under its own key rather than
+  // as `api_token`. `access_key_id` is deliberately *not* redacted: it is an identifier, not a
+  // secret, and seeing which key is in use is a real diagnostic (AGENTS.md §6).
+  output = redact_assignment_like(&output, "secret_access_key");
+  output = redact_assignment_like(&output, "session_token");
   output = redact_assignment_like(&output, "private_key");
   output = redact_assignment_like(&output, "PrivateKey");
   output = redact_assignment_like(&output, "Authorization");
@@ -132,6 +137,26 @@ mod tests {
     assert!(!output.contains("secret-token"));
     assert!(!output.contains("very-secret-key"));
     assert!(!output.contains("abc123"));
+    assert!(output.contains("[REDACTED]"));
+  }
+
+  /// An AWS credential is stored as a JSON field set, which is the exact shape that would reach a
+  /// log or a diagnostics bundle if a credential were ever formatted into one.
+  ///
+  /// The access key id is deliberately left alone: it identifies which key is in use, which is a
+  /// real diagnostic, and it is not a secret.
+  #[test]
+  fn redacts_an_aws_secret_key_but_keeps_its_access_key_id() {
+    let input = r#"{"access_key_id": "AKIAEXAMPLENOTREAL", "secret_access_key": "wJalrXUtn EXAMPLE key", "session_token": "FwoGZXIvYXdzEExample"}"#;
+    let output = redact_sensitive_text(input);
+
+    assert!(!output.contains("wJalrXUtn"), "the secret key leaked: {output}");
+    assert!(!output.contains("EXAMPLE key"), "the secret key leaked: {output}");
+    assert!(!output.contains("FwoGZXIvYXdzEExample"), "the session token leaked: {output}");
+    assert!(
+      output.contains("AKIAEXAMPLENOTREAL"),
+      "the access key id is not a secret and should survive: {output}"
+    );
     assert!(output.contains("[REDACTED]"));
   }
 

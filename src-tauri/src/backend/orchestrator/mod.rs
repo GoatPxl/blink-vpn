@@ -17,7 +17,7 @@ use crate::backend::db::{
 };
 use crate::backend::logging;
 use crate::backend::provider::{
-  BootstrapWaitRequest, NodeInitRequest, ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError,
+  BootstrapWaitRequest, InitDelivery, NodeInitRequest, ProvisionedNode, ProviderNodeStatus, ProviderFlowError,
   ProviderPlanPricing, ProviderRegion, ProviderRegistry, DEFAULT_REGION, DEFAULT_SIZE,
 };
 use crate::backend::secure_storage::SecureStorage;
@@ -143,7 +143,8 @@ pub struct CreateVpnNodeRequest {
 pub struct CreateVpnNodeResult {
   pub node_id: String,
   pub status: NodeLifecycleStatus,
-  pub droplet_id: u64,
+  /// The provider's own id for the node, as stored in `vpn_nodes.external_ref`.
+  pub external_ref: String,
   pub server_endpoint_ip: String,
   pub server_public_key: String,
   pub listen_port: u16,
@@ -687,22 +688,14 @@ impl Orchestrator {
         }
       };
 
-      let droplet_id = match external_ref.parse::<u64>() {
-        Ok(value) => value,
-        Err(_) => {
-          node.provider_status = Some(ProviderDropletStatus::Unknown.as_str().to_string());
-          continue;
-        }
-      };
-
-      let live_status = match providers.provider_droplet_status(
+      let live_status = match providers.provider_node_status(
         db,
         secure_storage,
         &node.provider_id,
-        droplet_id,
+        external_ref,
       ) {
         Ok(status) => status,
-        Err(_) => ProviderDropletStatus::Unknown,
+        Err(_) => ProviderNodeStatus::Unknown,
       };
 
       node.provider_status = Some(live_status.as_str().to_string());
@@ -846,7 +839,7 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     provider_id: &str,
     droplet_name: &str,
-  ) -> Result<ProvisionedDroplet, OrchestratorError> {
+  ) -> Result<ProvisionedNode, OrchestratorError> {
     let server_keypair = generate_server_keypair().map_err(|source| OrchestratorError::Keygen {
       detail: "Failed to generate WireGuard server keypair for droplet provisioning.".to_string(),
       source,
@@ -908,18 +901,18 @@ impl Orchestrator {
     Ok(init_result.provisioned)
   }
 
-  pub fn destroy_droplet_for_provider(
+  pub fn destroy_node_for_provider(
     &self,
     providers: &ProviderRegistry,
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
-    droplet_id: u64,
+    node_id: &str,
   ) -> Result<(), OrchestratorError> {
     providers
-      .delete_provider_droplet(db, secure_storage, provider_id, droplet_id)
+      .delete_provider_node(db, secure_storage, provider_id, node_id)
       .map_err(|source| OrchestratorError::Provider {
-        detail: "Destroy flow failed while deleting droplet.".to_string(),
+        detail: "Destroy flow failed while deleting the provider node.".to_string(),
         source,
       })
   }
@@ -997,12 +990,14 @@ impl Orchestrator {
     let mut remote_droplet_delete_succeeded = false;
     if let Some(node) = node.as_ref() {
       if let Some(external_ref) = node.external_ref.as_deref() {
-        if let Ok(droplet_id) = external_ref.parse::<u64>() {
-          remote_droplet_delete_attempted = true;
-          remote_droplet_delete_succeeded = providers
-            .delete_provider_droplet(db, secure_storage, &node.provider_id, droplet_id)
-            .is_ok();
-        }
+        // Every stored external_ref is attempted. This used to be guarded by a `u64` parse, so a
+        // node whose provider does not use numeric ids would skip the remote delete *and* report
+        // cleanup as successful — leaving a billable resource behind with nothing on screen to
+        // say so (AGENTS.md §8).
+        remote_droplet_delete_attempted = true;
+        remote_droplet_delete_succeeded = providers
+          .delete_provider_node(db, secure_storage, &node.provider_id, external_ref)
+          .is_ok();
       }
     }
 
@@ -1132,11 +1127,10 @@ impl Orchestrator {
             existing.public_ipv4.clone(),
             existing.server_public_key.clone(),
           ) {
-            let droplet_id = external_ref.parse::<u64>().unwrap_or(0);
             return Ok(CreateVpnNodeResult {
               node_id: existing.id,
               status: NodeLifecycleStatus::Ready,
-              droplet_id,
+              external_ref,
               server_endpoint_ip: public_ip,
               server_public_key,
               listen_port: DEFAULT_WIREGUARD_PORT,
@@ -1238,24 +1232,34 @@ impl Orchestrator {
 
     // Both renderers receive the same key material and produce the same server state; only the
     // delivery mechanism differs (cloud-init write_files vs. a mounted entrypoint script).
-    let bootstrap_artifact = if provider_slug == "docker" {
-      bootstrap.render_docker_init(
+    //
+    // Which one is the adapter's to state. This used to be `if provider_slug == "docker"`, the
+    // branch AGENTS.md §3 forbids, and it decided any further provider's delivery mechanism by
+    // silently dropping it through the `else`.
+    let init_delivery = providers
+      .init_delivery_for_provider(db, &request.provider_id)
+      .map_err(|source| OrchestratorError::Provider {
+        detail: "Could not determine how this provider takes delivery of the bootstrap script."
+          .to_string(),
+        source,
+      })?;
+
+    let bootstrap_artifact = match init_delivery {
+      InitDelivery::DockerInit => bootstrap.render_docker_init(
         &bootstrap_params,
         &server_keypair.private_key,
         &server_keypair.public_key,
-      )
-    } else {
-      bootstrap.render_cloud_init(
+      ),
+      InitDelivery::CloudInit => bootstrap.render_cloud_init(
         &bootstrap_params,
         &server_keypair.private_key,
         &server_keypair.public_key,
-      )
+      ),
     }
     .map_err(|source| OrchestratorError::Bootstrap {
-      detail: if provider_slug == "docker" {
-        "Failed rendering Docker init script for node bootstrap.".to_string()
-      } else {
-        "Failed rendering cloud-init user-data for node bootstrap.".to_string()
+      detail: match init_delivery {
+        InitDelivery::DockerInit => "Failed rendering Docker init script for node bootstrap.".to_string(),
+        InitDelivery::CloudInit => "Failed rendering cloud-init user-data for node bootstrap.".to_string(),
       },
       source,
     })?;
@@ -1271,7 +1275,7 @@ impl Orchestrator {
       ),
     );
 
-    let mut created_droplet: Option<ProvisionedDroplet> = None;
+    let mut created_node: Option<ProvisionedNode> = None;
 
     let pricing = providers
       .list_provider_plan_pricing(db, secure_storage, &request.provider_id, &request.region)
@@ -1319,29 +1323,29 @@ impl Orchestrator {
           source,
         })?;
 
-      let droplet = init_result.provisioned;
+      let provisioned = init_result.provisioned;
 
       record_init(
         "provider.create",
         "success",
         format!(
-          "droplet created with external_ref={} endpoint_ip={}",
-          droplet.droplet_id, droplet.public_ipv4
+          "node created with external_ref={} endpoint_ip={}",
+          provisioned.node_id, provisioned.public_ipv4
         ),
       );
 
-      created_droplet = Some(droplet.clone());
+      created_node = Some(provisioned.clone());
 
       db
         .update_vpn_node_runtime_details(
           &request.node_id,
-          Some(&droplet.droplet_id.to_string()),
-          Some(&droplet.public_ipv4),
+          Some(&provisioned.node_id),
+          Some(&provisioned.public_ipv4),
           None,
-          Some(droplet.endpoint_port),
+          Some(provisioned.endpoint_port),
         )
         .map_err(|source| OrchestratorError::Database {
-          detail: "Failed storing droplet reference/IP for node record.".to_string(),
+          detail: "Failed storing provider node reference/IP for node record.".to_string(),
           source,
         })?;
 
@@ -1358,8 +1362,8 @@ impl Orchestrator {
           secure_storage,
           &request.provider_id,
           &BootstrapWaitRequest {
-            droplet_id: droplet.droplet_id,
-            endpoint_ip: droplet.public_ipv4.clone(),
+            node_id: provisioned.node_id.clone(),
+            endpoint_ip: provisioned.public_ipv4.clone(),
             server_keypair,
           },
         )
@@ -1380,7 +1384,7 @@ impl Orchestrator {
       db
         .update_vpn_node_runtime_details(
           &request.node_id,
-          Some(&droplet.droplet_id.to_string()),
+          Some(&provisioned.node_id),
           Some(&contract.server_endpoint_ip),
           Some(&contract.server_public_key),
           // The adapter reports the port the client should dial, which for the Docker dev
@@ -1400,10 +1404,10 @@ impl Orchestrator {
         })?;
 
       log::info!(
-        "event=vpn_node.create.ready correlation_id={} node_id={} droplet_id={} endpoint_ip={}",
+        "event=vpn_node.create.ready correlation_id={} node_id={} external_ref={} endpoint_ip={}",
         correlation_id,
         request.node_id,
-        droplet.droplet_id,
+        provisioned.node_id,
         contract.server_endpoint_ip
       );
 
@@ -1411,15 +1415,15 @@ impl Orchestrator {
         "create.ready",
         "success",
         format!(
-          "node ready with droplet_id={} endpoint_ip={}",
-          droplet.droplet_id, contract.server_endpoint_ip
+          "node ready with external_ref={} endpoint_ip={}",
+          provisioned.node_id, contract.server_endpoint_ip
         ),
       );
 
       Ok(CreateVpnNodeResult {
         node_id: request.node_id.clone(),
         status: NodeLifecycleStatus::Ready,
-        droplet_id: droplet.droplet_id,
+        external_ref: provisioned.node_id.clone(),
         server_endpoint_ip: contract.server_endpoint_ip,
         server_public_key: contract.server_public_key,
         listen_port: contract.listen_port,
@@ -1436,34 +1440,32 @@ impl Orchestrator {
         logging::describe_error_chain(&error)
       );
 
-      if let Some(droplet) = created_droplet {
-        let cleanup_result = providers.delete_provider_droplet(
+      if let Some(provisioned) = created_node {
+        let cleanup_result = providers.delete_provider_node(
           db,
           secure_storage,
           &request.provider_id,
-          droplet.droplet_id,
+          &provisioned.node_id,
         );
 
         if let Err(cleanup_error) = cleanup_result {
           final_reason = format!(
-            "{} | rollback cleanup failed for droplet {}: {}",
-            final_reason,
-            droplet.droplet_id,
-            cleanup_error
+            "{} | rollback cleanup failed for node {}: {}",
+            final_reason, provisioned.node_id, cleanup_error
           );
           record_init(
             "rollback.cleanup",
             "error",
             format!(
-              "droplet cleanup failed for {}: {}",
-              droplet.droplet_id, cleanup_error
+              "provider node cleanup failed for {}: {}",
+              provisioned.node_id, cleanup_error
             ),
           );
         } else {
           record_init(
             "rollback.cleanup",
             "success",
-            format!("droplet cleanup completed for {}", droplet.droplet_id),
+            format!("provider node cleanup completed for {}", provisioned.node_id),
           );
         }
       }
@@ -2575,53 +2577,43 @@ impl Orchestrator {
             });
           }
           Some(external_ref) => {
-            if let Ok(droplet_id) = external_ref.parse::<u64>() {
-              match providers.provider_droplet_exists(
-                db,
-                secure_storage,
-                &node.provider_id,
-                droplet_id,
-              ) {
-                Ok(true) => {}
-                Ok(false) => {
-                  let detail = format!(
-                    "Provider droplet '{}' no longer exists for node '{}'.",
-                    droplet_id, node.id
-                  );
-                  let _ = db.transition_vpn_node_status(
-                    &node.id,
-                    NodeLifecycleStatus::Error,
-                    Some(&detail),
-                  );
-                  report.issues.push(ReconcileIssue {
-                    kind: ReconcileIssueKind::MissingDroplet,
-                    node_id: Some(node.id.clone()),
-                    tunnel_id: None,
-                    repaired: false,
-                    detail,
-                  });
-                }
-                Err(err) => {
-                  report.issues.push(ReconcileIssue {
-                    kind: ReconcileIssueKind::ProviderCheckFailed,
-                    node_id: Some(node.id.clone()),
-                    tunnel_id: None,
-                    repaired: false,
-                    detail: format!("Provider droplet existence check failed: {err}"),
-                  });
-                }
+            // The reference is opaque here and validated by the adapter that issued it. It used to
+            // be parsed as a `u64` first, and anything else marked the node `Error` on startup —
+            // which would condemn every node belonging to a provider that does not use numeric ids.
+            match providers.provider_node_exists(
+              db,
+              secure_storage,
+              &node.provider_id,
+              external_ref,
+            ) {
+              Ok(true) => {}
+              Ok(false) => {
+                let detail = format!(
+                  "Provider node '{}' no longer exists for node '{}'.",
+                  external_ref, node.id
+                );
+                let _ = db.transition_vpn_node_status(
+                  &node.id,
+                  NodeLifecycleStatus::Error,
+                  Some(&detail),
+                );
+                report.issues.push(ReconcileIssue {
+                  kind: ReconcileIssueKind::MissingDroplet,
+                  node_id: Some(node.id.clone()),
+                  tunnel_id: None,
+                  repaired: false,
+                  detail,
+                });
               }
-            } else {
-              let detail = "Node droplet reference is invalid and cannot be parsed as numeric id."
-                .to_string();
-              let _ = db.transition_vpn_node_status(&node.id, NodeLifecycleStatus::Error, Some(&detail));
-              report.issues.push(ReconcileIssue {
-                kind: ReconcileIssueKind::MissingNodeRuntimeData,
-                node_id: Some(node.id.clone()),
-                tunnel_id: None,
-                repaired: false,
-                detail,
-              });
+              Err(err) => {
+                report.issues.push(ReconcileIssue {
+                  kind: ReconcileIssueKind::ProviderCheckFailed,
+                  node_id: Some(node.id.clone()),
+                  tunnel_id: None,
+                  repaired: false,
+                  detail: format!("Provider node existence check failed: {err}"),
+                });
+              }
             }
           }
         }
@@ -3000,7 +2992,8 @@ mod tests {
 
   use super::*;
   use crate::backend::provider::{
-    Account, BootstrapWaitRequest, ProviderAdapter, ProviderAdapterError, ProviderDropletStatus,
+    Account, BootstrapWaitRequest, CredentialField, InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY,
+    ProviderAdapter, ProviderAdapterError, ProviderNodeStatus,
   };
   use crate::backend::secure_storage::SecureStorage;
   use crate::backend::provider::ProviderRegistry;
@@ -3010,16 +3003,16 @@ mod tests {
 
   struct MockAdapterState {
     delete_calls: usize,
-    droplet_exists: bool,
-    droplet_status: ProviderDropletStatus,
+    node_exists: bool,
+    node_status: ProviderNodeStatus,
   }
 
   impl Default for MockAdapterState {
     fn default() -> Self {
       Self {
         delete_calls: 0,
-        droplet_exists: true,
-        droplet_status: ProviderDropletStatus::Active,
+        node_exists: true,
+        node_status: ProviderNodeStatus::Active,
       }
     }
   }
@@ -3098,16 +3091,30 @@ mod tests {
       ])
     }
 
-    fn create_droplet(
+    fn credential_fields(&self) -> Vec<CredentialField> {
+      vec![CredentialField {
+        key: LEGACY_SINGLE_CREDENTIAL_KEY.to_string(),
+        label: "API token".to_string(),
+        placeholder: "token".to_string(),
+        secret: true,
+        help: None,
+      }]
+    }
+
+    fn init_delivery(&self) -> InitDelivery {
+      InitDelivery::CloudInit
+    }
+
+    fn create_node(
       &self,
       _token: &str,
-      _droplet_name: &str,
+      _node_name: &str,
       _region: &str,
       _size_slug: &str,
       _init_payload: &str,
-    ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
-      Ok(ProvisionedDroplet {
-        droplet_id: 42,
+    ) -> Result<ProvisionedNode, ProviderAdapterError> {
+      Ok(ProvisionedNode {
+        node_id: "42".to_string(),
         public_ipv4: "203.0.113.90".to_string(),
         endpoint_port: DEFAULT_WIREGUARD_PORT,
       })
@@ -3131,20 +3138,20 @@ mod tests {
       })
     }
 
-    fn delete_droplet(&self, _token: &str, _droplet_id: u64) -> Result<(), ProviderAdapterError> {
+    fn delete_node(&self, _token: &str, _node_id: &str) -> Result<(), ProviderAdapterError> {
       let mut state = self.state.lock().expect("lock must work");
       state.delete_calls += 1;
       Ok(())
     }
 
-    fn droplet_exists(&self, _token: &str, _droplet_id: u64) -> Result<bool, ProviderAdapterError> {
+    fn node_exists(&self, _token: &str, _node_id: &str) -> Result<bool, ProviderAdapterError> {
       let state = self.state.lock().expect("lock must work");
-      Ok(state.droplet_exists)
+      Ok(state.node_exists)
     }
 
-    fn droplet_status(&self, _token: &str, _droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError> {
+    fn node_status(&self, _token: &str, _node_id: &str) -> Result<ProviderNodeStatus, ProviderAdapterError> {
       let state = self.state.lock().expect("lock must work");
-      Ok(state.droplet_status)
+      Ok(state.node_status)
     }
   }
 
@@ -3459,7 +3466,7 @@ mod tests {
 
   fn setup_provider_and_token(db: &Database, secure_storage: &SecureStorage) {
     let token_ref = secure_storage
-      .store_digitalocean_api_token(TEST_PROVIDER_ID, "token-abc")
+      .store_provider_credential(TEST_PROVIDER_ID, "token-abc")
       .expect("token should store");
 
     db
@@ -3497,7 +3504,7 @@ mod tests {
       .expect("create flow should succeed");
 
     assert_eq!(result.status, NodeLifecycleStatus::Ready);
-    assert_eq!(result.droplet_id, 42);
+    assert_eq!(result.external_ref, "42");
     assert_eq!(result.server_public_key, "server-pub-key-123");
 
     let node = db
@@ -3583,7 +3590,7 @@ mod tests {
     let adapter = Arc::new(MockProviderAdapter::new(false));
     {
       let mut state = adapter.state.lock().expect("lock should work");
-      state.droplet_status = ProviderDropletStatus::Active;
+      state.node_status = ProviderNodeStatus::Active;
     }
     let providers = ProviderRegistry::from_adapter(adapter);
     let orchestrator = Orchestrator::new();
@@ -3629,7 +3636,7 @@ mod tests {
     let adapter = Arc::new(MockProviderAdapter::new(false));
     {
       let mut state = adapter.state.lock().expect("lock should work");
-      state.droplet_status = ProviderDropletStatus::Deleted;
+      state.node_status = ProviderNodeStatus::Deleted;
     }
     let providers = ProviderRegistry::from_adapter(adapter);
     let orchestrator = Orchestrator::new();
@@ -3926,7 +3933,7 @@ mod tests {
     let adapter = Arc::new(MockProviderAdapter::new(false));
     {
       let mut state = adapter.state.lock().expect("lock should work");
-      state.droplet_exists = false;
+      state.node_exists = false;
     }
     let providers = ProviderRegistry::from_adapter(adapter);
     let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
@@ -5097,7 +5104,7 @@ mod tests {
     // Migration 0007 seeds this provider row.
     const DO_PROVIDER_ID: &str = "provider-1";
     let token_ref = secure_storage
-      .store_digitalocean_api_token(DO_PROVIDER_ID, &token)
+      .store_provider_credential(DO_PROVIDER_ID, &token)
       .expect("token should store");
     db.update_provider_token_ref(DO_PROVIDER_ID, Some(&token_ref))
       .expect("token ref should persist");
@@ -5201,6 +5208,161 @@ mod tests {
     println!("=== droplet destroyed; this config is kept only as a record ===\n");
   }
 
+  /// The full backend path against a real EC2 instance.
+  ///
+  /// **Creates billable resources** — an instance *and* a public IPv4 address — destroyed on every
+  /// exit path, with the assertions running only after teardown so a failure cannot strand them.
+  /// Needs `GOATSTARE_AWS_TEST_ACCESS_KEY_ID` and `GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY`.
+  ///
+  /// EC2 leaves *two* resources behind rather than one: the instance and the security group created
+  /// with it. `force_cleanup_vpn_node` must report both gone, which is what the cleanup assertion
+  /// below is actually checking — the adapter fails the delete rather than swallowing a group it
+  /// could not remove.
+  #[test]
+  #[ignore = "Creates a real, billable EC2 instance; needs GOATSTARE_AWS_TEST_ACCESS_KEY_ID and GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY"]
+  fn real_ec2_full_backend_path_produces_a_connect_config() {
+    use crate::backend::provider::{Ec2ProviderAdapter, ProviderCredential};
+    use crate::backend::wireguard::{build_client_config, ClientConfigParams};
+
+    let (access_key_id, secret_access_key) = match (
+      std::env::var("GOATSTARE_AWS_TEST_ACCESS_KEY_ID"),
+      std::env::var("GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY"),
+    ) {
+      (Ok(key), Ok(secret)) if !key.trim().is_empty() && !secret.trim().is_empty() => (key, secret),
+      _ => {
+        eprintln!("GOATSTARE_AWS_TEST_ACCESS_KEY_ID / _SECRET_ACCESS_KEY are not set; skipping.");
+        return;
+      }
+    };
+
+    let region = std::env::var("GOATSTARE_AWS_TEST_REGION")
+      .ok()
+      .filter(|value| !value.trim().is_empty())
+      .unwrap_or_else(|| "us-east-1".to_string());
+
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_secs())
+      .unwrap_or(0);
+
+    let db = Database::new(test_db_path(&format!("real_ec2_{suffix}")));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    // Migration 0019 seeds this provider row.
+    const EC2_PROVIDER_ID: &str = "provider-aws-ec2";
+    let credential = ProviderCredential::from_fields([
+      ("access_key_id".to_string(), access_key_id),
+      ("secret_access_key".to_string(), secret_access_key),
+    ]);
+    let token_ref = secure_storage
+      .store_provider_credential(EC2_PROVIDER_ID, &credential.to_stored_value())
+      .expect("credential should store");
+    db.update_provider_token_ref(EC2_PROVIDER_ID, Some(&token_ref))
+      .expect("token ref should persist");
+
+    let providers = ProviderRegistry::from_adapter(Arc::new(Ec2ProviderAdapter::new()));
+    let orchestrator = Orchestrator::new();
+    let bootstrap = Bootstrap::new();
+    let wireguard = WireGuardManager::new();
+
+    let node_id = format!("node-ec2-{suffix}");
+    let created = orchestrator.create_vpn_node_to_ready(
+      &providers,
+      &bootstrap,
+      &db,
+      &secure_storage,
+      &CreateVpnNodeRequest {
+        node_id: node_id.clone(),
+        provider_id: EC2_PROVIDER_ID.to_string(),
+        node_name: format!("goatstare-e2e-{suffix}"),
+        region: region.clone(),
+        plan_key: "t3.micro".to_string(),
+      },
+    );
+
+    // Everything needed for assertions is gathered while the node still exists, then teardown runs
+    // before anything is asserted. A panic in between would leave an instance billing.
+    let findings = created.as_ref().ok().map(|created| {
+      let node = db
+        .get_vpn_node(&node_id)
+        .ok()
+        .flatten()
+        .expect("node row should exist");
+
+      let client_config = node
+        .client_private_key_ref
+        .as_deref()
+        .and_then(|key_ref| secure_storage.get_client_private_key(key_ref).ok().flatten())
+        .and_then(|private_key| {
+          build_client_config(&ClientConfigParams {
+            private_key,
+            client_address_cidr: DEFAULT_CLIENT_CIDR.to_string(),
+            dns_server: None,
+            server_public_key: created.server_public_key.clone(),
+            server_endpoint_ip: node.public_ipv4.clone().unwrap_or_default(),
+            server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
+            allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+            persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+          })
+          .ok()
+        });
+
+      (node, created.server_public_key.clone(), client_config)
+    });
+
+    // Teardown first, unconditionally. This also removes the security group.
+    let cleanup = orchestrator.force_cleanup_vpn_node(
+      &providers,
+      &wireguard,
+      &db,
+      &secure_storage,
+      &node_id,
+    );
+
+    let created = created.unwrap_or_else(|error| panic!("node creation should reach Ready: {error:?}"));
+    let (node, server_public_key, client_config) =
+      findings.expect("findings should exist when creation succeeded");
+
+    let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
+    assert!(
+      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      "the instance and its security group must be destroyed, or they keep billing: {cleanup:?}"
+    );
+
+    assert_eq!(node.lifecycle_status, NodeLifecycleStatus::Ready);
+    assert!(!created.server_public_key.trim().is_empty());
+
+    // The node id carries the region, because status, exists and delete need it to sign a request.
+    let external_ref = node.external_ref.clone().expect("an external_ref should be recorded");
+    assert!(
+      external_ref.starts_with(&format!("{region}/i-")),
+      "the external_ref should be '<region>/<instance-id>', got {external_ref}"
+    );
+
+    let endpoint = node.public_ipv4.clone().expect("a public IPv4 should be recorded");
+    assert!(
+      !endpoint_is_locally_scoped(&endpoint),
+      "an EC2 endpoint should be publicly routable, got {endpoint}"
+    );
+    assert_eq!(node.endpoint_port, Some(DEFAULT_WIREGUARD_PORT));
+
+    let config = client_config.expect("a client config should render");
+    assert!(config.contains("[Peer]"));
+    assert!(config.contains(&format!("PublicKey = {server_public_key}")));
+    assert!(config.contains(&format!("Endpoint = {endpoint}:{DEFAULT_WIREGUARD_PORT}")));
+    assert!(
+      config.contains("AllowedIPs = 0.0.0.0/0"),
+      "full tunnel must survive for a public endpoint: {config}"
+    );
+
+    let path = std::env::temp_dir().join(format!("goatstare-ec2-{suffix}.conf"));
+    std::fs::write(&path, config.replace("\r\n", "\n")).expect("config should be writable");
+    println!("\n=== EC2 client config: {} ===", path.display());
+    println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
+    println!("=== instance and security group destroyed; this config is kept only as a record ===\n");
+  }
+
   /// The production path, proven by an actual handshake against a real droplet.
   ///
   /// **Creates a billable resource**, destroyed on every exit path. Needs
@@ -5241,7 +5403,7 @@ mod tests {
     let secure_storage = SecureStorage::dev_mock();
     const DO_PROVIDER_ID: &str = "provider-1";
     let token_ref = secure_storage
-      .store_digitalocean_api_token(DO_PROVIDER_ID, &token)
+      .store_provider_credential(DO_PROVIDER_ID, &token)
       .expect("token should store");
     db.update_provider_token_ref(DO_PROVIDER_ID, Some(&token_ref))
       .expect("token ref should persist");
@@ -5420,7 +5582,7 @@ mod tests {
     // Migration 0007 already seeds this provider row.
     const DOCKER_PROVIDER_ID: &str = "provider-docker";
     let token_ref = secure_storage
-      .store_digitalocean_api_token(DOCKER_PROVIDER_ID, "dkr_v1_local_dev_mock_token_2026")
+      .store_provider_credential(DOCKER_PROVIDER_ID, "dkr_v1_local_dev_mock_token_2026")
       .expect("faux token should store");
     db.update_provider_token_ref(DOCKER_PROVIDER_ID, Some(&token_ref))
       .expect("token ref should persist");

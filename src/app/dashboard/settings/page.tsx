@@ -26,10 +26,10 @@ export default function DashboardSettingsPage() {
     wireguardReadiness,
   } = useDashboard();
 
-  // The key is never held in this component: it goes straight from the modal to the backend, so
-  // there is no plaintext copy sitting in page state.
-  const handleSaveKey = useCallback(async (targetProviderId: string, key: string) => {
-    return saveToken(key, targetProviderId);
+  // The credential is never held in this component: it goes straight from the modal to the backend,
+  // so there is no plaintext copy sitting in page state.
+  const handleSaveKey = useCallback(async (targetProviderId: string, credentials: Record<string, string>) => {
+    return saveToken(credentials, targetProviderId);
   }, [saveToken]);
 
   const handleRevalidate = useCallback(async (provider: ProviderRecord) => {

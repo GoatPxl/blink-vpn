@@ -7,6 +7,7 @@ The frontend calls Rust through a typed Tauri command surface. Commands route th
 Provider adapters currently included:
 
 - DigitalOcean adapter for cloud node lifecycle
+- Amazon EC2 adapter for cloud node lifecycle
 - Docker adapter for local container-backed development workflows
 
 ## Command Design Principles
@@ -32,7 +33,8 @@ Provider adapters currently included:
 
 | Command | Request | Response | Notes |
 | --- | --- | --- | --- |
-| `register_provider_token` | `provider_id`, `provider_name`, `api_token` | `string` | Stores the credential in secure storage and persists its reference. Provider-neutral: the adapter is resolved from the stored provider record, so there is no per-provider command. |
+| `register_provider_credential` | `provider_id`, `provider_name`, `credentials` (map of field key to value) | `string` | Stores the credential in secure storage and persists its reference. Provider-neutral: the adapter is resolved from the stored provider record, so there is no per-provider command. Every field the adapter declares must be present and non-empty. |
+| `list_provider_credential_fields` | `provider_id` | `CredentialField[]` | The credential inputs this provider needs — `key`, `label`, `placeholder`, `secret`, `help`. The UI renders whatever it returns rather than branching on a provider slug. |
 | `validate_provider_token` | `provider_id` | `string` | Checks the stored key through the adapter and records the verdict on that provider row. Reads the *stored* key, so it never validates something newly typed but unsaved |
 | `list_provider_regions` | `provider_id` | `ProviderRegion[]` | Region catalog with normalized geography — see below |
 | `list_provider_pricing` | `provider_id`, `region` | `ProviderPricingResponse` | Plan and pricing catalog |
@@ -61,8 +63,8 @@ Provider adapters currently included:
 | `list_app_locations` | none | `AppLocation[]` | The folders this app writes to, with a `key`, a display `path`, and whether it `exists` yet |
 | `reveal_app_location` | `key` | `void` | Opens one listed location in Explorer. **Takes a key, never a path** — see below |
 | `check_docker_readiness` | none | `DockerReadinessResponse` | Docker runtime readiness signal |
-| `delete_provider_droplet` | `provider_id`, `droplet_id` | `void` | Direct provider cleanup helper |
-| `provision_provider_droplet` | `provider_id`, `droplet_name` | `string` | Lower-level provision helper |
+| `delete_provider_node` | `provider_id`, `node_id` | `void` | Direct provider cleanup helper. `node_id` is the opaque provider reference stored in `vpn_nodes.external_ref`, not a numeric id. |
+| `provision_provider_node` | `provider_id`, `node_name` | `string` | Lower-level provision helper |
 | `check_wireguard_readiness` | none | `WireGuardReadinessResponse` | Local WireGuard install probe, plus `version` (from `wg --version`, null when unreadable) and `app_version`. Infallible — reports readiness in the payload rather than erroring |
 | `open_wireguard_install_page` | none | `void` | Opens the WireGuard download page in the default browser (Windows only) |
 | `install_wireguard_with_prerequisites` | none | `WireGuardInstallResult` | Runs the WireGuard installer with elevation (Windows only) |
@@ -70,21 +72,40 @@ Provider adapters currently included:
 
 ## Request and Response Examples
 
-### Register a provider token
+### Register a provider credential
+
+The field keys come from `list_provider_credential_fields`, so the caller never hardcodes them.
+DigitalOcean declares one field:
 
 ```json
 {
   "provider_id": "provider-1",
   "provider_name": "DigitalOcean",
-  "api_token": "dop_v1_..."
+  "credentials": { "api_token": "dop_v1_EXAMPLE_NOT_A_REAL_TOKEN" }
+}
+```
+
+Amazon EC2 declares two:
+
+```json
+{
+  "provider_id": "provider-aws-ec2",
+  "provider_name": "Amazon EC2",
+  "credentials": {
+    "access_key_id": "AKIAEXAMPLE_NOT_A_REAL_KEY",
+    "secret_access_key": "EXAMPLE_NOT_A_REAL_SECRET"
+  }
 }
 ```
 
 Response:
 
 ```text
-Provider registered with token_ref: do-token__provider-1__...
+Provider registered with token_ref: provider-cred__provider-aws-ec2__...
 ```
+
+Credentials saved by earlier versions carry a `do-token__...` reference and a bare token rather than
+a field set. Both are still read; only new writes use the current form.
 
 ### Create a node
 
@@ -101,7 +122,7 @@ Provider registered with token_ref: do-token__provider-1__...
 Response:
 
 ```text
-Create node complete: node_id=node-1, droplet_id=42, endpoint_ip=203.0.113.10, listen_port=51820, correlation_id=..., idempotent_reuse=false
+Create node complete: node_id=node-1, external_ref=us-east-1/i-0abc123def4567890, endpoint_ip=203.0.113.10, listen_port=51820, correlation_id=..., idempotent_reuse=false
 ```
 
 ### Region catalog

@@ -39,6 +39,24 @@ windows-sys = { version = "0.59", features = [
 # bindings that went with it, were removed — see backend/wireguard/mod.rs for why. Tunnels are
 # managed through the WireGuard for Windows service.
 defguard_wireguard_rs = "0.11"
+# AWS request signing for the EC2 adapter, and nothing else.
+#
+# Deliberately *not* `aws-sdk-ec2`: that crate is async-only, and every command in this app runs on
+# the blocking pool because `reqwest::blocking` builds its own runtime (see commands/system.rs).
+# Driving an async SDK from there reintroduces exactly the "cannot drop a runtime" panic that once
+# killed the whole IPC channel. Signing, by contrast, is pure computation — it composes with the
+# existing blocking client and pulls no runtime of its own.
+#
+# Hand-rolling SigV4 over `hmac`/`sha2` was the alternative. Rejected because a signing mistake
+# surfaces only as an opaque 403 with no indication of which part of the canonical request is wrong.
+aws-sigv4 = "1.3.6"
+# Supplies the `Credentials` type that `aws-sigv4`'s signing params require. Not a separate design
+# decision — it is how the crate above takes a key pair.
+aws-credential-types = "1.2.10"
+# The EC2 Query API answers in XML and offers no JSON protocol. SSM and STS are JSON and use the
+# `serde_json` already present. Manual string extraction was the alternative, rejected because
+# provider responses are untrusted input (AGENTS.md §6).
+quick-xml = { version = "0.39.4", features = ["serialize"] }
 
 [dev-dependencies]
 mockito = "1"

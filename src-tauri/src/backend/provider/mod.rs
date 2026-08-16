@@ -1,11 +1,14 @@
 pub mod digitalocean;
 pub mod digitalocean_regions;
 pub mod docker;
+pub mod ec2;
+pub mod ec2_regions;
 pub mod retry;
 
 use std::collections::HashMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
@@ -22,10 +25,17 @@ pub use digitalocean::{
 
 use digitalocean::{DigitalOceanApiClient, DigitalOceanError};
 use docker::DockerProviderAdapter;
+use ec2::{AwsCredentials, DEFAULT_EC2_REGION, Ec2ApiClient, Ec2Config};
 use retry::RetryPolicy;
 
 pub trait ProviderAdapter: Send + Sync {
   fn provider_name(&self) -> &'static str;
+  /// The credential inputs this provider needs, in the order they should be presented.
+  ///
+  /// DigitalOcean needs one API token; AWS needs an access key id and a secret access key. The UI
+  /// renders whatever it is given rather than branching on a slug, so a provider's credential shape
+  /// stays inside its adapter (AGENTS.md §3).
+  fn credential_fields(&self) -> Vec<CredentialField>;
   fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError>;
   fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError>;
   /// Geography for a slug this adapter owns, without contacting the provider.
@@ -39,26 +49,130 @@ pub trait ProviderAdapter: Send + Sync {
     token: &str,
     region: &str,
   ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError>;
-  fn create_droplet(
+  /// How this provider takes delivery of the bootstrap script.
+  ///
+  /// The orchestrator used to pick the renderer with `if provider_slug == "docker"`, which is the
+  /// branch AGENTS.md §3 forbids and which silently decided a third provider's delivery mechanism
+  /// by falling through an `else`. The adapter states it instead.
+  fn init_delivery(&self) -> InitDelivery;
+  fn create_node(
     &self,
     token: &str,
-    droplet_name: &str,
+    node_name: &str,
     region: &str,
     size_slug: &str,
     init_payload: &str,
-  ) -> Result<ProvisionedDroplet, ProviderAdapterError>;
+  ) -> Result<ProvisionedNode, ProviderAdapterError>;
   fn wait_for_bootstrap_ready(
     &self,
     token: &str,
     request: &BootstrapWaitRequest,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError>;
-  fn droplet_status(
+  fn node_status(
     &self,
     token: &str,
-    droplet_id: u64,
-  ) -> Result<ProviderDropletStatus, ProviderAdapterError>;
-  fn droplet_exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError>;
-  fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError>;
+    node_id: &str,
+  ) -> Result<ProviderNodeStatus, ProviderAdapterError>;
+  fn node_exists(&self, token: &str, node_id: &str) -> Result<bool, ProviderAdapterError>;
+  fn delete_node(&self, token: &str, node_id: &str) -> Result<(), ProviderAdapterError>;
+}
+
+/// How a provider takes delivery of the rendered bootstrap script.
+///
+/// The script body is identical across variants; only the wrapper differs. If these ever produce
+/// different server state, the dev lane has stopped being evidence for the production one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitDelivery {
+  /// cloud-init `#cloud-config`, consumed by the provider's first-boot agent.
+  CloudInit,
+  /// A bash script executed by a container entrypoint.
+  DockerInit,
+}
+
+/// The single-field key used by providers that need only one value, and by every credential saved
+/// before credentials could have more than one field.
+pub const LEGACY_SINGLE_CREDENTIAL_KEY: &str = "api_token";
+
+/// A provider credential, as stored: a set of named fields.
+///
+/// Serialized to a JSON object for storage. Deserialization accepts a bare string as well, because
+/// every credential saved before this existed is a raw token with no JSON around it — those are
+/// read as a single `api_token` field. Dropping that fallback would silently invalidate the stored
+/// credential of every existing install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCredential {
+  fields: std::collections::BTreeMap<String, String>,
+}
+
+impl ProviderCredential {
+  pub fn from_fields(fields: impl IntoIterator<Item = (String, String)>) -> Self {
+    Self {
+      fields: fields.into_iter().collect(),
+    }
+  }
+
+  /// Parse a stored credential value.
+  ///
+  /// A value that does not parse as a JSON object is treated as a legacy single token rather than
+  /// as an error — that is the whole backward-compatibility guarantee.
+  pub fn parse(stored: &str) -> Self {
+    let trimmed = stored.trim();
+
+    if trimmed.starts_with('{') {
+      if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Self {
+          fields: map
+            .into_iter()
+            .filter_map(|(key, value)| value.as_str().map(|text| (key, text.to_string())))
+            .collect(),
+        };
+      }
+    }
+
+    Self::from_fields([(LEGACY_SINGLE_CREDENTIAL_KEY.to_string(), stored.to_string())])
+  }
+
+  /// Serialize for storage. Always a JSON object, so what is written is unambiguous.
+  pub fn to_stored_value(&self) -> String {
+    serde_json::Value::Object(
+      self
+        .fields
+        .iter()
+        .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+        .collect(),
+    )
+    .to_string()
+  }
+
+  pub fn field(&self, key: &str) -> Option<&str> {
+    self.fields.get(key).map(String::as_str).filter(|value| !value.trim().is_empty())
+  }
+
+  /// A required field, or a capability error naming what is missing.
+  pub fn require(&self, key: &str) -> Result<&str, ProviderAdapterError> {
+    self.field(key).ok_or_else(|| ProviderAdapterError::Unsupported {
+      detail: format!("Stored credential is missing the '{key}' field. Re-save this provider's credential in Settings."),
+    })
+  }
+
+  /// The value for a provider that needs exactly one field.
+  pub fn single(&self) -> Result<&str, ProviderAdapterError> {
+    self.require(LEGACY_SINGLE_CREDENTIAL_KEY)
+  }
+}
+
+/// One credential input a provider needs from the user.
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialField {
+  /// Stable machine key. This is the key the adapter reads back out of the stored credential, so
+  /// renaming one is a breaking change for anyone who already saved a credential.
+  pub key: String,
+  pub label: String,
+  pub placeholder: String,
+  /// Whether the UI should mask this input. An AWS access key id is an identifier, not a secret;
+  /// the secret access key is.
+  pub secret: bool,
+  pub help: Option<String>,
 }
 
 /// Where a region physically is, in provider-neutral terms.
@@ -93,9 +207,14 @@ impl ProviderRegion {
   }
 }
 
+/// A provider's own view of a node, normalized.
+///
+/// The variant names and their `as_str` values are a UI contract — `attach_live_provider_status`
+/// serializes them straight to the fleet list — so they are deliberately unchanged from when this
+/// was named after droplets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ProviderDropletStatus {
+pub enum ProviderNodeStatus {
   New,
   Active,
   Off,
@@ -104,7 +223,7 @@ pub enum ProviderDropletStatus {
   Unknown,
 }
 
-impl ProviderDropletStatus {
+impl ProviderNodeStatus {
   pub fn as_str(self) -> &'static str {
     match self {
       Self::New => "new",
@@ -163,38 +282,49 @@ pub struct DigitalOceanProviderAdapter {
 
 impl DigitalOceanProviderAdapter {
   pub fn new() -> Result<Self, ProviderAdapterError> {
-    let config = DigitalOceanConfig::phase1_defaults();
-    let client = DigitalOceanApiClient::new_with_timeout(
-      "https://api.digitalocean.com",
-      RetryPolicy::digitalocean_default(),
-      config.request_timeout,
-    )
-    .map_err(|source| ProviderAdapterError::Api {
-      detail: "Unable to initialize DigitalOcean API client.".to_string(),
-      source,
-    })?;
-
-    Ok(Self {
-      client,
-      config,
-    })
+    Self::for_base_url("https://api.digitalocean.com")
   }
 
   /// Construct against a specific API base URL so tests can point at a local mock server.
   #[cfg(test)]
   fn with_base_url(base_url: &str) -> Result<Self, ProviderAdapterError> {
+    Self::for_base_url(base_url)
+  }
+
+  fn for_base_url(base_url: &str) -> Result<Self, ProviderAdapterError> {
     let config = DigitalOceanConfig::phase1_defaults();
     let client = DigitalOceanApiClient::new_with_timeout(
       base_url,
       RetryPolicy::digitalocean_default(),
       config.request_timeout,
     )
-    .map_err(|source| ProviderAdapterError::Api {
-      detail: "Unable to initialize DigitalOcean API client.".to_string(),
-      source,
+    .map_err(|source| {
+      ProviderAdapterError::api("Unable to initialize DigitalOcean API client.", source)
     })?;
 
     Ok(Self { client, config })
+  }
+
+  /// The bearer token out of the stored credential.
+  ///
+  /// Credentials are stored as a field set. DigitalOcean needs exactly one field, and a credential
+  /// saved before field sets existed is a bare token, which `ProviderCredential::parse` maps onto
+  /// the same key.
+  fn api_token(stored: &str) -> Result<String, ProviderAdapterError> {
+    Ok(ProviderCredential::parse(stored).single()?.to_string())
+  }
+
+  /// DigitalOcean's API keys droplets by a numeric id, so the opaque node id is parsed back at the
+  /// adapter boundary. A malformed id is a caller error, not a panic.
+  fn droplet_id(node_id: &str) -> Result<u64, ProviderAdapterError> {
+    node_id
+      .trim()
+      .parse::<u64>()
+      .map_err(|_| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "'{node_id}' is not a DigitalOcean droplet id. The node record may belong to another provider."
+        ),
+      })
   }
 }
 
@@ -203,14 +333,21 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     "digitalocean"
   }
 
+  fn credential_fields(&self) -> Vec<CredentialField> {
+    vec![CredentialField {
+      key: "api_token".to_string(),
+      label: "API token".to_string(),
+      placeholder: "dop_v1_...".to_string(),
+      secret: true,
+      help: Some("Needs read and write access to Droplets.".to_string()),
+    }]
+  }
+
   fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
     self
       .client
-      .validate_token(token)
-      .map_err(|source| ProviderAdapterError::Api {
-        detail: "DigitalOcean token validation request failed.".to_string(),
-        source,
-      })
+      .validate_token(&Self::api_token(token)?)
+      .map_err(|source| ProviderAdapterError::api("DigitalOcean token validation request failed.", source))
   }
 
   fn list_plan_pricing(
@@ -220,11 +357,8 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
   ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError> {
     let mut sizes = self
       .client
-      .list_sizes(token)
-      .map_err(|source| ProviderAdapterError::Api {
-        detail: "DigitalOcean size catalog request failed.".to_string(),
-        source,
-      })?;
+      .list_sizes(&Self::api_token(token)?)
+      .map_err(|source| ProviderAdapterError::api("DigitalOcean size catalog request failed.", source))?;
 
     sizes.sort_by(|left, right| {
       left
@@ -272,11 +406,8 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
   fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError> {
     let sizes = self
       .client
-      .list_sizes(token)
-      .map_err(|source| ProviderAdapterError::Api {
-        detail: "DigitalOcean size catalog request failed.".to_string(),
-        source,
-      })?;
+      .list_sizes(&Self::api_token(token)?)
+      .map_err(|source| ProviderAdapterError::api("DigitalOcean size catalog request failed.", source))?;
 
     // The available slug set still comes from the size catalog, so regions and pricing cannot
     // disagree about what can actually be provisioned. Geography only enriches that set.
@@ -296,16 +427,20 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     digitalocean_regions::describe_region(slug)
   }
 
-  fn create_droplet(
+  fn init_delivery(&self) -> InitDelivery {
+    InitDelivery::CloudInit
+  }
+
+  fn create_node(
     &self,
     token: &str,
-    droplet_name: &str,
+    node_name: &str,
     region: &str,
     size_slug: &str,
     init_payload: &str,
-  ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
+  ) -> Result<ProvisionedNode, ProviderAdapterError> {
     let request = CreateDropletRequest {
-      name: sanitize_droplet_name(droplet_name),
+      name: sanitize_droplet_name(node_name),
       region: if region.trim().is_empty() {
         self.config.region.to_string()
       } else {
@@ -323,11 +458,8 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
 
     let created = self
       .client
-      .create_droplet(token, &request)
-      .map_err(|source| ProviderAdapterError::Api {
-        detail: "DigitalOcean droplet create call failed.".to_string(),
-        source,
-      })?;
+      .create_droplet(&Self::api_token(token)?, &request)
+      .map_err(|source| ProviderAdapterError::api("DigitalOcean droplet create call failed.", source))?;
 
     let active = self
       .client
@@ -338,21 +470,17 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
         self.config.poll_max_attempts,
         self.config.droplet_ready_timeout,
       )
-      .map_err(|source| ProviderAdapterError::Api {
-        detail: "DigitalOcean droplet did not become active before timeout.".to_string(),
-        source,
+      .map_err(|source| {
+        ProviderAdapterError::api("DigitalOcean droplet did not become active before timeout.", source)
       })?;
 
     let public_ipv4 = self
       .client
       .extract_public_ipv4(&active)
-      .map_err(|source| ProviderAdapterError::Api {
-        detail: "Active droplet did not expose public IPv4.".to_string(),
-        source,
-      })?;
+      .map_err(|source| ProviderAdapterError::api("Active droplet did not expose public IPv4.", source))?;
 
-    Ok(ProvisionedDroplet {
-      droplet_id: active.id,
+    Ok(ProvisionedNode {
+      node_id: active.id.to_string(),
       public_ipv4,
       // A droplet's WireGuard listen port is the port the client dials; there is no port
       // translation in front of it, unlike the Docker dev path.
@@ -374,11 +502,12 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
   ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
     let droplet = self
       .client
-      .get_droplet(token, request.droplet_id)
-      .map_err(|source| ProviderAdapterError::Api {
-        detail: "Could not confirm DigitalOcean droplet state before completing provisioning."
-          .to_string(),
-        source,
+      .get_droplet(&Self::api_token(token)?, Self::droplet_id(&request.node_id)?)
+      .map_err(|source| {
+        ProviderAdapterError::api(
+          "Could not confirm DigitalOcean droplet state before completing provisioning.",
+          source,
+        )
       })?;
 
     if !droplet.status.trim().eq_ignore_ascii_case("active") {
@@ -394,10 +523,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
       self
         .client
         .extract_public_ipv4(&droplet)
-        .map_err(|source| ProviderAdapterError::Api {
-          detail: "Active droplet did not expose public IPv4.".to_string(),
-          source,
-        })?
+        .map_err(|source| ProviderAdapterError::api("Active droplet did not expose public IPv4.", source))?
     } else {
       request.endpoint_ip.clone()
     };
@@ -410,48 +536,719 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     })
   }
 
-  fn droplet_exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError> {
-    match self.client.get_droplet(token, droplet_id) {
+  fn node_exists(&self, token: &str, node_id: &str) -> Result<bool, ProviderAdapterError> {
+    match self.client.get_droplet(&Self::api_token(token)?, Self::droplet_id(node_id)?) {
       Ok(_) => Ok(true),
       Err(DigitalOceanError::NotFound { .. }) => Ok(false),
-      Err(source) => Err(ProviderAdapterError::Api {
-        detail: "DigitalOcean droplet existence check failed.".to_string(),
+      Err(source) => Err(ProviderAdapterError::api(
+        "DigitalOcean droplet existence check failed.",
         source,
-      }),
+      )),
     }
   }
 
-  fn droplet_status(&self, token: &str, droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError> {
-    match self.client.get_droplet(token, droplet_id) {
+  fn node_status(&self, token: &str, node_id: &str) -> Result<ProviderNodeStatus, ProviderAdapterError> {
+    match self.client.get_droplet(&Self::api_token(token)?, Self::droplet_id(node_id)?) {
       Ok(droplet) => Ok(match droplet.status.trim().to_ascii_lowercase().as_str() {
-        "new" => ProviderDropletStatus::New,
-        "active" => ProviderDropletStatus::Active,
-        "off" => ProviderDropletStatus::Off,
-        "archive" => ProviderDropletStatus::Archive,
-        _ => ProviderDropletStatus::Unknown,
+        "new" => ProviderNodeStatus::New,
+        "active" => ProviderNodeStatus::Active,
+        "off" => ProviderNodeStatus::Off,
+        "archive" => ProviderNodeStatus::Archive,
+        _ => ProviderNodeStatus::Unknown,
       }),
-      Err(DigitalOceanError::NotFound { .. }) => Ok(ProviderDropletStatus::Deleted),
-      Err(source) => Err(ProviderAdapterError::Api {
-        detail: "DigitalOcean droplet status check failed.".to_string(),
+      Err(DigitalOceanError::NotFound { .. }) => Ok(ProviderNodeStatus::Deleted),
+      Err(source) => Err(ProviderAdapterError::api(
+        "DigitalOcean droplet status check failed.",
         source,
-      }),
+      )),
     }
   }
 
-  fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError> {
+  fn delete_node(&self, token: &str, node_id: &str) -> Result<(), ProviderAdapterError> {
     self
       .client
-      .delete_droplet(token, droplet_id)
-      .map_err(|source| ProviderAdapterError::Api {
-        detail: "DigitalOcean droplet delete call failed.".to_string(),
-        source,
+      .delete_droplet(&Self::api_token(token)?, Self::droplet_id(node_id)?)
+      .map_err(|source| ProviderAdapterError::api("DigitalOcean droplet delete call failed.", source))
+  }
+}
+
+/// Instance types offered for a GoatStare node, cheapest first.
+///
+/// AWS publishes prices through the Pricing API, which is a large region-limited catalogue and a
+/// heavyweight dependency for three rows. These are list prices for on-demand Linux in `us-east-1`
+/// and are reported with `estimated: true`, which is what that flag exists for — the Docker adapter
+/// uses it the same way. Availability is still checked live per region, so a type a region cannot
+/// launch is never offered.
+///
+/// `monthly_usd` includes the public IPv4 address charge (~$3.60/mo), because a node without one is
+/// unreachable and quoting the instance alone would understate the real bill.
+const EC2_PLAN_SPECS: &[Ec2PlanSpec] = &[
+  Ec2PlanSpec {
+    instance_type: "t3.micro",
+    label: "t3.micro — 2 vCPU, 1 GB",
+    vcpus: 2,
+    memory_mb: 1024,
+    disk_gb: 8,
+    transfer_tb: 0.1,
+    monthly_usd: 11.20,
+    hourly_usd: 0.0154,
+  },
+  Ec2PlanSpec {
+    instance_type: "t3.small",
+    label: "t3.small — 2 vCPU, 2 GB",
+    vcpus: 2,
+    memory_mb: 2048,
+    disk_gb: 8,
+    transfer_tb: 0.1,
+    monthly_usd: 18.80,
+    hourly_usd: 0.0258,
+  },
+  Ec2PlanSpec {
+    instance_type: "t3.medium",
+    label: "t3.medium — 2 vCPU, 4 GB",
+    vcpus: 2,
+    memory_mb: 4096,
+    disk_gb: 8,
+    transfer_tb: 0.1,
+    monthly_usd: 33.90,
+    hourly_usd: 0.0464,
+  },
+];
+
+#[derive(Debug, Clone, Copy)]
+struct Ec2PlanSpec {
+  instance_type: &'static str,
+  label: &'static str,
+  vcpus: u64,
+  memory_mb: u64,
+  disk_gb: u64,
+  transfer_tb: f64,
+  monthly_usd: f64,
+  hourly_usd: f64,
+}
+
+/// Tag key marking every resource this app creates, so an operator can find them in the console.
+const EC2_OWNER_TAG_KEY: &str = "goatstare";
+const EC2_OWNER_TAG_VALUE: &str = "phase1";
+
+/// Maps a user's node name onto an AWS tag value.
+///
+/// AWS tag values are far more permissive than a hostname — up to 256 characters, most of Unicode —
+/// so this is a different rule from `sanitize_droplet_name`, and that is exactly why it belongs in
+/// this adapter rather than being shared (AGENTS.md §3). Only the characters AWS actually rejects
+/// are replaced; the user's chosen label is otherwise preserved.
+fn sanitize_ec2_tag_value(raw: &str) -> String {
+  let cleaned: String = raw
+    .trim()
+    .chars()
+    .filter(|character| !matches!(character, '\u{0}'..='\u{1F}' | '\u{7F}'))
+    .take(255)
+    .collect();
+
+  let trimmed = cleaned.trim();
+  if trimmed.is_empty() {
+    "goatstare-node".to_string()
+  } else {
+    trimmed.to_string()
+  }
+}
+
+/// A security-group name derived from the node name.
+///
+/// AWS restricts these to `a-zA-Z0-9 ._-:/()#,@[]+=&;{}!$*` and requires uniqueness within the VPC,
+/// so a random suffix is appended — two nodes the user called the same thing must not collide.
+fn ec2_security_group_name(node_name: &str) -> String {
+  let base: String = node_name
+    .trim()
+    .chars()
+    .map(|character| {
+      if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+        character
+      } else {
+        '-'
+      }
+    })
+    .collect();
+
+  let compact = base.trim_matches('-');
+  let stem = if compact.is_empty() { "goatstare-node" } else { compact };
+  let bounded: String = stem.chars().take(200).collect();
+  let suffix = uuid::Uuid::new_v4().simple().to_string();
+
+  format!("goatstare-{}-{}", bounded.trim_matches('-'), &suffix[..8])
+}
+
+/// Base64 for EC2 `UserData`, which must be encoded before signing.
+///
+/// Written out rather than adding a dependency for one call.
+fn base64_encode(input: &[u8]) -> String {
+  const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+
+  for chunk in input.chunks(3) {
+    let bytes = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+    let triple = ((bytes[0] as u32) << 16) | ((bytes[1] as u32) << 8) | bytes[2] as u32;
+
+    out.push(ALPHABET[(triple >> 18) as usize & 0x3F] as char);
+    out.push(ALPHABET[(triple >> 12) as usize & 0x3F] as char);
+    out.push(if chunk.len() > 1 {
+      ALPHABET[(triple >> 6) as usize & 0x3F] as char
+    } else {
+      '='
+    });
+    out.push(if chunk.len() > 2 {
+      ALPHABET[triple as usize & 0x3F] as char
+    } else {
+      '='
+    });
+  }
+
+  out
+}
+
+/// EC2 caps `UserData` at 16 KiB before base64. The rendered cloud-init is several KB, so this is
+/// checked rather than assumed — an edit to the shared bootstrap script must not silently push
+/// provisioning over the limit.
+const EC2_USER_DATA_LIMIT_BYTES: usize = 16 * 1024;
+
+pub struct Ec2ProviderAdapter {
+  client: Ec2ApiClient,
+  config: Ec2Config,
+}
+
+impl Ec2ProviderAdapter {
+  /// Infallible by construction.
+  ///
+  /// `DigitalOceanProviderAdapter::new` returns a `Result` that `ProviderRegistry::new` unwraps with
+  /// a panic; adding a second adapter that can fail at construction would double that hazard, so
+  /// the HTTP client is built lazily-safe here and a build failure surfaces as a normal API error.
+  pub fn new() -> Self {
+    let config = Ec2Config::phase1_defaults();
+    let client = Ec2ApiClient::new_with_timeout(RetryPolicy::digitalocean_default(), config.request_timeout)
+      .unwrap_or_else(|_| {
+        // `reqwest` only fails to build a client on a malformed TLS configuration, which is not
+        // input-dependent. Retrying with defaults keeps construction total.
+        Ec2ApiClient::new_with_timeout(RetryPolicy::digitalocean_default(), Duration::from_secs(20))
+          .expect("a default blocking HTTP client must be constructible")
+      });
+
+    Self { client, config }
+  }
+
+  #[cfg(test)]
+  fn with_base_url(base_url: &str) -> Self {
+    let config = Ec2Config::phase1_defaults();
+    // A fast retry policy keeps mock-server tests from sleeping through real backoff.
+    let client = Ec2ApiClient::with_base_url(
+      base_url,
+      RetryPolicy {
+        max_retries: 1,
+        base_delay_ms: 1,
+        max_delay_ms: 2,
+        jitter_max_ms: 0,
+      },
+      config.request_timeout,
+    )
+    .expect("test client should build");
+
+    Self {
+      client,
+      config: Ec2Config {
+        poll_interval: Duration::from_millis(1),
+        dependency_release_timeout: Duration::from_millis(20),
+        ..config
+      },
+    }
+  }
+
+  fn credentials(stored: &str) -> Result<AwsCredentials, ProviderAdapterError> {
+    let credential = ProviderCredential::parse(stored);
+
+    Ok(AwsCredentials {
+      access_key_id: credential.require("access_key_id")?.to_string(),
+      secret_access_key: credential.require("secret_access_key")?.to_string(),
+      // Optional: only temporary credentials carry one.
+      session_token: credential.field("session_token").map(|value| value.to_string()),
+    })
+  }
+
+  fn effective_region(region: &str) -> String {
+    let trimmed = region.trim();
+    if trimmed.is_empty() {
+      DEFAULT_EC2_REGION.to_string()
+    } else {
+      trimmed.to_string()
+    }
+  }
+
+  /// The region an existing node lives in.
+  ///
+  /// EC2 scopes both the endpoint host and the signature to a region, so operating on an instance
+  /// requires knowing which one it is in. The node id alone does not say, and the trait's status,
+  /// exists and delete methods do not carry a region — so the region is encoded into the node id
+  /// at create time and split back out here.
+  fn split_node_id(node_id: &str) -> Result<(String, String), ProviderAdapterError> {
+    match node_id.trim().split_once('/') {
+      Some((region, instance)) if !region.is_empty() && !instance.is_empty() => {
+        Ok((region.to_string(), instance.to_string()))
+      }
+      _ => Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "'{node_id}' is not an EC2 node reference. Expected '<region>/<instance-id>'; the node record may belong to another provider."
+        ),
+      }),
+    }
+  }
+
+  fn join_node_id(region: &str, instance_id: &str) -> String {
+    format!("{region}/{instance_id}")
+  }
+
+  /// The security group attached to a node.
+  ///
+  /// Answers `None` for an instance EC2 no longer reports, so destroy stays idempotent without a
+  /// separate existence check first.
+  fn security_group_for_node(
+    &self,
+    region: &str,
+    credentials: &AwsCredentials,
+    instance_id: &str,
+  ) -> Result<Option<String>, ProviderAdapterError> {
+    self
+      .client
+      .security_group_for_instance(region, credentials, instance_id)
+      .map_err(|source| {
+        ProviderAdapterError::api("Could not find the security group attached to this node.", source)
       })
   }
 }
 
+impl ProviderAdapter for Ec2ProviderAdapter {
+  fn provider_name(&self) -> &'static str {
+    "aws-ec2"
+  }
+
+  fn credential_fields(&self) -> Vec<CredentialField> {
+    vec![
+      CredentialField {
+        key: "access_key_id".to_string(),
+        label: "Access key ID".to_string(),
+        placeholder: "AKIA...".to_string(),
+        // An access key ID is an identifier, not a secret. Masking it only makes it harder to
+        // check against the AWS console.
+        secret: false,
+        help: Some(
+          "An IAM user key with EC2 instance, security group, SSM parameter and STS identity permissions."
+            .to_string(),
+        ),
+      },
+      CredentialField {
+        key: "secret_access_key".to_string(),
+        label: "Secret access key".to_string(),
+        placeholder: "wJalrXUtnFEMI/...".to_string(),
+        secret: true,
+        help: Some("Shown only once by AWS when the key is created.".to_string()),
+      },
+    ]
+  }
+
+  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+
+    let identity = self
+      .client
+      .get_caller_identity(DEFAULT_EC2_REGION, &credentials)
+      .map_err(|source| ProviderAdapterError::api("AWS credential validation failed.", source))?;
+
+    Ok(Account {
+      uuid: identity.account,
+      // AWS exposes no email for a key. The ARN is the meaningful identifier and is what an
+      // operator would use to check which principal this is.
+      email: identity.arn,
+      status: format!("active:{}", identity.user_id),
+    })
+  }
+
+  fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+
+    let codes = self
+      .client
+      .describe_regions(&credentials)
+      .map_err(|source| ProviderAdapterError::api("AWS region listing failed.", source))?;
+
+    Ok(codes.iter().map(|code| self.describe_region(code)).collect())
+  }
+
+  fn describe_region(&self, slug: &str) -> ProviderRegion {
+    ec2_regions::describe_region(slug)
+  }
+
+  fn list_plan_pricing(
+    &self,
+    token: &str,
+    region: &str,
+  ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let region = Self::effective_region(region);
+
+    let candidates: Vec<&str> = EC2_PLAN_SPECS.iter().map(|plan| plan.instance_type).collect();
+
+    // Prices are a curated estimate, but availability is not: offering an instance type this
+    // region cannot launch would fail at RunInstances, after the security group already exists.
+    let offered = self
+      .client
+      .filter_offered_instance_types(&region, &credentials, &candidates)
+      .map_err(|source| {
+        ProviderAdapterError::api("AWS instance type availability lookup failed.", source)
+      })?;
+
+    let source_timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+      Ok(value) => value.as_secs().to_string(),
+      Err(_) => "0".to_string(),
+    };
+
+    Ok(
+      EC2_PLAN_SPECS
+        .iter()
+        .filter(|plan| offered.iter().any(|candidate| candidate == plan.instance_type))
+        .map(|plan| ProviderPlanPricing {
+          plan_key: plan.instance_type.to_string(),
+          plan_label: plan.label.to_string(),
+          size_slug: plan.instance_type.to_string(),
+          region: region.clone(),
+          memory_mb: plan.memory_mb,
+          vcpus: plan.vcpus,
+          disk_gb: plan.disk_gb,
+          transfer_tb: plan.transfer_tb,
+          transfer_note:
+            "Estimate. AWS bills data transfer out per GB and prices vary by region; includes the public IPv4 address charge."
+              .to_string(),
+          monthly_usd: plan.monthly_usd,
+          hourly_usd: plan.hourly_usd,
+          // List prices, not a live quote — see EC2_PLAN_SPECS.
+          estimated: true,
+          source_timestamp: source_timestamp.clone(),
+        })
+        .collect(),
+    )
+  }
+
+  fn init_delivery(&self) -> InitDelivery {
+    InitDelivery::CloudInit
+  }
+
+  fn create_node(
+    &self,
+    token: &str,
+    node_name: &str,
+    region: &str,
+    size_slug: &str,
+    init_payload: &str,
+  ) -> Result<ProvisionedNode, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let region = Self::effective_region(region);
+
+    if init_payload.as_bytes().len() > EC2_USER_DATA_LIMIT_BYTES {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "The rendered bootstrap payload is {} bytes, over EC2's {EC2_USER_DATA_LIMIT_BYTES}-byte user-data limit.",
+          init_payload.as_bytes().len()
+        ),
+      });
+    }
+
+    let instance_type = if size_slug.trim().is_empty() {
+      EC2_PLAN_SPECS[0].instance_type.to_string()
+    } else {
+      size_slug.trim().to_string()
+    };
+
+    let image_id = self
+      .client
+      .resolve_ubuntu_ami(&region, &credentials)
+      .map_err(|source| {
+        ProviderAdapterError::api("Could not resolve the current Ubuntu AMI for this region.", source)
+      })?;
+
+    let vpc_id = self
+      .client
+      .default_vpc_id(&region, &credentials)
+      .map_err(|source| ProviderAdapterError::api("Could not look up the default VPC.", source))?
+      .ok_or_else(|| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "This AWS account has no default VPC in {region}. Create one in the AWS console, or choose a region that has one."
+        ),
+      })?;
+
+    let subnet_id = self
+      .client
+      .first_subnet_id(&region, &credentials, &vpc_id)
+      .map_err(|source| ProviderAdapterError::api("Could not look up a subnet in the default VPC.", source))?
+      .ok_or_else(|| ProviderAdapterError::Unsupported {
+        detail: format!("The default VPC in {region} has no subnet to launch into."),
+      })?;
+
+    let tags = vec![
+      ("Name".to_string(), sanitize_ec2_tag_value(node_name)),
+      (EC2_OWNER_TAG_KEY.to_string(), EC2_OWNER_TAG_VALUE.to_string()),
+    ];
+
+    let group_id = self
+      .client
+      .create_security_group(
+        &region,
+        &credentials,
+        &vpc_id,
+        &ec2_security_group_name(node_name),
+        "GoatStare WireGuard node — inbound UDP 51820 only.",
+        &tags,
+      )
+      .map_err(|source| ProviderAdapterError::api("Could not create the security group.", source))?;
+
+    // From here a real resource exists, so every later failure removes it before returning.
+    let cleanup_group = |adapter: &Self| {
+      let _ = adapter
+        .client
+        .delete_security_group(&region, &credentials, &group_id);
+    };
+
+    if let Err(source) = self
+      .client
+      .authorize_udp_ingress(&region, &credentials, &group_id, DEFAULT_WIREGUARD_PORT)
+    {
+      cleanup_group(self);
+      return Err(ProviderAdapterError::api(
+        "Could not open the WireGuard port on the new security group.",
+        source,
+      ));
+    }
+
+    let launched = match self.client.run_instance(
+      &region,
+      &credentials,
+      &image_id,
+      &instance_type,
+      &subnet_id,
+      &group_id,
+      &base64_encode(init_payload.as_bytes()),
+      &tags,
+    ) {
+      Ok(instance) => instance,
+      Err(source) => {
+        cleanup_group(self);
+        return Err(ProviderAdapterError::api("EC2 instance launch failed.", source));
+      }
+    };
+
+    let running = match self.client.wait_for_instance_running(
+      &region,
+      &credentials,
+      &launched.instance_id,
+      self.config.poll_interval,
+      self.config.poll_max_attempts,
+      self.config.instance_ready_timeout,
+    ) {
+      Ok(instance) => instance,
+      Err(source) => {
+        // Leave nothing half-provisioned and billing behind.
+        let _ = self
+          .client
+          .terminate_instance(&region, &credentials, &launched.instance_id);
+        cleanup_group(self);
+        return Err(ProviderAdapterError::api(
+          "EC2 instance did not reach running before timeout.",
+          source,
+        ));
+      }
+    };
+
+    let public_ipv4 = match running.public_ip {
+      Some(address) => address,
+      None => {
+        let _ = self
+          .client
+          .terminate_instance(&region, &credentials, &launched.instance_id);
+        cleanup_group(self);
+        return Err(ProviderAdapterError::Unsupported {
+          detail: "The EC2 instance started without a public IPv4 address, so it cannot be reached."
+            .to_string(),
+        });
+      }
+    };
+
+    Ok(ProvisionedNode {
+      node_id: Self::join_node_id(&region, &running.instance_id),
+      public_ipv4,
+      // No port translation in front of an EC2 instance, so the client dials the listen port.
+      endpoint_port: DEFAULT_WIREGUARD_PORT,
+    })
+  }
+
+  /// Readiness for EC2 is "the instance is running and has a public IPv4".
+  ///
+  /// `create_node` has already polled to running, so this confirms the instance is still healthy
+  /// and reports the endpoint. Nothing is read off the instance itself — the server's public key
+  /// was generated locally and baked into user-data, so it is already known here (AGENTS.md §2).
+  fn wait_for_bootstrap_ready(
+    &self,
+    token: &str,
+    request: &BootstrapWaitRequest,
+  ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let (region, instance_id) = Self::split_node_id(&request.node_id)?;
+
+    let instance = self
+      .client
+      .describe_instance(&region, &credentials, &instance_id)
+      .map_err(|source| {
+        ProviderAdapterError::api("Could not confirm EC2 instance state before completing provisioning.", source)
+      })?
+      .ok_or_else(|| ProviderAdapterError::Unsupported {
+        detail: format!("EC2 no longer reports instance {instance_id}; provisioning cannot complete."),
+      })?;
+
+    if instance.state != "running" {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "EC2 instance is '{}' rather than running; provisioning cannot complete.",
+          instance.state
+        ),
+      });
+    }
+
+    let server_endpoint_ip = if request.endpoint_ip.trim().is_empty() {
+      instance.public_ip.ok_or_else(|| ProviderAdapterError::Unsupported {
+        detail: "The running EC2 instance has no public IPv4 address.".to_string(),
+      })?
+    } else {
+      request.endpoint_ip.clone()
+    };
+
+    Ok(BootstrapOutputContract {
+      server_endpoint_ip,
+      // Echoed from what the caller generated and baked into user-data, not read back.
+      server_public_key: request.server_keypair.public_key.clone(),
+      listen_port: DEFAULT_WIREGUARD_PORT,
+    })
+  }
+
+  fn node_status(&self, token: &str, node_id: &str) -> Result<ProviderNodeStatus, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let (region, instance_id) = Self::split_node_id(node_id)?;
+
+    let instance = self
+      .client
+      .describe_instance(&region, &credentials, &instance_id)
+      .map_err(|source| ProviderAdapterError::api("EC2 instance status check failed.", source))?;
+
+    Ok(match instance {
+      None => ProviderNodeStatus::Deleted,
+      Some(instance) => match instance.state.as_str() {
+        "pending" => ProviderNodeStatus::New,
+        "running" => ProviderNodeStatus::Active,
+        "stopping" | "stopped" => ProviderNodeStatus::Off,
+        "shutting-down" => ProviderNodeStatus::Archive,
+        "terminated" => ProviderNodeStatus::Deleted,
+        _ => ProviderNodeStatus::Unknown,
+      },
+    })
+  }
+
+  fn node_exists(&self, token: &str, node_id: &str) -> Result<bool, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let (region, instance_id) = Self::split_node_id(node_id)?;
+
+    let instance = self
+      .client
+      .describe_instance(&region, &credentials, &instance_id)
+      .map_err(|source| ProviderAdapterError::api("EC2 instance existence check failed.", source))?;
+
+    // A terminated instance lingers in DescribeInstances for about an hour. Reporting it as
+    // existing would leave a destroyed node looking alive on the fleet list.
+    Ok(matches!(instance, Some(instance) if instance.state != "terminated"))
+  }
+
+  /// Terminate the instance, then remove the security group created alongside it.
+  ///
+  /// The order is forced by AWS: a security group cannot be deleted while its network interface is
+  /// still attached, and that interface is released asynchronously after termination. A failure to
+  /// remove the group is reported rather than swallowed — silently succeeding here is the habit
+  /// that leaves resources behind with nothing on screen to say so (AGENTS.md §8).
+  fn delete_node(&self, token: &str, node_id: &str) -> Result<(), ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let (region, instance_id) = Self::split_node_id(node_id)?;
+
+    // Read the attached group *before* terminating; afterwards the association is gone.
+    let group_id = self.security_group_for_node(&region, &credentials, &instance_id)?;
+
+    self
+      .client
+      .terminate_instance(&region, &credentials, &instance_id)
+      .map_err(|source| ProviderAdapterError::api("EC2 instance termination failed.", source))?;
+
+    let Some(group_id) = group_id else {
+      return Ok(());
+    };
+
+    self
+      .client
+      .wait_for_instance_terminated(
+        &region,
+        &credentials,
+        &instance_id,
+        self.config.poll_interval,
+        self.config.dependency_release_timeout,
+      )
+      .map_err(|source| {
+        ProviderAdapterError::api(
+          "The EC2 instance was terminated but did not finish releasing its network interface, so its security group could not be removed.",
+          source,
+        )
+      })?;
+
+    // The interface can still be detaching after the instance reports terminated, which surfaces as
+    // DependencyViolation. Retry on exactly that, and only that.
+    let policy = self.client.retry_policy().clone();
+    let mut last_error = None;
+
+    for attempt in 0..=policy.max_retries {
+      match self
+        .client
+        .delete_security_group(&region, &credentials, &group_id)
+      {
+        Ok(()) => return Ok(()),
+        Err(ec2::Ec2Error::DependencyViolation { .. }) if attempt < policy.max_retries => {
+          std::thread::sleep(policy.backoff_for_attempt(attempt));
+        }
+        Err(source) => {
+          last_error = Some(source);
+          break;
+        }
+      }
+    }
+
+    Err(ProviderAdapterError::api(
+      format!(
+        "The EC2 instance was terminated, but its security group {group_id} could not be removed. Delete it in the AWS console."
+      ),
+      last_error.unwrap_or(ec2::Ec2Error::Timeout {
+        action: "delete the security group".to_string(),
+        detail: "The group was still in use after every retry.".to_string(),
+      }),
+    ))
+  }
+}
+
 #[derive(Debug, Clone)]
-pub struct ProvisionedDroplet {
-  pub droplet_id: u64,
+pub struct ProvisionedNode {
+  /// The provider's own identifier for this node, opaque to everything above the adapter.
+  ///
+  /// This was a `u64` while DigitalOcean was the only production provider. A modern EC2 instance id
+  /// (`i-0abc123def4567890`) does not fit in 64 bits, and the Docker adapter had to mint a synthetic
+  /// number and stamp it on the container as a label purely to satisfy the type. It is stored
+  /// verbatim in `vpn_nodes.external_ref`, which was always `TEXT`.
+  pub node_id: String,
   pub public_ipv4: String,
   /// UDP port the *client* should dial to reach this node's WireGuard interface.
   ///
@@ -477,7 +1274,7 @@ pub struct NodeInitRequest {
 
 #[derive(Debug, Clone)]
 pub struct NodeInitResult {
-  pub provisioned: ProvisionedDroplet,
+  pub provisioned: ProvisionedNode,
 }
 
 /// What the adapter needs to report a node ready.
@@ -486,7 +1283,7 @@ pub struct NodeInitResult {
 /// locally; `readiness_marker_path` used to accompany it, for reading the marker back.
 #[derive(Debug, Clone)]
 pub struct BootstrapWaitRequest {
-  pub droplet_id: u64,
+  pub node_id: String,
   pub endpoint_ip: String,
   pub server_keypair: WireGuardKeypair,
 }
@@ -498,9 +1295,9 @@ pub trait NodeProvider: Send + Sync {
     token: &str,
     request: &BootstrapWaitRequest,
   ) -> Result<BootstrapOutputContract, ProviderAdapterError>;
-  fn get_status(&self, token: &str, droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError>;
-  fn exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError>;
-  fn delete(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError>;
+  fn get_status(&self, token: &str, node_id: &str) -> Result<ProviderNodeStatus, ProviderAdapterError>;
+  fn exists(&self, token: &str, node_id: &str) -> Result<bool, ProviderAdapterError>;
+  fn delete(&self, token: &str, node_id: &str) -> Result<(), ProviderAdapterError>;
 }
 
 #[derive(Clone)]
@@ -522,7 +1319,7 @@ impl NodeProvider for AdapterNodeProvider {
   fn init(&self, token: &str, request: &NodeInitRequest) -> Result<NodeInitResult, ProviderAdapterError> {
     let effective_token = self.token.as_deref().unwrap_or(token);
 
-    let provisioned = self.adapter.create_droplet(
+    let provisioned = self.adapter.create_node(
       effective_token,
       &request.node_name,
       &request.region,
@@ -542,19 +1339,19 @@ impl NodeProvider for AdapterNodeProvider {
     self.adapter.wait_for_bootstrap_ready(effective_token, request)
   }
 
-  fn get_status(&self, token: &str, droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError> {
+  fn get_status(&self, token: &str, node_id: &str) -> Result<ProviderNodeStatus, ProviderAdapterError> {
     let effective_token = self.token.as_deref().unwrap_or(token);
-    self.adapter.droplet_status(effective_token, droplet_id)
+    self.adapter.node_status(effective_token, node_id)
   }
 
-  fn exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError> {
+  fn exists(&self, token: &str, node_id: &str) -> Result<bool, ProviderAdapterError> {
     let effective_token = self.token.as_deref().unwrap_or(token);
-    self.adapter.droplet_exists(effective_token, droplet_id)
+    self.adapter.node_exists(effective_token, node_id)
   }
 
-  fn delete(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError> {
+  fn delete(&self, token: &str, node_id: &str) -> Result<(), ProviderAdapterError> {
     let effective_token = self.token.as_deref().unwrap_or(token);
-    self.adapter.delete_droplet(effective_token, droplet_id)
+    self.adapter.delete_node(effective_token, node_id)
   }
 }
 
@@ -582,14 +1379,37 @@ pub struct ProviderRegistry {
 
 #[derive(Debug, Error)]
 pub enum ProviderAdapterError {
-  #[error("DigitalOcean provider API call failed: {detail}")]
+  /// A call to the provider's API failed.
+  ///
+  /// The source is boxed because this enum is shared by every adapter. It was typed as
+  /// `DigitalOceanError`, which meant no other adapter could report an API failure at all — the
+  /// reason the Docker adapter reported even a crashed CLI as `Unsupported`. `describe_error_chain`
+  /// still walks the chain, so the concrete cause reaches the user unchanged.
+  #[error("Provider API call failed: {detail}")]
   Api {
     detail: String,
     #[source]
-    source: DigitalOceanError,
+    source: Box<dyn std::error::Error + Send + Sync + 'static>,
   },
+  /// This provider genuinely cannot do the thing asked of it.
+  ///
+  /// Not a transport failure and not a crashed subprocess — those are `Api`. This is the capability
+  /// error AGENTS.md §3 calls for, e.g. an AWS account with no default VPC in the chosen region.
   #[error("Provider capability not available yet: {detail}")]
   Unsupported { detail: String },
+}
+
+impl ProviderAdapterError {
+  /// Build an `Api` error from any adapter-specific error type.
+  pub fn api<E>(detail: impl Into<String>, source: E) -> Self
+  where
+    E: std::error::Error + Send + Sync + 'static,
+  {
+    Self::Api {
+      detail: detail.into(),
+      source: Box::new(source),
+    }
+  }
 }
 
 #[derive(Debug, Error)]
@@ -633,8 +1453,11 @@ impl ProviderRegistry {
     // Each adapter names itself, so the registry key and the adapter's own identity cannot drift.
     // These slugs were written out a second time here, which meant a renamed adapter would still
     // answer to its old key and `UnsupportedProviderSlug` would name a provider that exists.
-    let adapters: [Arc<dyn ProviderAdapter>; 2] =
-      [Arc::new(digitalocean), Arc::new(DockerProviderAdapter::new())];
+    let adapters: [Arc<dyn ProviderAdapter>; 3] = [
+      Arc::new(digitalocean),
+      Arc::new(Ec2ProviderAdapter::new()),
+      Arc::new(DockerProviderAdapter::new()),
+    ];
 
     let adapters_by_slug = adapters
       .into_iter()
@@ -710,35 +1533,36 @@ impl ProviderRegistry {
   ///
   /// The slug is resolved from the stored provider record by the caller, so adding a provider
   /// does not mean adding another command.
-  pub fn upsert_provider_token_for_slug(
+  pub fn upsert_provider_credential_for_slug(
     &self,
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
     provider_name: &str,
     provider_slug: &str,
-    api_token: &str,
+    credential: &ProviderCredential,
   ) -> Result<ProviderRecord, ProviderFlowError> {
-    self.upsert_provider_with_token(
+    self.upsert_provider_with_credential(
       db,
       secure_storage,
       provider_id,
       provider_name,
       provider_slug,
-      api_token,
+      credential,
     )
   }
 
-  fn upsert_provider_with_token(
+  fn upsert_provider_with_credential(
     &self,
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
     provider_name: &str,
     provider_slug: &str,
-    api_token: &str,
+    credential: &ProviderCredential,
   ) -> Result<ProviderRecord, ProviderFlowError> {
     self.adapter_for_slug(provider_slug)?;
+    let stored_credential = credential.to_stored_value();
 
     let existing = db
       .get_provider(provider_id)
@@ -749,9 +1573,9 @@ impl ProviderRegistry {
     let previous_token_ref = existing.as_ref().and_then(|record| record.token_ref.clone());
 
     let token_ref = secure_storage
-      .store_provider_api_token(provider_id, api_token)
+      .store_provider_credential(provider_id, &stored_credential)
       .map_err(|source| ProviderFlowError::SecretStore {
-        detail: "Unable to save provider token in protected storage."
+        detail: "Unable to save provider credential in protected storage."
           .to_string(),
         source,
       })?;
@@ -772,7 +1596,7 @@ impl ProviderRegistry {
     };
 
     if let Err(source) = update_result {
-      let _ = secure_storage.delete_provider_api_token(&token_ref);
+      let _ = secure_storage.delete_provider_credential(&token_ref);
       return Err(ProviderFlowError::Database {
         detail: "Failed to persist provider row with updated token reference.".to_string(),
         source,
@@ -780,7 +1604,7 @@ impl ProviderRegistry {
     }
 
     if let Some(previous_token_ref) = previous_token_ref {
-      let _ = secure_storage.delete_provider_api_token(&previous_token_ref);
+      let _ = secure_storage.delete_provider_credential(&previous_token_ref);
     }
 
     // The stored verdict described the key that was just replaced. Leaving it would show a brand
@@ -903,52 +1727,75 @@ impl ProviderRegistry {
       })
   }
 
-  pub fn delete_provider_droplet(
+  pub fn delete_provider_node(
     &self,
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
-    droplet_id: u64,
+    node_id: &str,
   ) -> Result<(), ProviderFlowError> {
     let node_provider = self.node_provider_for_provider_id(db, secure_storage, provider_id)?;
     node_provider
-      .delete("", droplet_id)
+      .delete("", node_id)
       .map_err(|source| ProviderFlowError::Adapter {
-        detail: "Droplet deletion through provider adapter failed.".to_string(),
+        detail: "Node deletion through provider adapter failed.".to_string(),
         source,
       })
   }
 
-  pub fn provider_droplet_exists(
+  pub fn provider_node_exists(
     &self,
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
-    droplet_id: u64,
+    node_id: &str,
   ) -> Result<bool, ProviderFlowError> {
     let node_provider = self.node_provider_for_provider_id(db, secure_storage, provider_id)?;
     node_provider
-      .exists("", droplet_id)
+      .exists("", node_id)
       .map_err(|source| ProviderFlowError::Adapter {
-        detail: "Droplet existence check through provider adapter failed.".to_string(),
+        detail: "Node existence check through provider adapter failed.".to_string(),
         source,
       })
   }
 
-  pub fn provider_droplet_status(
+  pub fn provider_node_status(
     &self,
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
-    droplet_id: u64,
-  ) -> Result<ProviderDropletStatus, ProviderFlowError> {
+    node_id: &str,
+  ) -> Result<ProviderNodeStatus, ProviderFlowError> {
     let node_provider = self.node_provider_for_provider_id_allow_suspended(db, secure_storage, provider_id)?;
     node_provider
-      .get_status("", droplet_id)
+      .get_status("", node_id)
       .map_err(|source| ProviderFlowError::Adapter {
-        detail: "Droplet status check through provider adapter failed.".to_string(),
+        detail: "Node status check through provider adapter failed.".to_string(),
         source,
       })
+  }
+
+  /// The credential inputs a provider needs, for the UI to render.
+  ///
+  /// Resolved through the adapter, so the frontend never has to know which provider needs how many
+  /// fields.
+  pub fn credential_fields_for_provider(
+    &self,
+    db: &Database,
+    provider_id: &str,
+  ) -> Result<Vec<CredentialField>, ProviderFlowError> {
+    let (_, adapter) = self.load_provider_and_adapter_allow_suspended(db, provider_id)?;
+    Ok(adapter.credential_fields())
+  }
+
+  /// How this provider takes delivery of the bootstrap script.
+  pub fn init_delivery_for_provider(
+    &self,
+    db: &Database,
+    provider_id: &str,
+  ) -> Result<InitDelivery, ProviderFlowError> {
+    let (_, adapter) = self.load_provider_and_adapter_allow_suspended(db, provider_id)?;
+    Ok(adapter.init_delivery())
   }
 
   fn load_provider_and_adapter(
@@ -1029,7 +1876,7 @@ impl ProviderRegistry {
       })?;
 
     let resolved = secure_storage
-      .get_provider_api_token(&token_ref)
+      .get_provider_credential(&token_ref)
       .map_err(|source| ProviderFlowError::SecretStore {
         detail: "Failed retrieving provider token from secure storage.".to_string(),
         source,
@@ -1074,10 +1921,14 @@ mod tests {
 
   use crate::backend::crypto::keypair::generate_server_keypair;
 
+  use crate::backend::logging;
+
   use super::{
-    Account, BootstrapWaitRequest, NodeInitRequest, ProviderAdapter, ProviderAdapterError,
-    ProviderDropletStatus, ProviderPlanPricing, ProviderRegion, ProviderRegistry, ProvisionedDroplet,
-    sanitize_droplet_name,
+    Account, BootstrapWaitRequest, CredentialField, EC2_USER_DATA_LIMIT_BYTES, Ec2ProviderAdapter,
+    InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY, NodeInitRequest, ProviderAdapter,
+    ProviderAdapterError, ProviderCredential, ProviderNodeStatus, ProviderPlanPricing,
+    ProviderRegion, ProviderRegistry, ProvisionedNode, base64_encode, ec2_security_group_name,
+    sanitize_droplet_name, sanitize_ec2_tag_value,
   };
 
   fn test_db_path(test_name: &str) -> PathBuf {
@@ -1153,7 +2004,7 @@ mod tests {
       .wait_for_bootstrap_ready(
         "dop_v1_test_token",
         &BootstrapWaitRequest {
-          droplet_id: 4242,
+          node_id: "4242".to_string(),
           endpoint_ip: String::new(),
           server_keypair: keypair.clone(),
         },
@@ -1185,7 +2036,7 @@ mod tests {
       .wait_for_bootstrap_ready(
         "dop_v1_test_token",
         &BootstrapWaitRequest {
-          droplet_id: 99,
+          node_id: "99".to_string(),
           endpoint_ip: String::new(),
           server_keypair: generate_server_keypair().expect("keypair should generate"),
         },
@@ -1195,12 +2046,509 @@ mod tests {
     assert!(error.to_string().contains("active"));
   }
 
+  // --- Amazon EC2 -----------------------------------------------------------------------------
+
+  fn aws_credential() -> String {
+    ProviderCredential::from_fields([
+      ("access_key_id".to_string(), "AKIAEXAMPLENOTREAL".to_string()),
+      (
+        "secret_access_key".to_string(),
+        "wJalrXUtnFEMI-EXAMPLE-NOT-A-REAL-KEY".to_string(),
+      ),
+    ])
+    .to_stored_value()
+  }
+
+  /// Matches one EC2 Query action within the form-encoded body.
+  fn ec2_action(action: &str) -> mockito::Matcher {
+    mockito::Matcher::Regex(format!("Action={action}(&|$)"))
+  }
+
+  /// A mocked EC2 action.
+  ///
+  /// `expect_at_least(1)` rather than an exact count: how many times a flow polls is an
+  /// implementation detail, and pinning it turns a harmless change into a test failure. What
+  /// matters is that the action was called at all.
+  fn mock_ec2(
+    server: &mut mockito::ServerGuard,
+    action: &str,
+    body: &str,
+  ) -> mockito::Mock {
+    server
+      .mock("POST", "/ec2")
+      .match_body(ec2_action(action))
+      .with_status(200)
+      .with_body(body)
+      .expect_at_least(1)
+      .create()
+  }
+
+  /// The AMI lookup every provision starts with.
+  fn mock_ssm_ami(server: &mut mockito::ServerGuard) -> mockito::Mock {
+    server
+      .mock("POST", "/ssm")
+      .with_status(200)
+      .with_body(r#"{"Parameter":{"Value":"ami-0abcdef1234567890"}}"#)
+      .expect_at_least(1)
+      .create()
+  }
+
+  /// The whole provisioning path: resolve an AMI, find the default VPC and a subnet, create and
+  /// open a security group, launch, and poll to running with a public address.
+  #[test]
+  fn ec2_create_node_launches_into_the_default_vpc_and_reports_its_endpoint() {
+    let mut server = mockito::Server::new();
+
+    let ssm = mock_ssm_ami(&mut server);
+    let vpcs = mock_ec2(
+      &mut server,
+      "DescribeVpcs",
+      r#"<DescribeVpcsResponse><vpcSet><item><vpcId>vpc-0aaa</vpcId></item></vpcSet></DescribeVpcsResponse>"#,
+    );
+    let subnets = mock_ec2(
+      &mut server,
+      "DescribeSubnets",
+      r#"<DescribeSubnetsResponse><subnetSet><item><subnetId>subnet-0bbb</subnetId></item></subnetSet></DescribeSubnetsResponse>"#,
+    );
+    let create_group = mock_ec2(
+      &mut server,
+      "CreateSecurityGroup",
+      r#"<CreateSecurityGroupResponse><groupId>sg-0ccc</groupId></CreateSecurityGroupResponse>"#,
+    );
+    let authorize = mock_ec2(
+      &mut server,
+      "AuthorizeSecurityGroupIngress",
+      r#"<AuthorizeSecurityGroupIngressResponse><return>true</return></AuthorizeSecurityGroupIngressResponse>"#,
+    );
+    let run = mock_ec2(
+      &mut server,
+      "RunInstances",
+      r#"<RunInstancesResponse><instancesSet><item>
+        <instanceId>i-0abc123def4567890</instanceId>
+        <instanceState><code>0</code><name>pending</name></instanceState>
+      </item></instancesSet></RunInstancesResponse>"#,
+    );
+    let describe = mock_ec2(
+      &mut server,
+      "DescribeInstances",
+      r#"<DescribeInstancesResponse><reservationSet><item><instancesSet><item>
+        <instanceId>i-0abc123def4567890</instanceId>
+        <instanceState><code>16</code><name>running</name></instanceState>
+        <ipAddress>203.0.113.42</ipAddress>
+      </item></instancesSet></item></reservationSet></DescribeInstancesResponse>"#,
+    );
+
+    let adapter = Ec2ProviderAdapter::with_base_url(&server.url());
+
+    let provisioned = adapter
+      .create_node(
+        &aws_credential(),
+        "Primary Node",
+        "eu-west-2",
+        "t3.micro",
+        "#cloud-config\npackages: [wireguard]\n",
+      )
+      .expect("provisioning should succeed against the mocked AWS API");
+
+    ssm.assert();
+    vpcs.assert();
+    subnets.assert();
+    create_group.assert();
+    authorize.assert();
+    run.assert();
+    describe.assert();
+
+    assert_eq!(provisioned.public_ipv4, "203.0.113.42");
+    assert_eq!(provisioned.endpoint_port, DEFAULT_WIREGUARD_PORT);
+    // The region travels with the node id, because status, exists and delete need it to build a
+    // signed request and the trait does not pass a region to them.
+    assert_eq!(provisioned.node_id, "eu-west-2/i-0abc123def4567890");
+  }
+
+  /// An account with no default VPC gets a capability error naming the problem, not a failed launch.
+  #[test]
+  fn ec2_create_node_reports_a_missing_default_vpc_as_a_capability_error() {
+    let mut server = mockito::Server::new();
+    let _ssm = mock_ssm_ami(&mut server);
+    let _vpcs = mock_ec2(&mut server, "DescribeVpcs", r#"<DescribeVpcsResponse><vpcSet/></DescribeVpcsResponse>"#);
+
+    let adapter = Ec2ProviderAdapter::with_base_url(&server.url());
+
+    let error = adapter
+      .create_node(&aws_credential(), "Primary Node", "eu-west-2", "t3.micro", "#cloud-config\n")
+      .expect_err("a missing default VPC must fail");
+
+    assert!(
+      matches!(error, ProviderAdapterError::Unsupported { .. }),
+      "expected a capability error, got {error:?}"
+    );
+    assert!(error.to_string().contains("default VPC"));
+  }
+
+  /// A failure after the security group exists must not leave it behind.
+  #[test]
+  fn ec2_create_node_removes_the_security_group_when_the_launch_fails() {
+    let mut server = mockito::Server::new();
+
+    let _ssm = mock_ssm_ami(&mut server);
+    let _vpcs = mock_ec2(
+      &mut server,
+      "DescribeVpcs",
+      r#"<DescribeVpcsResponse><vpcSet><item><vpcId>vpc-0aaa</vpcId></item></vpcSet></DescribeVpcsResponse>"#,
+    );
+    let _subnets = mock_ec2(
+      &mut server,
+      "DescribeSubnets",
+      r#"<DescribeSubnetsResponse><subnetSet><item><subnetId>subnet-0bbb</subnetId></item></subnetSet></DescribeSubnetsResponse>"#,
+    );
+    let _create_group = mock_ec2(
+      &mut server,
+      "CreateSecurityGroup",
+      r#"<CreateSecurityGroupResponse><groupId>sg-0ccc</groupId></CreateSecurityGroupResponse>"#,
+    );
+    let _authorize = mock_ec2(
+      &mut server,
+      "AuthorizeSecurityGroupIngress",
+      r#"<AuthorizeSecurityGroupIngressResponse><return>true</return></AuthorizeSecurityGroupIngressResponse>"#,
+    );
+
+    let run_failure = server
+      .mock("POST", "/ec2")
+      .match_body(ec2_action("RunInstances"))
+      .with_status(400)
+      .with_body(
+        r#"<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code>
+          <Message>No capacity for t3.micro</Message></Error></Errors></Response>"#,
+      )
+      .expect_at_least(1)
+      .create();
+
+    // The rollback delete is the assertion: without it the user pays nothing for the group, but it
+    // lingers in their account with no record of where it came from.
+    let group_deleted = server
+      .mock("POST", "/ec2")
+      .match_body(ec2_action("DeleteSecurityGroup"))
+      .with_status(200)
+      .with_body(r#"<DeleteSecurityGroupResponse><return>true</return></DeleteSecurityGroupResponse>"#)
+      .expect_at_least(1)
+      .create();
+
+    let adapter = Ec2ProviderAdapter::with_base_url(&server.url());
+
+    adapter
+      .create_node(&aws_credential(), "Primary Node", "eu-west-2", "t3.micro", "#cloud-config\n")
+      .expect_err("a failed launch must surface as an error");
+
+    run_failure.assert();
+    group_deleted.assert();
+  }
+
+  /// Destroy removes the instance and the security group that was created with it.
+  #[test]
+  fn ec2_delete_node_terminates_the_instance_and_removes_its_security_group() {
+    let mut server = mockito::Server::new();
+
+    let describe = mock_ec2(
+      &mut server,
+      "DescribeInstances",
+      r#"<DescribeInstancesResponse><reservationSet><item><instancesSet><item>
+        <instanceId>i-0abc123def4567890</instanceId>
+        <instanceState><code>48</code><name>terminated</name></instanceState>
+        <groupSet><item><groupId>sg-0ccc</groupId></item></groupSet>
+      </item></instancesSet></item></reservationSet></DescribeInstancesResponse>"#,
+    );
+    let terminate = mock_ec2(
+      &mut server,
+      "TerminateInstances",
+      r#"<TerminateInstancesResponse><return>true</return></TerminateInstancesResponse>"#,
+    );
+    let delete_group = mock_ec2(
+      &mut server,
+      "DeleteSecurityGroup",
+      r#"<DeleteSecurityGroupResponse><return>true</return></DeleteSecurityGroupResponse>"#,
+    );
+
+    let adapter = Ec2ProviderAdapter::with_base_url(&server.url());
+
+    adapter
+      .delete_node(&aws_credential(), "eu-west-2/i-0abc123def4567890")
+      .expect("destroy should succeed");
+
+    describe.assert();
+    terminate.assert();
+    delete_group.assert();
+  }
+
+  /// A security group that cannot be removed must be reported.
+  ///
+  /// Returning success here is the habit AGENTS.md §8 forbids: the instance is gone, so the app
+  /// looks clean, while a resource the user did not ask for stays in their account.
+  #[test]
+  fn ec2_delete_node_reports_a_security_group_it_could_not_remove() {
+    let mut server = mockito::Server::new();
+
+    let _describe = mock_ec2(
+      &mut server,
+      "DescribeInstances",
+      r#"<DescribeInstancesResponse><reservationSet><item><instancesSet><item>
+        <instanceId>i-0abc123def4567890</instanceId>
+        <instanceState><code>48</code><name>terminated</name></instanceState>
+        <groupSet><item><groupId>sg-0ccc</groupId></item></groupSet>
+      </item></instancesSet></item></reservationSet></DescribeInstancesResponse>"#,
+    );
+    let _terminate = mock_ec2(
+      &mut server,
+      "TerminateInstances",
+      r#"<TerminateInstancesResponse><return>true</return></TerminateInstancesResponse>"#,
+    );
+    let _blocked = server
+      .mock("POST", "/ec2")
+      .match_body(ec2_action("DeleteSecurityGroup"))
+      .with_status(400)
+      .with_body(
+        r#"<Response><Errors><Error><Code>DependencyViolation</Code>
+          <Message>resource sg-0ccc has a dependent object</Message></Error></Errors></Response>"#,
+      )
+      .expect_at_least(1)
+      .create();
+
+    let adapter = Ec2ProviderAdapter::with_base_url(&server.url());
+
+    let error = adapter
+      .delete_node(&aws_credential(), "eu-west-2/i-0abc123def4567890")
+      .expect_err("an undeletable security group must be reported, not swallowed");
+
+    assert!(
+      error.to_string().contains("sg-0ccc"),
+      "the error should name the group left behind: {error}"
+    );
+  }
+
+  /// A terminated instance lingers in `DescribeInstances` for about an hour. Reporting it as
+  /// existing would leave a destroyed node looking alive on the fleet list.
+  #[test]
+  fn ec2_node_exists_is_false_once_the_instance_is_terminated() {
+    let mut server = mockito::Server::new();
+    let _describe = mock_ec2(
+      &mut server,
+      "DescribeInstances",
+      r#"<DescribeInstancesResponse><reservationSet><item><instancesSet><item>
+        <instanceId>i-0abc123def4567890</instanceId>
+        <instanceState><code>48</code><name>terminated</name></instanceState>
+      </item></instancesSet></item></reservationSet></DescribeInstancesResponse>"#,
+    );
+
+    let adapter = Ec2ProviderAdapter::with_base_url(&server.url());
+    let credential = aws_credential();
+
+    assert!(!adapter
+      .node_exists(&credential, "eu-west-2/i-0abc123def4567890")
+      .expect("existence check should succeed"));
+    assert_eq!(
+      adapter
+        .node_status(&credential, "eu-west-2/i-0abc123def4567890")
+        .expect("status check should succeed"),
+      ProviderNodeStatus::Deleted
+    );
+  }
+
+  /// A rejected key must be reported as a credential problem, so the user is told to re-enter it.
+  #[test]
+  fn ec2_validate_token_surfaces_an_aws_auth_failure() {
+    let mut server = mockito::Server::new();
+    let _sts = server
+      .mock("POST", "/sts")
+      .with_status(403)
+      .with_body(
+        r#"<ErrorResponse><Error><Code>InvalidClientTokenId</Code>
+          <Message>The security token included in the request is invalid.</Message></Error></ErrorResponse>"#,
+      )
+      .expect_at_least(1)
+      .create();
+
+    let adapter = Ec2ProviderAdapter::with_base_url(&server.url());
+
+    let error = adapter
+      .validate_token(&aws_credential())
+      .expect_err("an invalid key must fail validation");
+
+    assert!(
+      logging::describe_error_chain(&error).contains("InvalidClientTokenId"),
+      "the AWS reason should reach the user: {}",
+      logging::describe_error_chain(&error)
+    );
+  }
+
+  /// A credential missing a field names it, rather than failing later as an opaque 403.
+  #[test]
+  fn ec2_rejects_a_credential_that_is_missing_its_secret() {
+    let adapter = Ec2ProviderAdapter::new();
+    let partial = ProviderCredential::from_fields([(
+      "access_key_id".to_string(),
+      "AKIAEXAMPLENOTREAL".to_string(),
+    )])
+    .to_stored_value();
+
+    let error = adapter
+      .validate_token(&partial)
+      .expect_err("an incomplete credential must be rejected");
+
+    assert!(error.to_string().contains("secret_access_key"), "got {error}");
+  }
+
+  /// A DigitalOcean node id reaching the EC2 adapter is a caller error, not a panic.
+  #[test]
+  fn ec2_rejects_a_node_reference_that_is_not_its_own() {
+    let adapter = Ec2ProviderAdapter::new();
+
+    let error = adapter
+      .node_status(&aws_credential(), "12345")
+      .expect_err("a numeric droplet id is not an EC2 node reference");
+
+    assert!(matches!(error, ProviderAdapterError::Unsupported { .. }), "got {error:?}");
+  }
+
+  /// EC2 caps user-data at 16 KiB before base64. The rendered cloud-init is several KB, so this
+  /// guards against an edit to the shared bootstrap script silently breaking provisioning.
+  #[test]
+  fn the_rendered_cloud_init_fits_inside_the_ec2_user_data_limit() {
+    use crate::backend::bootstrap::{Bootstrap, BootstrapParams};
+    use crate::backend::crypto::keypair::{generate_client_keypair, generate_server_keypair};
+
+    let client = generate_client_keypair().expect("client keypair should generate");
+    let server = generate_server_keypair().expect("server keypair should generate");
+
+    let artifact = Bootstrap
+      .render_cloud_init(
+        &BootstrapParams {
+          client_public_key: client.public_key,
+          ..BootstrapParams::default()
+        },
+        &server.private_key,
+        &server.public_key,
+      )
+      .expect("cloud-init should render");
+
+    assert!(
+      artifact.init_payload.as_bytes().len() <= EC2_USER_DATA_LIMIT_BYTES,
+      "cloud-init is {} bytes, over EC2's {EC2_USER_DATA_LIMIT_BYTES}-byte user-data limit",
+      artifact.init_payload.as_bytes().len()
+    );
+  }
+
+  #[test]
+  fn base64_encoding_matches_known_vectors() {
+    // Padding is where a hand-written encoder usually goes wrong, so all three lengths are covered.
+    assert_eq!(base64_encode(b""), "");
+    assert_eq!(base64_encode(b"f"), "Zg==");
+    assert_eq!(base64_encode(b"fo"), "Zm8=");
+    assert_eq!(base64_encode(b"foo"), "Zm9v");
+    assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+    assert_eq!(base64_encode(b"#cloud-config\n"), "I2Nsb3VkLWNvbmZpZwo=");
+  }
+
+  /// AWS tag values allow far more than a hostname does, so the user's label is preserved rather
+  /// than mangled the way a DigitalOcean droplet name has to be.
+  #[test]
+  fn ec2_tag_values_keep_spaces_and_reject_only_what_aws_does() {
+    assert_eq!(sanitize_ec2_tag_value("  Primary Node  "), "Primary Node");
+    assert_eq!(sanitize_ec2_tag_value("tab\there"), "tabhere");
+    assert_eq!(sanitize_ec2_tag_value("   "), "goatstare-node");
+    assert_eq!(sanitize_ec2_tag_value(""), "goatstare-node");
+  }
+
+  /// Two nodes the user called the same thing must not collide on the security group name.
+  #[test]
+  fn ec2_security_group_names_are_unique_per_call() {
+    let first = ec2_security_group_name("Primary Node");
+    let second = ec2_security_group_name("Primary Node");
+
+    assert_ne!(first, second);
+    assert!(first.starts_with("goatstare-Primary-Node-"), "got {first}");
+    assert!(
+      first.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+      "got {first}"
+    );
+  }
+
+  fn single_field_credential(token: &str) -> ProviderCredential {
+    ProviderCredential::from_fields([(
+      LEGACY_SINGLE_CREDENTIAL_KEY.to_string(),
+      token.to_string(),
+    )])
+  }
+
+  /// A credential saved before credentials had named fields is a bare token with no JSON around it.
+  ///
+  /// Every existing install has one. If this stopped parsing, the stored value would be
+  /// unreadable — the provider would look configured while every API call failed.
+  #[test]
+  fn a_legacy_bare_token_still_parses_as_the_single_credential_field() {
+    let parsed = ProviderCredential::parse("dop_v1_legacy_bare_token");
+
+    assert_eq!(
+      parsed.single().expect("a bare token must resolve"),
+      "dop_v1_legacy_bare_token"
+    );
+  }
+
+  /// A multi-field credential round-trips through storage without losing a field.
+  #[test]
+  fn a_multi_field_credential_round_trips_through_its_stored_form() {
+    let credential = ProviderCredential::from_fields([
+      ("access_key_id".to_string(), "AKIAEXAMPLE".to_string()),
+      ("secret_access_key".to_string(), "wJalrEXAMPLEKEY".to_string()),
+    ]);
+
+    let parsed = ProviderCredential::parse(&credential.to_stored_value());
+
+    assert_eq!(parsed.field("access_key_id"), Some("AKIAEXAMPLE"));
+    assert_eq!(parsed.field("secret_access_key"), Some("wJalrEXAMPLEKEY"));
+    assert_eq!(parsed, credential);
+  }
+
+  /// A token that merely happens to start with `{` must not be mistaken for a field set.
+  #[test]
+  fn a_bare_token_that_is_not_valid_json_is_treated_as_a_single_field() {
+    let parsed = ProviderCredential::parse("{not-json-just-an-odd-token");
+
+    assert_eq!(
+      parsed.single().expect("an unparseable value falls back to the single field"),
+      "{not-json-just-an-odd-token"
+    );
+  }
+
+  /// A missing field names itself, rather than failing later as an opaque authentication error.
+  #[test]
+  fn a_missing_credential_field_is_reported_by_name() {
+    let credential = ProviderCredential::from_fields([(
+      "access_key_id".to_string(),
+      "AKIAEXAMPLE".to_string(),
+    )]);
+
+    let error = credential
+      .require("secret_access_key")
+      .expect_err("a missing field must be an error");
+
+    assert!(error.to_string().contains("secret_access_key"));
+  }
+
   #[derive(Clone)]
   struct TestProviderAdapter;
 
   impl ProviderAdapter for TestProviderAdapter {
     fn provider_name(&self) -> &'static str {
       "test-provider"
+    }
+
+    fn credential_fields(&self) -> Vec<CredentialField> {
+      vec![CredentialField {
+        key: LEGACY_SINGLE_CREDENTIAL_KEY.to_string(),
+        label: "API token".to_string(),
+        placeholder: "test_...".to_string(),
+        secret: true,
+        help: None,
+      }]
     }
 
     fn validate_token(&self, _token: &str) -> Result<Account, ProviderAdapterError> {
@@ -1228,16 +2576,20 @@ mod tests {
       Ok(Vec::new())
     }
 
-    fn create_droplet(
+    fn init_delivery(&self) -> InitDelivery {
+      InitDelivery::CloudInit
+    }
+
+    fn create_node(
       &self,
       _token: &str,
-      _droplet_name: &str,
+      _node_name: &str,
       _region: &str,
       _size_slug: &str,
       _init_payload: &str,
-    ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
-      Ok(ProvisionedDroplet {
-        droplet_id: 42,
+    ) -> Result<ProvisionedNode, ProviderAdapterError> {
+      Ok(ProvisionedNode {
+        node_id: "42".to_string(),
         public_ipv4: "203.0.113.10".to_string(),
         endpoint_port: DEFAULT_WIREGUARD_PORT,
       })
@@ -1255,19 +2607,19 @@ mod tests {
       })
     }
 
-    fn droplet_status(
+    fn node_status(
       &self,
       _token: &str,
-      _droplet_id: u64,
-    ) -> Result<ProviderDropletStatus, ProviderAdapterError> {
-      Ok(ProviderDropletStatus::Active)
+      _node_id: &str,
+    ) -> Result<ProviderNodeStatus, ProviderAdapterError> {
+      Ok(ProviderNodeStatus::Active)
     }
 
-    fn droplet_exists(&self, _token: &str, _droplet_id: u64) -> Result<bool, ProviderAdapterError> {
+    fn node_exists(&self, _token: &str, _node_id: &str) -> Result<bool, ProviderAdapterError> {
       Ok(true)
     }
 
-    fn delete_droplet(&self, _token: &str, _droplet_id: u64) -> Result<(), ProviderAdapterError> {
+    fn delete_node(&self, _token: &str, _node_id: &str) -> Result<(), ProviderAdapterError> {
       Ok(())
     }
   }
@@ -1280,6 +2632,7 @@ mod tests {
 
     assert!(registry.node_provider_for_slug("docker").is_some());
     assert!(registry.node_provider_for_slug("digitalocean").is_some());
+    assert!(registry.node_provider_for_slug("aws-ec2").is_some());
     assert!(registry.node_provider_for_slug("nimbus-cloud").is_none());
   }
 
@@ -1293,13 +2646,13 @@ mod tests {
     let plaintext_token = "dop_v1_sensitive_plaintext_token";
 
     let provider = registry
-      .upsert_provider_with_token(
+      .upsert_provider_credential_for_slug(
         &db,
         &secure_storage,
         "provider-1",
         "DigitalOcean",
         "digitalocean",
-        plaintext_token,
+        &single_field_credential(plaintext_token),
       )
       .expect("provider flow should succeed");
 
@@ -1307,10 +2660,15 @@ mod tests {
     assert_ne!(token_ref, plaintext_token);
 
     let recovered = secure_storage
-      .get_digitalocean_api_token(&token_ref)
+      .get_provider_credential(&token_ref)
       .expect("token retrieval should succeed")
       .expect("token should exist in mock secret storage");
-    assert_eq!(recovered, plaintext_token);
+    assert_eq!(
+      ProviderCredential::parse(&recovered)
+        .single()
+        .expect("the stored credential must carry the token"),
+      plaintext_token
+    );
 
     let connection = Connection::open(db.path()).expect("db path should be openable");
     let row = connection
@@ -1343,13 +2701,13 @@ mod tests {
     let secure_storage = SecureStorage::dev_mock();
 
     let provider = registry
-      .upsert_provider_with_token(
+      .upsert_provider_credential_for_slug(
         &db,
         &secure_storage,
         "provider-1",
         "DigitalOcean",
         "digitalocean",
-        "dop_v1_stale_test_token",
+        &single_field_credential("dop_v1_stale_test_token"),
       )
       .expect("provider create should succeed");
 
@@ -1359,7 +2717,7 @@ mod tests {
       .expect("token ref should be present");
 
     secure_storage
-      .delete_digitalocean_api_token(&token_ref)
+      .delete_provider_credential(&token_ref)
       .expect("mock token delete should succeed");
 
     let result = registry.validate_provider_token(&db, &secure_storage, "provider-1");
@@ -1382,13 +2740,13 @@ mod tests {
     let provider_id = "provider-1";
 
     registry
-      .upsert_provider_with_token(
+      .upsert_provider_credential_for_slug(
         &db,
         &secure_storage,
         provider_id,
         "Test Provider",
         "test-provider",
-        "test-token",
+        &single_field_credential("test-token"),
       )
       .expect("provider create should succeed");
 
@@ -1403,7 +2761,7 @@ mod tests {
       .init_provider_node(&db, &secure_storage, provider_id, &request)
       .expect("node init should succeed through NodeProvider interface");
 
-    assert_eq!(result.provisioned.droplet_id, 42);
+    assert_eq!(result.provisioned.node_id, "42");
   }
 
   #[cfg(target_os = "windows")]
@@ -1417,13 +2775,13 @@ mod tests {
     let token = "dop_v1_windows_roundtrip_test_token";
 
     let provider = registry
-      .upsert_provider_with_token(
+      .upsert_provider_credential_for_slug(
         &db,
         &secure_storage,
         "provider-1",
         "DigitalOcean",
         "digitalocean",
-        token,
+        &single_field_credential(token),
       )
       .expect("provider create should succeed with Windows secure storage");
 
@@ -1440,12 +2798,18 @@ mod tests {
     assert_eq!(persisted.token_ref.as_deref(), Some(token_ref.as_str()));
 
     let recovered = secure_storage
-      .get_digitalocean_api_token(&token_ref)
-      .expect("token lookup should succeed");
-    assert_eq!(recovered.as_deref(), Some(token));
+      .get_provider_credential(&token_ref)
+      .expect("token lookup should succeed")
+      .expect("the credential should be readable from Credential Manager");
+    assert_eq!(
+      ProviderCredential::parse(&recovered)
+        .single()
+        .expect("the stored credential must carry the token"),
+      token
+    );
 
     secure_storage
-      .delete_digitalocean_api_token(&token_ref)
+      .delete_provider_credential(&token_ref)
       .expect("cleanup delete should succeed");
   }
 }

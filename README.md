@@ -16,7 +16,7 @@ Project inspiration:
 - Windows desktop workflow driving the WireGuard for Windows tunnel service
 - Rust backend + Tauri + Next.js frontend architecture
 - Multi-provider adapter model
-- DigitalOcean cloud adapter and Docker local adapter
+- DigitalOcean and Amazon EC2 cloud adapters, and a Docker local adapter
 - Secure storage for provider tokens and client keys
 - SQLite for provider, node, tunnel, and runtime metadata
 
@@ -24,7 +24,8 @@ Project inspiration:
 
 - Stores and validates provider credentials in Windows Credential Manager (no plaintext secrets in SQLite).
 - Uses a generalized provider orchestration path for node lifecycle operations.
-- Provisions a node on DigitalOcean or the local Docker dev provider, and connects to it. Both paths
+- Provisions a node on DigitalOcean, Amazon EC2, or the local Docker dev provider, and connects to
+  it. All paths
   are verified end to end against real infrastructure, including a completed WireGuard handshake.
 - Creates and manages local WireGuard client tunnels through the WireGuard for Windows service.
 - Shows health, diagnostics, and recovery guidance in the dashboard.
@@ -58,7 +59,8 @@ Prerequisites:
 - Rust toolchain
 - WireGuard for Windows installed locally
 - WireGuard for Windows installed (provides `wireguard.exe` and `wg.exe`)
-- Provider API key for production-style testing (DigitalOcean)
+- Provider credentials for production-style testing (a DigitalOcean API token, or an AWS access key
+  id and secret access key)
 - Docker Desktop (only when testing dev Docker provider)
 
 Run locally:
@@ -113,8 +115,16 @@ GOATSTARE_DO_TEST_TOKEN=<token> npm run backend:test:do:real
 ```
 
 It provisions a droplet, connects to it as a real WireGuard client, confirms a handshake, and
-destroys it — proving cloud-init brings the server up from the baked-in payload alone. See
-[Testing](docs/TESTING.md).
+destroys it — proving cloud-init brings the server up from the baked-in payload alone.
+
+The equivalent Amazon EC2 lane. **This creates a billable instance and public IPv4 address**, both
+destroyed on every exit path along with the security group created alongside them:
+
+```bash
+GOATSTARE_AWS_TEST_ACCESS_KEY_ID=<key> GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY=<secret> npm run backend:test:ec2:real
+```
+
+See [Testing](docs/TESTING.md).
 
 ## Documentation
 

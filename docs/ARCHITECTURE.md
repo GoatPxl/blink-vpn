@@ -16,6 +16,7 @@ Stack:
 Included provider adapters:
 
 - DigitalOcean adapter for cloud VPS lifecycle
+- Amazon EC2 adapter for cloud VPS lifecycle
 - Docker adapter for local container-backed development workflows
 
 ## System Diagram
@@ -27,11 +28,13 @@ flowchart LR
   ORCH --> REG[Provider registry]
   REG --> NP[Unified NodeProvider]
   NP --> DO[DigitalOcean adapter]
+  NP --> EC2[Amazon EC2 adapter]
   NP --> DKR[Docker adapter]
   ORCH --> DB[(SQLite)]
   ORCH --> SEC[Credential Manager]
   ORCH --> RUNTIME[WireGuard for Windows service]
   DO --> DOAPI[DigitalOcean API]
+  EC2 --> AWSAPI[AWS EC2 / SSM / STS APIs]
   DKR --> DKRCLI[Docker CLI]
 ```
 
@@ -95,13 +98,77 @@ The contract covers:
   a node row stores only a slug and the fleet list must stay readable when a provider key goes bad.
   Region slugs are provider namespaces, so the mapping lives inside each adapter — a shared table
   keyed by slug alone would collide as soon as two providers use the same code.
+- `credential_fields`: declare the credential inputs this provider needs — key, label, placeholder,
+  whether to mask it, and help text. DigitalOcean declares one API token; AWS declares an access key
+  id and a secret access key. The settings and onboarding forms render whatever they are given, so a
+  provider's credential shape never becomes a branch in the UI.
+- `init_delivery`: state whether the rendered bootstrap script is delivered as cloud-init or as a
+  container entrypoint script. The orchestrator used to choose this with `if provider_slug ==
+  "docker"`, which decided any further provider's delivery mechanism by dropping it through an
+  `else`.
 - `init`: provision a node, persist the bootstrapping context, and return a bootstrap contract preview.
 - `wait_for_bootstrap_ready`: wait until the provider reports the node usable and resolve the endpoint. Nothing is read back from the node itself; the server public key is already known locally.
 - `get_status`: report the provider-level node status in a normalized form.
 - `exists`: check whether the node still exists.
 - `delete`: tear down the provider-side node resource.
 
-The registry resolves the correct provider adapter, loads the provider token from secure storage, and presents that provider through the shared NodeProvider interface to the orchestrator.
+The registry resolves the correct provider adapter, loads the provider credential from secure storage, and presents that provider through the shared NodeProvider interface to the orchestrator.
+
+### Node identity is an opaque string
+
+Adapters return a `ProvisionedNode { node_id, public_ipv4, endpoint_port }`, and `node_id` is stored
+verbatim in `vpn_nodes.external_ref`. Nothing above the adapter parses it.
+
+It was a `u64` while DigitalOcean was the only production provider, which cost more than it looked.
+A modern EC2 instance id (`i-0abc123def4567890`) does not fit in 64 bits; the Docker adapter had to
+mint a synthetic number and stamp it on the container as a label purely to satisfy the type; and the
+orchestrator guarded every use with a `u64` parse whose failure branch **skipped the remote delete
+while reporting cleanup as successful** — silently leaving a billable resource behind.
+
+An adapter whose provider needs more than an id to address a node encodes that into the string and
+splits it back out at its own boundary. The EC2 adapter stores `<region>/<instance-id>`, because
+AWS scopes both the endpoint host and the request signature to a region and the trait's status,
+exists and delete methods do not carry one.
+
+### Provider credentials are a field set
+
+A credential is stored as a single Credential Manager entry holding a JSON object of named fields,
+pointed at by the one `providers.token_ref` column. The adapter that declared the fields is the only
+thing that interprets them.
+
+A stored value that is not a JSON object is read as a single `api_token` field. That is not a
+convenience — it is the compatibility guarantee for every credential saved before credentials had
+fields, and dropping it would leave existing installs looking configured while every API call failed.
+
+## Adding a Provider
+
+The checklist, in the order that keeps the tree compiling. Nothing here is optional except where
+noted.
+
+1. **Adapter module** — `src-tauri/src/backend/provider/<slug>.rs` for the API client, wire types and
+   a typed error, mirroring `digitalocean.rs` or `ec2.rs`. Keep it blocking: commands run on the
+   blocking pool and an async client reintroduces the runtime-drop panic described in AGENTS.md §4.
+2. **Region table** — `<slug>_regions.rs`, mapping the provider's own region codes to geography.
+   Unknown codes must return `ProviderRegion::unknown` rather than a guess.
+3. **`impl ProviderAdapter`** — in `provider/mod.rs`, alongside the existing adapters. Name-mapping
+   rules (hostname limits, tag charsets) belong here, not upstream.
+4. **Register it** — add to the array in `ProviderRegistry::new`. Each adapter names itself through
+   `provider_name`, so the registry key cannot drift from the adapter's identity. Construction must
+   not fail: the registry unwraps, so a fallible constructor is a panic on startup.
+5. **Seed the provider row** — a new `migrations/00NN_seed_<slug>_provider.sql` using
+   `INSERT OR IGNORE`, registered in the `MIGRATIONS` array in `backend/db/mod.rs`, plus
+   `BUILTIN_*` constants and an `ensure_provider_present` call in `commands/system.rs`.
+6. **Tests** — unit tests for parsing and name sanitizing, `mockito` integration tests for the
+   create and destroy paths through an `#[cfg(test)] with_base_url` constructor, an assertion in
+   `node_provider_resolves_for_registered_slugs_only`, and a `real_<slug>_*` `#[ignore]` lane with a
+   `package.json` script. Real lanes tear down on every exit path and assert only afterwards.
+7. **Redaction** — if the credential introduces a new secret field name, add it to
+   `redact_sensitive_text` and cover it with a test. Identifiers that are not secrets should be left
+   readable; they are diagnostics.
+8. **Docs** — this file, `API_COMMANDS.md`, `DB_SCHEMA.md`, `SECURITY.md`, `TESTING.md`, `README.md`.
+
+No frontend change is required. The credential form, provider picker, region list and pricing table
+are all driven by what the adapter reports.
 
 ## Lifecycle Model
 
@@ -157,7 +224,8 @@ State changes are validated in backend transition guards.
 ### Readiness is provider-observable only
 
 A provider reports a node usable before its first-boot script has finished. A DigitalOcean droplet
-is `active` once the VM is running, which is well before cloud-init has installed WireGuard.
+is `active`, and an EC2 instance is `running`, once the VM is up — which is well before cloud-init
+has installed WireGuard.
 
 The app cannot close that gap without a channel into the node, so it does not try. The tunnel is
 configured as soon as the endpoint is known, and WireGuard re-sends handshake initiations every few
@@ -179,8 +247,9 @@ from `sc query`, and a handshake is only observable once the peer actually respo
   only "Node creation or bootstrap setup failed" is not diagnosable by the user or by whoever reads
   the logs afterwards.
 - **Provider naming rules belong to the adapter.** A node name is free text chosen by the user;
-  DigitalOcean requires a droplet name that is a valid hostname. The adapter maps between them
-  rather than constraining what a node may be called, and the local record keeps the user's label.
+  DigitalOcean requires a droplet name that is a valid hostname, while an AWS tag value permits
+  spaces and most of Unicode. Each adapter maps between them rather than constraining what a node
+  may be called, and the local record keeps the user's label either way.
 
 ## The Activity Log
 

@@ -39,6 +39,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (16, include_str!("../../../migrations/0016_provider_validation_result.sql")),
   (17, include_str!("../../../migrations/0017_activity_events.sql")),
   (18, include_str!("../../../migrations/0018_backfill_legacy_correlation_ids.sql")),
+  (19, include_str!("../../../migrations/0019_seed_ec2_provider.sql")),
 ];
 
 
@@ -1862,6 +1863,14 @@ mod tests {
       connection
         .execute_batch(
           "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+           -- Present in any real database from 0001 onward. Seed migrations insert into it, so a
+           -- fixture without it is not a faithful post-0017 schema.
+           CREATE TABLE providers (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL,
+             slug TEXT NOT NULL UNIQUE,
+             token_ref TEXT
+           );
            CREATE TABLE init_run_logs (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              node_id TEXT NOT NULL,
@@ -1960,6 +1969,14 @@ mod tests {
       connection
         .execute_batch(
           "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+           -- Present in any real database from 0001 onward. Seed migrations insert into it, so a
+           -- fixture without it is not a faithful post-0017 schema.
+           CREATE TABLE providers (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL,
+             slug TEXT NOT NULL UNIQUE,
+             token_ref TEXT
+           );
            CREATE TABLE activity_events (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              node_id TEXT NULL,

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -9,7 +10,9 @@ use crate::backend::Backend;
 use crate::commands::error::{CommandError, CommandErrorKind};
 use crate::backend::db::{Database, ProviderRecord, ProviderStatus};
 use crate::backend::logging;
-use crate::backend::provider::{ProviderPlanPricing, ProviderRegion};
+use crate::backend::provider::{
+  CredentialField, ProviderCredential, ProviderPlanPricing, ProviderRegion,
+};
 use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
   ForceCleanupResult, KillSwitchState, TunnelPhase, TunnelSettings, UnexpectedDrop,
@@ -50,6 +53,9 @@ where
 const BUILTIN_DIGITALOCEAN_PROVIDER_ID: &str = "provider-1";
 const BUILTIN_DIGITALOCEAN_PROVIDER_NAME: &str = "DigitalOcean";
 const BUILTIN_DIGITALOCEAN_PROVIDER_SLUG: &str = "digitalocean";
+const BUILTIN_EC2_PROVIDER_ID: &str = "provider-aws-ec2";
+const BUILTIN_EC2_PROVIDER_NAME: &str = "Amazon EC2";
+const BUILTIN_EC2_PROVIDER_SLUG: &str = "aws-ec2";
 const BUILTIN_DOCKER_PROVIDER_ID: &str = "provider-docker";
 const BUILTIN_DOCKER_PROVIDER_NAME: &str = "Docker";
 const BUILTIN_DOCKER_PROVIDER_SLUG: &str = "docker";
@@ -199,6 +205,13 @@ fn ensure_builtin_providers(db: &Database, docker_dev_enabled: bool) -> Result<(
     BUILTIN_DIGITALOCEAN_PROVIDER_SLUG,
   )?;
 
+  ensure_provider_present(
+    db,
+    BUILTIN_EC2_PROVIDER_ID,
+    BUILTIN_EC2_PROVIDER_NAME,
+    BUILTIN_EC2_PROVIDER_SLUG,
+  )?;
+
   if docker_dev_enabled {
     ensure_provider_present(
       db,
@@ -246,7 +259,7 @@ fn clear_provider_credential(
 
   if let Some(token_ref) = provider.token_ref.as_deref() {
     secure_storage
-      .delete_provider_api_token(token_ref)
+      .delete_provider_credential(token_ref)
       .map_err(CommandError::from)?;
   }
 
@@ -284,16 +297,16 @@ pub async fn validate_provider_token(provider_id: String, backend: State<'_, Bac
 }
 
 #[tauri::command]
-pub async fn provision_provider_droplet(
+pub async fn provision_provider_node(
   provider_id: String,
-  droplet_name: String,
+  node_name: String,
   backend: State<'_, Backend>,
 ) -> Result<String, CommandError> {
   // Cloned out of the managed state so the body can move onto a blocking thread.
   // Every field is an Arc or a PathBuf, so this is cheap.
   let backend = backend.inner().clone();
   run_blocking(move || {
-  let droplet = backend
+  let provisioned = backend
     .orchestrator
     .provision_droplet_for_provider(
       &backend.provider,
@@ -301,22 +314,22 @@ pub async fn provision_provider_droplet(
       &backend.db,
       &backend.secure_storage,
       &provider_id,
-      &droplet_name,
+      &node_name,
     )
     .map_err(CommandError::from)?;
 
   Ok(format!(
-    "Droplet provisioned: id={}, public_ipv4={}",
-    droplet.droplet_id, droplet.public_ipv4
+    "Node provisioned: id={}, public_ipv4={}",
+    provisioned.node_id, provisioned.public_ipv4
   ))
   })
   .await
 }
 
 #[tauri::command]
-pub async fn delete_provider_droplet(
+pub async fn delete_provider_node(
   provider_id: String,
-  droplet_id: u64,
+  node_id: String,
   backend: State<'_, Backend>,
 ) -> Result<(), CommandError> {
   // Cloned out of the managed state so the body can move onto a blocking thread.
@@ -325,23 +338,39 @@ pub async fn delete_provider_droplet(
   run_blocking(move || {
   backend
     .orchestrator
-    .destroy_droplet_for_provider(
+    .destroy_node_for_provider(
       &backend.provider,
       &backend.db,
       &backend.secure_storage,
       &provider_id,
-      droplet_id,
+      &node_id,
     )
     .map_err(CommandError::from)
   })
   .await
 }
 
+/// The credential inputs a provider needs, so the UI can render them without knowing the provider.
 #[tauri::command]
-pub async fn register_provider_token(
+pub async fn list_provider_credential_fields(
+  provider_id: String,
+  backend: State<'_, Backend>,
+) -> Result<Vec<CredentialField>, CommandError> {
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+    backend
+      .provider
+      .credential_fields_for_provider(&backend.db, &provider_id)
+      .map_err(CommandError::from)
+  })
+  .await
+}
+
+#[tauri::command]
+pub async fn register_provider_credential(
   provider_id: String,
   provider_name: String,
-  api_token: String,
+  credentials: HashMap<String, String>,
   backend: State<'_, Backend>,
 ) -> Result<String, CommandError> {
   // Cloned out of the managed state so the body can move onto a blocking thread.
@@ -362,15 +391,40 @@ pub async fn register_provider_token(
       "Refresh the dashboard so the provider list reloads, then retry.",
     ))?;
 
+  // Every field the adapter declares must be present and non-empty. Catching it here means a
+  // half-filled credential is rejected before it is written, rather than surfacing later as an
+  // authentication failure with no indication of which field was missing.
+  let declared = backend
+    .provider
+    .credential_fields_for_provider(&backend.db, &provider_id)
+    .map_err(CommandError::from)?;
+
+  for field in &declared {
+    let supplied = credentials.get(&field.key).map(|value| value.trim()).unwrap_or("");
+    if supplied.is_empty() {
+      return Err(CommandError::new(
+        CommandErrorKind::InvalidInput,
+        format!("'{}' is required for this provider.", field.label),
+        "Fill in every credential field, then save again.",
+      ));
+    }
+  }
+
+  let credential = ProviderCredential::from_fields(
+    credentials
+      .into_iter()
+      .map(|(key, value)| (key, value.trim().to_string())),
+  );
+
   let provider = backend
     .provider
-    .upsert_provider_token_for_slug(
+    .upsert_provider_credential_for_slug(
       &backend.db,
       &backend.secure_storage,
       &provider_id,
       &provider_name,
       &slug,
-      &api_token,
+      &credential,
     )
     .map_err(CommandError::from)?;
 
@@ -675,9 +729,9 @@ pub async fn create_vpn_node_to_ready(
     .map_err(CommandError::from)?;
 
   Ok(format!(
-    "Create node complete: node_id={}, droplet_id={}, endpoint_ip={}, listen_port={}, correlation_id={}, idempotent_reuse={}",
+    "Create node complete: node_id={}, external_ref={}, endpoint_ip={}, listen_port={}, correlation_id={}, idempotent_reuse={}",
     result.node_id,
-    result.droplet_id,
+    result.external_ref,
     result.server_endpoint_ip,
     result.listen_port,
     result.correlation_id,
@@ -1435,7 +1489,7 @@ mod tests {
     let (db, path) = create_test_db("clear-provider-credential");
     let secure_storage = SecureStorage::dev_mock();
     let token_ref = secure_storage
-      .store_provider_api_token("provider-1", "dop_v1_secret")
+      .store_provider_credential("provider-1", "dop_v1_secret")
       .expect("token store should succeed");
 
     db.update_provider("provider-1", "DigitalOcean", "digitalocean", Some(&token_ref))
@@ -1457,7 +1511,7 @@ mod tests {
     assert_eq!(provider.last_validation_status, None);
     assert_eq!(
       secure_storage
-        .get_provider_api_token(&token_ref)
+        .get_provider_credential(&token_ref)
         .expect("secret lookup should succeed"),
       None
     );
@@ -1470,7 +1524,7 @@ mod tests {
     let (db, path) = create_test_db("clear-provider-credential-attached-node");
     let secure_storage = SecureStorage::dev_mock();
     let token_ref = secure_storage
-      .store_provider_api_token("provider-1", "dop_v1_secret")
+      .store_provider_credential("provider-1", "dop_v1_secret")
       .expect("token store should succeed");
 
     db.update_provider("provider-1", "DigitalOcean", "digitalocean", Some(&token_ref))

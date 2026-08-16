@@ -108,6 +108,22 @@ export interface ProviderRecord {
 }
 
 /**
+ * One credential input a provider needs, as declared by its adapter.
+ *
+ * Mirrors `CredentialField` in `src-tauri/src/backend/provider/mod.rs`. Bindings are hand-written,
+ * so a change to the Rust struct has to be made here in the same commit — nothing enforces it.
+ */
+export interface CredentialField {
+  /** Stable machine key, and the key to use in the `credentials` record when saving. */
+  key: string;
+  label: string;
+  placeholder: string;
+  /** Whether the input should be masked. An AWS access key id is not a secret; its pair is. */
+  secret: boolean;
+  help: string | null;
+}
+
+/**
  * Where a region physically is.
  *
  * Only `slug` is guaranteed — providers add regions faster than a curated table follows, and an
@@ -426,17 +442,30 @@ export async function installWireGuardWithPrerequisites(): Promise<WireGuardInst
  *
  * The backend resolves the adapter from the provider's own record, so this no longer picks a
  * command name by slug — adding a provider does not mean adding another binding here.
+ *
+ * `credentials` is keyed by the `key` of each field from {@link listProviderCredentialFields}.
+ * DigitalOcean supplies one entry; AWS supplies an access key id and a secret access key.
  */
-export async function registerProviderToken(
+export async function registerProviderCredential(
   providerId: string,
   providerName: string,
-  apiToken: string,
+  credentials: Record<string, string>,
 ): Promise<string> {
-  return invokeCommand<string>("register_provider_token", {
+  return invokeCommand<string>("register_provider_credential", {
     providerId,
     providerName,
-    apiToken,
+    credentials,
   });
+}
+
+/**
+ * The credential inputs a provider needs, declared by its adapter.
+ *
+ * The settings modal renders whatever this returns, so a provider that needs two fields does not
+ * require a UI change — and the UI never branches on a provider slug to decide what to show.
+ */
+export async function listProviderCredentialFields(providerId: string): Promise<CredentialField[]> {
+  return invokeCommand<CredentialField[]>("list_provider_credential_fields", { providerId });
 }
 
 export async function validateProviderToken(providerId: string): Promise<string> {

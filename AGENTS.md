@@ -19,7 +19,7 @@ connects to it. Rust backend + Tauri v2 + Next.js frontend + SQLite + Windows Cr
 |---|---|
 | Platform | Windows 10/11 desktop only |
 | Protocol | WireGuard only |
-| Production provider | DigitalOcean |
+| Production providers | DigitalOcean, Amazon EC2 |
 | Dev provider | Docker, behind feature flags, local emulation only |
 | Workflows | provision, connect, disconnect, destroy, force-cleanup |
 
@@ -243,11 +243,17 @@ Run what your change touches. Report **real results**, including failures.
 | Docker provider / tunnel lifecycle | `npm run backend:test:docker:real` (requires Docker) |
 | UI or command surface | `npm run tauri:e2e:provisioning` (requires Docker) |
 | Connect / disconnect | `npm run tauri:e2e:connect` (requires Docker **and an elevated shell**) |
-| Provider adapter or cloud-init | `npm run backend:test:do:real` (**creates billable droplets**) |
+| DigitalOcean adapter or cloud-init | `npm run backend:test:do:real` (**creates billable droplets**) |
+| Amazon EC2 adapter or cloud-init | `npm run backend:test:ec2:real` (**creates billable instances**) |
 
-The DigitalOcean lane needs `GOATSTARE_DO_TEST_TOKEN`. Both tests destroy the droplet on every exit
-path, including panics, and assert only after teardown so a failed assertion cannot strand a paid
-resource. Keep it that way.
+The DigitalOcean lane needs `GOATSTARE_DO_TEST_TOKEN`; the EC2 lane needs
+`GOATSTARE_AWS_TEST_ACCESS_KEY_ID` and `GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY`. Every one of these
+tests destroys what it created on every exit path, including panics, and asserts only after teardown
+so a failed assertion cannot strand a paid resource. Keep it that way.
+
+EC2 creates **two** billable things — an instance and a public IPv4 — plus a security group that
+cannot be deleted until the instance releases its network interface. Its teardown waits for that and
+reports a group it could not remove rather than swallowing it.
 
 Required test types for any non-trivial change:
 

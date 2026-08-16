@@ -13,6 +13,16 @@ Provider API keys are stored in **Windows Credential Manager**, under the servic
 `com.goatstare.vpn.phase1`, written as a generic credential. SQLite holds only a non-secret
 `token_ref` handle pointing at that entry — never the key.
 
+A credential is a **set of named fields**, serialized to a JSON object inside that single entry:
+DigitalOcean stores `api_token`, Amazon EC2 stores `access_key_id` and `secret_access_key`. Only the
+provider's own adapter interprets them, so the schema never learns that some providers need two
+values. A stored value that is not a JSON object is read as a single `api_token` field, which is how
+credentials saved by earlier versions keep working.
+
+Redaction covers `secret_access_key` and `session_token` alongside `api_token`. `access_key_id` is
+deliberately left readable: it identifies which key is in use, which is a real diagnostic, and it is
+not a secret.
+
 Two qualifications worth stating rather than glossing:
 
 - The app performs **no encryption of its own**. Protection at rest is Credential Manager's, which

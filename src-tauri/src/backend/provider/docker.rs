@@ -1,11 +1,14 @@
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use uuid::Uuid;
+
 use crate::backend::bootstrap::{BootstrapOutputContract, READINESS_MARKER_PATH};
 
 use super::{
-  Account, BootstrapWaitRequest, ProviderAdapterError, ProviderDropletStatus, ProviderPlanPricing,
-  ProviderRegion, ProvisionedDroplet,
+  Account, BootstrapWaitRequest, CredentialField, InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY,
+  ProviderAdapterError, ProviderCredential, ProviderNodeStatus, ProviderPlanPricing, ProviderRegion,
+  ProvisionedNode,
 };
 
 const DOCKER_REGION: &str = "docker-local";
@@ -110,7 +113,10 @@ impl DockerProviderAdapter {
   }
 
   fn validate_faux_token(token: &str) -> Result<(), ProviderAdapterError> {
-    let value = token.trim();
+    // The stored credential is a field set; Docker uses the single-field form, which is also what
+    // a credential saved before field sets existed parses as.
+    let credential = ProviderCredential::parse(token);
+    let value = credential.field(LEGACY_SINGLE_CREDENTIAL_KEY).unwrap_or("").trim();
     if value.is_empty() {
       return Err(ProviderAdapterError::Unsupported {
         detail: "Docker credential is empty. Save a non-empty Docker provider token first.".to_string(),
@@ -171,7 +177,15 @@ impl DockerProviderAdapter {
       .find(|spec| spec.key == plan_key)
   }
 
-  fn container_name(base_name: &str, droplet_id: u64) -> String {
+  /// A Docker container name derived from the user's node name, with a random suffix.
+  ///
+  /// The suffix is what keeps two nodes the user happened to call the same thing from colliding.
+  /// `create_node` force-removes any container already holding the exact name, so without it,
+  /// provisioning a second "Primary Node" would destroy the first — a healthy, running node.
+  ///
+  /// It used to be the synthetic node id. That id no longer exists: the node id is the container id
+  /// Docker itself returns, so the suffix only has to be unique, not meaningful.
+  fn container_name(base_name: &str) -> String {
     let sanitized = base_name
       .chars()
       .map(|ch| {
@@ -190,7 +204,8 @@ impl DockerProviderAdapter {
       compact
     };
 
-    format!("{name}-{droplet_id}")
+    let suffix = Uuid::new_v4().simple().to_string();
+    format!("{name}-{}", &suffix[..8])
   }
 
   /// Address the *client* should dial to reach a published container port.
@@ -286,7 +301,6 @@ impl DockerProviderAdapter {
   /// - the host port is left for Docker to allocate, so nodes do not contend for one fixed port.
   fn build_container_run_args(
     container_name: &str,
-    droplet_label: &str,
     cpus: &str,
     memory: &str,
     init_payload: &str,
@@ -304,8 +318,6 @@ impl DockerProviderAdapter {
       container_name.to_string(),
       "--label".to_string(),
       "goatstare.provider=docker".to_string(),
-      "--label".to_string(),
-      droplet_label.to_string(),
       "--cpus".to_string(),
       cpus.to_string(),
       "--memory".to_string(),
@@ -359,42 +371,24 @@ impl DockerProviderAdapter {
       })
   }
 
-  fn container_ids_for_droplet(droplet_id: u64) -> Result<Vec<String>, ProviderAdapterError> {
-    let filter = format!("goatstare.droplet_id={droplet_id}");
+  /// Whether a container with this id still exists, running or not.
+  ///
+  /// `docker ps --filter id=` matches on id prefix, and the node id is the full 64-character id
+  /// Docker returned at create, so this cannot match a different container.
+  fn container_exists(container_id: &str) -> Result<bool, ProviderAdapterError> {
     let output = Self::run_docker(
       &[
         "ps",
         "-a",
         "--filter",
-        "label=goatstare.provider=docker",
-        "--filter",
-        &format!("label={filter}"),
+        &format!("id={container_id}"),
         "--format",
         "{{.ID}}",
       ],
-      "list containers by droplet id",
+      "look up Docker container by id",
     )?;
 
-    Ok(
-      output
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect(),
-    )
-  }
-
-  fn container_id_for_droplet(droplet_id: u64) -> Result<String, ProviderAdapterError> {
-    let ids = Self::container_ids_for_droplet(droplet_id)?;
-    ids
-      .into_iter()
-      .next()
-      .ok_or_else(|| ProviderAdapterError::Unsupported {
-        detail: format!(
-          "Could not locate Docker container for droplet id {} during bootstrap readiness.",
-          droplet_id
-        ),
-      })
+    Ok(output.lines().any(|line| !line.trim().is_empty()))
   }
 
   fn container_runtime_status(container_id: &str) -> Result<String, ProviderAdapterError> {
@@ -682,6 +676,16 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     "docker"
   }
 
+  fn credential_fields(&self) -> Vec<CredentialField> {
+    vec![CredentialField {
+      key: "api_token".to_string(),
+      label: "API key".to_string(),
+      placeholder: "dkr_v1_...".to_string(),
+      secret: true,
+      help: Some("Local-only placeholder for the Docker development provider.".to_string()),
+    }]
+  }
+
   fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let daemon_version = Self::ensure_daemon_available()?;
@@ -742,14 +746,18 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     )
   }
 
-  fn create_droplet(
+  fn init_delivery(&self) -> InitDelivery {
+    InitDelivery::DockerInit
+  }
+
+  fn create_node(
     &self,
     token: &str,
-    droplet_name: &str,
+    node_name: &str,
     _region: &str,
     size_slug: &str,
     init_payload: &str,
-  ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
+  ) -> Result<ProvisionedNode, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let _ = Self::ensure_daemon_available()?;
 
@@ -757,15 +765,7 @@ impl super::ProviderAdapter for DockerProviderAdapter {
       detail: format!("Unsupported Docker plan '{size_slug}'. Expected docker-small, docker-medium, or docker-large."),
     })?;
 
-    // Nanosecond precision: milliseconds collided when two nodes were provisioned in quick
-    // succession, which tests do routinely.
-    let droplet_id = match SystemTime::now().duration_since(UNIX_EPOCH) {
-      Ok(value) => value.as_nanos() as u64,
-      Err(_) => 1,
-    };
-
-    let container_name = Self::container_name(droplet_name, droplet_id);
-    let droplet_label = format!("goatstare.droplet_id={droplet_id}");
+    let container_name = Self::container_name(node_name);
     let cpus = plan.vcpus.to_string();
     let memory = format!("{}m", plan.memory_mb);
 
@@ -775,7 +775,6 @@ impl super::ProviderAdapter for DockerProviderAdapter {
 
     let run_args = Self::build_container_run_args(
       &container_name,
-      &droplet_label,
       &cpus,
       &memory,
       &docker_init_payload,
@@ -800,8 +799,8 @@ impl super::ProviderAdapter for DockerProviderAdapter {
       }
     };
 
-    Ok(ProvisionedDroplet {
-      droplet_id,
+    Ok(ProvisionedNode {
+      node_id: container_id,
       public_ipv4: Self::docker_endpoint_host(),
       endpoint_port,
     })
@@ -815,10 +814,10 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     Self::validate_faux_token(token)?;
     let _ = Self::ensure_daemon_available()?;
 
-    let container_id = Self::container_id_for_droplet(request.droplet_id)?;
-    Self::wait_for_container_bootstrap(&container_id, DOCKER_BOOTSTRAP_TIMEOUT)?;
+    let container_id = request.node_id.as_str();
+    Self::wait_for_container_bootstrap(container_id, DOCKER_BOOTSTRAP_TIMEOUT)?;
 
-    let endpoint_port = Self::resolve_published_wireguard_port(&container_id)?;
+    let endpoint_port = Self::resolve_published_wireguard_port(container_id)?;
 
     Ok(BootstrapOutputContract {
       server_endpoint_ip: if request.endpoint_ip.trim().is_empty() {
@@ -834,61 +833,44 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     })
   }
 
-  fn droplet_exists(&self, token: &str, droplet_id: u64) -> Result<bool, ProviderAdapterError> {
+  fn node_exists(&self, token: &str, node_id: &str) -> Result<bool, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let _ = Self::ensure_daemon_available()?;
 
-    Ok(!Self::container_ids_for_droplet(droplet_id)?.is_empty())
+    Self::container_exists(node_id)
   }
 
-  fn droplet_status(&self, token: &str, droplet_id: u64) -> Result<ProviderDropletStatus, ProviderAdapterError> {
+  fn node_status(&self, token: &str, node_id: &str) -> Result<ProviderNodeStatus, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let _ = Self::ensure_daemon_available()?;
 
-    let ids = Self::container_ids_for_droplet(droplet_id)?;
-    if ids.is_empty() {
-      return Ok(ProviderDropletStatus::Deleted);
+    if !Self::container_exists(node_id)? {
+      return Ok(ProviderNodeStatus::Deleted);
     }
 
-    let mut statuses = Vec::with_capacity(ids.len());
-    for container_id in ids {
-      statuses.push(Self::container_runtime_status(&container_id)?);
-    }
-
-    if statuses.iter().any(|status| status == "running") {
-      return Ok(ProviderDropletStatus::Active);
-    }
-
-    if statuses.iter().any(|status| status == "created" || status == "restarting") {
-      return Ok(ProviderDropletStatus::New);
-    }
-
-    if statuses.iter().any(|status| status == "removing") {
-      return Ok(ProviderDropletStatus::Archive);
-    }
-
-    if statuses
-      .iter()
-      .all(|status| status == "paused" || status == "exited" || status == "dead")
-    {
-      return Ok(ProviderDropletStatus::Off);
-    }
-
-    Ok(ProviderDropletStatus::Unknown)
+    Ok(match Self::container_runtime_status(node_id)?.as_str() {
+      "running" => ProviderNodeStatus::Active,
+      "created" | "restarting" => ProviderNodeStatus::New,
+      "removing" => ProviderNodeStatus::Archive,
+      "paused" | "exited" | "dead" => ProviderNodeStatus::Off,
+      _ => ProviderNodeStatus::Unknown,
+    })
   }
 
-  fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError> {
+  fn delete_node(&self, token: &str, node_id: &str) -> Result<(), ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let _ = Self::ensure_daemon_available()?;
 
-    let ids = Self::container_ids_for_droplet(droplet_id)?;
-    if ids.is_empty() {
+    if !Self::container_exists(node_id)? {
       return Ok(());
     }
 
     // The payload lives only in the container's environment, so removing the container removes
     // it. Nothing is staged on the host that could outlive the node.
-    Self::remove_containers(&ids, "remove Docker compute container")?;
+    Self::remove_containers(
+      &[node_id.to_string()],
+      "remove Docker compute container",
+    )?;
     Ok(())
   }
 }
@@ -929,41 +911,32 @@ mod tests {
   use crate::backend::provider::{BootstrapWaitRequest, ProviderAdapter};
   use std::time::{SystemTime, UNIX_EPOCH};
 
-  fn docker_readiness_debug_snapshot(droplet_id: u64) -> String {
-    let mut details = Vec::new();
+  fn docker_readiness_debug_snapshot(container_id: &str) -> String {
+    let mut details = vec![format!("container_id={container_id}")];
 
-    match DockerProviderAdapter::container_id_for_droplet(droplet_id) {
-      Ok(container_id) => {
-        details.push(format!("container_id={container_id}"));
+    if let Ok(state) = DockerProviderAdapter::run_docker(
+      &["inspect", container_id, "--format", "{{.State.Status}}"],
+      "inspect Docker container state for readiness debug",
+    ) {
+      details.push(format!("container_state={}", state.trim()));
+    }
 
-        if let Ok(state) = DockerProviderAdapter::run_docker(
-          &["inspect", &container_id, "--format", "{{.State.Status}}"],
-          "inspect Docker container state for readiness debug",
-        ) {
-          details.push(format!("container_state={}", state.trim()));
-        }
+    if let Ok(marker_probe) = DockerProviderAdapter::docker_exec(
+      container_id,
+      &format!(
+        "set -eu; if [ -f '{marker}' ]; then echo marker=present; cat '{marker}'; else echo marker=missing; fi",
+        marker = READINESS_MARKER_PATH
+      ),
+      "probe Docker readiness marker state",
+    ) {
+      details.push(format!("marker_probe={} ", marker_probe.trim()));
+    }
 
-        if let Ok(marker_probe) = DockerProviderAdapter::docker_exec(
-          &container_id,
-          &format!(
-            "set -eu; if [ -f '{marker}' ]; then echo marker=present; cat '{marker}'; else echo marker=missing; fi",
-            marker = READINESS_MARKER_PATH
-          ),
-          "probe Docker readiness marker state",
-        ) {
-          details.push(format!("marker_probe={} ", marker_probe.trim()));
-        }
-
-        if let Ok(log_tail) = DockerProviderAdapter::run_docker(
-          &["logs", "--tail", "80", &container_id],
-          "collect Docker container logs for readiness debug",
-        ) {
-          details.push(format!("container_logs_tail={} ", log_tail.trim()));
-        }
-      }
-      Err(error) => {
-        details.push(format!("container_lookup_error={error:?}"));
-      }
+    if let Ok(log_tail) = DockerProviderAdapter::run_docker(
+      &["logs", "--tail", "80", container_id],
+      "collect Docker container logs for readiness debug",
+    ) {
+      details.push(format!("container_logs_tail={} ", log_tail.trim()));
     }
 
     details.join(" | ")
@@ -1029,13 +1002,13 @@ mod tests {
     let server_public_key_copy = server_keypair.public_key.clone();
 
     let provisioned = adapter
-      .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", &payload)
+      .create_node(token, &node_name, DOCKER_REGION, "docker-small", &payload)
       .expect("docker create should succeed with a local daemon");
 
     let contract_result = adapter.wait_for_bootstrap_ready(
       token,
       &BootstrapWaitRequest {
-        droplet_id: provisioned.droplet_id,
+        node_id: provisioned.node_id.clone(),
         endpoint_ip: provisioned.public_ipv4.clone(),
         server_keypair,
       },
@@ -1057,8 +1030,8 @@ mod tests {
         // back off the server.
         assert_eq!(contract.server_public_key, server_public_key_copy);
 
-        let container_id = DockerProviderAdapter::container_id_for_droplet(provisioned.droplet_id)
-          .expect("container id should resolve for provisioned droplet");
+        // The node id *is* the container id now, so there is nothing to look up.
+        let container_id = provisioned.node_id.clone();
 
         DockerProviderAdapter::docker_exec(
           &container_id,
@@ -1073,13 +1046,13 @@ mod tests {
         .expect("wg0 runtime contract should be active after bootstrap");
 
         let exists = adapter
-          .droplet_exists(token, provisioned.droplet_id)
+          .node_exists(token, &provisioned.node_id)
           .expect("droplet existence check should succeed");
         assert!(exists);
       }
       Err(error) => {
-        let debug_snapshot = docker_readiness_debug_snapshot(provisioned.droplet_id);
-        let _ = adapter.delete_droplet(token, provisioned.droplet_id);
+        let debug_snapshot = docker_readiness_debug_snapshot(&provisioned.node_id);
+        let _ = adapter.delete_node(token, &provisioned.node_id);
         panic!(
           "docker init script should produce a readiness contract: {:?} | {}",
           error, debug_snapshot
@@ -1088,11 +1061,11 @@ mod tests {
     }
 
     adapter
-      .delete_droplet(token, provisioned.droplet_id)
+      .delete_node(token, &provisioned.node_id)
       .expect("docker cleanup should succeed");
 
     let exists_after = adapter
-      .droplet_exists(token, provisioned.droplet_id)
+      .node_exists(token, &provisioned.node_id)
       .expect("post-delete existence check should succeed");
     assert!(!exists_after);
   }
@@ -1110,22 +1083,22 @@ mod tests {
     let (payload, server_keypair, client_keypair) = render_real_docker_payload();
 
     let provisioned = adapter
-      .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", &payload)
+      .create_node(token, &node_name, DOCKER_REGION, "docker-small", &payload)
       .expect("docker create should succeed with a local daemon");
 
     let contract = adapter
       .wait_for_bootstrap_ready(
         token,
         &BootstrapWaitRequest {
-          droplet_id: provisioned.droplet_id,
+          node_id: provisioned.node_id.clone(),
           endpoint_ip: provisioned.public_ipv4.clone(),
           server_keypair,
         },
       )
       .expect("bootstrap contract should be available");
 
-    let container_id = DockerProviderAdapter::container_id_for_droplet(provisioned.droplet_id)
-      .expect("container id should resolve for provisioned droplet");
+    // The node id *is* the container id now, so there is nothing to look up.
+    let container_id = provisioned.node_id.clone();
 
     let server_config = DockerProviderAdapter::read_container_text_with_fallback(
       &container_id,
@@ -1149,7 +1122,7 @@ mod tests {
     assert_eq!(contract.server_endpoint_ip, provisioned.public_ipv4);
 
     adapter
-      .delete_droplet(token, provisioned.droplet_id)
+      .delete_node(token, &provisioned.node_id)
       .expect("docker cleanup should succeed");
   }
 
@@ -1178,14 +1151,14 @@ mod tests {
     let node_name = format!("docker-clientconf-{suffix}");
 
     let provisioned = adapter
-      .create_droplet(token, &node_name, DOCKER_REGION, "docker-small", &payload)
+      .create_node(token, &node_name, DOCKER_REGION, "docker-small", &payload)
       .expect("docker node should provision");
 
     let contract = adapter
       .wait_for_bootstrap_ready(
         token,
         &BootstrapWaitRequest {
-          droplet_id: provisioned.droplet_id,
+          node_id: provisioned.node_id.clone(),
           endpoint_ip: provisioned.public_ipv4.clone(),
           server_keypair,
         },
@@ -1217,7 +1190,7 @@ mod tests {
     let path = std::env::temp_dir().join(format!("goatstare-verify-{suffix}.conf"));
     std::fs::write(&path, config.replace("\r\n", "\n")).expect("client config should be writable");
 
-    let container = DockerProviderAdapter::container_name(&node_name, provisioned.droplet_id);
+    let container = provisioned.node_id.clone();
 
     println!("\n=== client config written to: {} ===", path.display());
     println!(
@@ -1247,7 +1220,7 @@ mod tests {
 
     let (payload_one, _s1, _c1) = render_real_docker_payload();
     let first = adapter
-      .create_droplet(
+      .create_node(
         token,
         &format!("docker-coexist-a-{suffix}"),
         DOCKER_REGION,
@@ -1257,7 +1230,7 @@ mod tests {
       .expect("first docker node should provision");
 
     let (payload_two, _s2, _c2) = render_real_docker_payload();
-    let second_result = adapter.create_droplet(
+    let second_result = adapter.create_node(
       token,
       &format!("docker-coexist-b-{suffix}"),
       DOCKER_REGION,
@@ -1265,26 +1238,26 @@ mod tests {
       &payload_two,
     );
 
-    let cleanup = |ids: &[u64]| {
+    let cleanup = |ids: &[&str]| {
       for id in ids {
-        let _ = adapter.delete_droplet(token, *id);
+        let _ = adapter.delete_node(token, id);
       }
     };
 
     let second = match second_result {
       Ok(second) => second,
       Err(error) => {
-        cleanup(&[first.droplet_id]);
+        cleanup(&[first.node_id.as_str()]);
         panic!("second docker node should provision alongside the first: {error:?}");
       }
     };
 
     let first_still_exists = adapter
-      .droplet_exists(token, first.droplet_id)
+      .node_exists(token, &first.node_id)
       .unwrap_or(false);
     let ports_differ = first.endpoint_port != second.endpoint_port;
 
-    cleanup(&[first.droplet_id, second.droplet_id]);
+    cleanup(&[first.node_id.as_str(), second.node_id.as_str()]);
 
     assert!(
       first_still_exists,
@@ -1311,13 +1284,7 @@ mod tests {
   fn demo_run_args() -> Vec<String> {
     let (payload, _server, _client) = render_real_docker_payload();
 
-    DockerProviderAdapter::build_container_run_args(
-      "demo-container",
-      "goatstare.droplet_id=42",
-      "1",
-      "1024m",
-      &payload,
-    )
+    DockerProviderAdapter::build_container_run_args("demo-container", "1", "1024m", &payload)
   }
 
   /// The host port must be left for Docker to allocate.
