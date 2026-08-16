@@ -7,16 +7,17 @@ export default function DashboardPage() {
   const {
     activeNode,
     busyAction,
-    canConnect,
     connectedTunnel,
     connectPrimary,
     health,
     loadDashboard,
     noServerConfigured,
     recovery,
+    refreshHealth,
     connectTunnel,
     disconnectTunnel,
     throughputSamples,
+    tunnelConnected,
   } = useDashboard();
 
   return (
@@ -26,7 +27,7 @@ export default function DashboardPage() {
       activeNode={activeNode}
       connectedTunnel={connectedTunnel}
       health={health}
-      canConnect={canConnect}
+      tunnelConnected={tunnelConnected}
       throughputSamples={throughputSamples}
       recovery={recovery}
       busyAction={busyAction}
@@ -34,6 +35,7 @@ export default function DashboardPage() {
       onConnectTunnel={connectTunnel}
       onDisconnectTunnel={disconnectTunnel}
       onRefresh={loadDashboard}
+      onRefreshHealth={refreshHealth}
     />
   );
 }

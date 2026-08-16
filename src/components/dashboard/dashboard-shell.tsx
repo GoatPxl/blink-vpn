@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { useDashboard } from "./dashboard-provider";
-import { AppIcon, type AppView, VIEW_ROUTE } from "./shared";
+import { AppIcon, type AppView, type DashboardBusyAction, VIEW_ROUTE } from "./shared";
 
 const navItems: Array<{ id: AppView; label: string; icon: string; eyebrow: string }> = [
   { id: "dashboard", label: "Dashboard", icon: "grid", eyebrow: "Overview" },
@@ -39,11 +39,91 @@ function getActiveView(pathname: string | null): AppView {
   return matched?.id ?? "dashboard";
 }
 
+/**
+ * Turns a busy-action key into something readable.
+ *
+ * Deliberately mechanical rather than a lookup table: a table would silently fall out of step as
+ * actions are added, and a missing entry would render blank.
+ */
+function describeBusyAction(action: NonNullable<DashboardBusyAction>): string {
+  const words = action.replace(/-/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * Live connection state, pinned under the brand in the sidebar.
+ *
+ * Sits in the sidebar rather than the page header so it stays in one place across routes and does
+ * not compete with each page's title for the top of the screen.
+ */
+function SidebarStatus({
+  heading,
+  detail,
+  tone,
+  attention,
+}: {
+  heading: string;
+  detail: string;
+  tone: string;
+  attention: boolean;
+}) {
+  return (
+    <div
+      className={`mt-5 rounded-2xl border px-3 py-2.5 ${attention
+        ? "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)]"
+        : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)]"}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone }} />
+        <span className="text-[10px] font-semibold uppercase tracking-[0.2em]" style={{ color: tone }}>{heading}</span>
+      </div>
+      <p className="mt-1.5 text-xs leading-5 text-[var(--on-surface-variant)]">{detail}</p>
+    </div>
+  );
+}
+
 export function DashboardShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const activeView = getActiveView(pathname);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const { busyAction, loadDashboard, recovery, toasts } = useDashboard();
+  const {
+    activeNode,
+    busyAction,
+    connectedTunnel,
+    connectPrimary,
+    connectTunnel,
+    disconnectTunnel,
+    health,
+    recovery,
+    toasts,
+    tunnelConnected,
+  } = useDashboard();
+
+  // Live connection state, shown in the sidebar under the brand. Replaces a developer note about
+  // a routing refactor that had been left rendering as the header banner's idle text.
+  const statusHeading = recovery
+    ? recovery.title
+    : busyAction
+      ? "Working"
+      : tunnelConnected
+        ? "Connected"
+        : "Idle";
+  const statusDetail = recovery
+    ? recovery.nextAction
+    : busyAction
+      ? `${describeBusyAction(busyAction)}…`
+      : tunnelConnected
+        ? [activeNode?.name, health?.external_ipv4 ? `via ${health.external_ipv4}` : null]
+          .filter(Boolean)
+          .join(" · ") || "Tunnel is up."
+        : activeNode
+          ? `${activeNode.name} is provisioned and not connected.`
+          : "No server is configured yet.";
+  const statusTone = recovery
+    ? "var(--tertiary)"
+    : tunnelConnected
+      ? "var(--secondary)"
+      : "var(--on-surface-variant)";
 
   useEffect(() => {
     const closeOnDesktop = () => {
@@ -66,7 +146,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
           aria-hidden="true"
         />
 
-        <aside className={`fixed inset-y-0 left-0 z-40 flex w-[240px] flex-col border-r border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(17,20,28,0.98),rgba(13,16,23,0.98))] px-4 py-5 shadow-[20px_0_60px_rgba(0,0,0,0.25)] transition-transform duration-200 lg:hidden ${mobileNavOpen ? "translate-x-0" : "-translate-x-full"}`}>
+        <aside className={`fixed inset-y-0 left-0 z-40 flex w-[240px] flex-col overflow-y-auto border-r border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(17,20,28,0.98),rgba(13,16,23,0.98))] px-4 py-5 shadow-[20px_0_60px_rgba(0,0,0,0.25)] transition-transform duration-200 lg:hidden ${mobileNavOpen ? "translate-x-0" : "-translate-x-full"}`}>
           <div className="flex items-center justify-between gap-3 rounded-2xl px-1 py-1.5">
             <div className="flex items-center gap-3">
               <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[color:rgba(78,122,255,0.85)] text-white shadow-[0_8px_30px_rgba(78,122,255,0.28)]">
@@ -82,7 +162,9 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             </button>
           </div>
 
-          <nav className="mt-10 space-y-2">
+          <SidebarStatus heading={statusHeading} detail={statusDetail} tone={statusTone} attention={!!recovery} />
+
+          <nav className="mt-6 space-y-2">
             {navItems.map((item) => {
               const active = activeView === item.id;
               return (
@@ -105,7 +187,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
           </nav>
         </aside>
 
-        <aside className="fixed inset-y-0 left-0 hidden w-[240px] flex-col border-r border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(17,20,28,0.98),rgba(13,16,23,0.98))] px-4 py-5 shadow-[20px_0_60px_rgba(0,0,0,0.25)] lg:flex">
+        <aside className="fixed inset-y-0 left-0 hidden w-[240px] flex-col overflow-y-auto border-r border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(17,20,28,0.98),rgba(13,16,23,0.98))] px-4 py-5 shadow-[20px_0_60px_rgba(0,0,0,0.25)] lg:flex">
           <div className="flex items-center gap-3 rounded-2xl px-1 py-1.5">
             <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[color:rgba(78,122,255,0.85)] text-white shadow-[0_8px_30px_rgba(78,122,255,0.28)]">
               <AppIcon name="shield" className="h-6 w-6" />
@@ -116,7 +198,9 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             </div>
           </div>
 
-          <nav className="mt-10 space-y-2">
+          <SidebarStatus heading={statusHeading} detail={statusDetail} tone={statusTone} attention={!!recovery} />
+
+          <nav className="mt-6 space-y-2">
             {navItems.map((item) => {
               const active = activeView === item.id;
               return (
@@ -137,15 +221,44 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             })}
           </nav>
 
-          <div className="mt-10 rounded-[24px] border border-[color:rgba(171,199,255,0.22)] bg-[color:rgba(171,199,255,0.12)] p-4">
+          {/* `mt-auto` pins this to the bottom, so the status block above cannot push it off-screen. */}
+          <div className="mt-auto rounded-[24px] border border-[color:rgba(171,199,255,0.22)] bg-[color:rgba(171,199,255,0.12)] p-4">
             <div className="flex items-center gap-2 text-[var(--primary)]">
               <AppIcon name="shield" className="h-4 w-4" />
               <span className="text-[11px] uppercase tracking-[0.28em]">Quick Connect</span>
             </div>
-            <p className="mt-3 text-sm text-[var(--on-surface)]/90">Connect the active tunnel and refresh the live health state.</p>
-            <Link href={VIEW_ROUTE.dashboard} className="mt-4 inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2.5 text-sm font-medium text-[var(--on-surface)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)]">Open dashboard</Link>
+            <p className="mt-3 text-sm text-[var(--on-surface)]/90">
+              {activeNode
+                ? tunnelConnected
+                  ? `Connected to ${activeNode.name}.`
+                  : `${activeNode.name} is ready to connect.`
+                : "Provision a server to connect."}
+            </p>
+            {/* Actually connects. It was a card named "Quick Connect" whose only control linked to
+                the page the user was already on. */}
+            <button
+              type="button"
+              disabled={busyAction !== null || !activeNode}
+              onClick={() => {
+                if (!activeNode) return;
+                if (connectedTunnel) {
+                  if (tunnelConnected) {
+                    void disconnectTunnel(connectedTunnel);
+                  } else {
+                    void connectTunnel(connectedTunnel);
+                  }
+                  return;
+                }
+                void connectPrimary();
+              }}
+              className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2.5 text-sm font-medium text-[var(--on-surface)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <AppIcon name="power" className="h-4 w-4" />
+              {tunnelConnected
+                ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect")
+                : (busyAction === "connect-tunnel" || busyAction === "create-tunnel" ? "Connecting" : "Connect")}
+            </button>
           </div>
-
         </aside>
 
         <main className="flex-1 lg:pl-[240px]">
@@ -159,25 +272,8 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             </div>
 
             <header className="rounded-[28px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(16,19,27,0.85),rgba(14,17,24,0.85))] px-5 py-4 shadow-[var(--shadow-elevated)] backdrop-blur-md">
-              <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-                <div className="space-y-3">
-                  <div>
-                    <h1 className="text-3xl font-semibold tracking-tight text-[var(--on-surface)]">{titleMap[activeView]}</h1>
-                    <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--on-surface-variant)]">{subtitleMap[activeView]}</p>
-                  </div>
-                </div>
-
-                <div className="flex flex-col items-start gap-3 xl:items-end">
-                  <button type="button" onClick={() => void loadDashboard()} disabled={busyAction !== null} className="inline-flex items-center gap-2 rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2.5 text-sm font-medium text-[var(--on-surface)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-50">
-                    <AppIcon name="refresh" className="h-4 w-4" />
-                    {busyAction === "refresh" ? "Refreshing" : "Refresh dashboard"}
-                  </button>
-                  <div className={`rounded-2xl border px-4 py-3 text-sm ${recovery ? "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface-variant)]"}`}>
-                    <div className="text-[11px] uppercase tracking-[0.28em]">{recovery ? recovery.title : busyAction ? `Working: ${busyAction}` : "Idle"}</div>
-                    <div className="mt-1 max-w-[28rem] text-[var(--on-surface)]/90">{recovery ? recovery.nextAction : "Shared dashboard chrome now stays mounted across child-route navigation."}</div>
-                  </div>
-                </div>
-              </div>
+              <h1 className="text-3xl font-semibold tracking-tight text-[var(--on-surface)]">{titleMap[activeView]}</h1>
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--on-surface-variant)]">{subtitleMap[activeView]}</p>
             </header>
 
             {children}

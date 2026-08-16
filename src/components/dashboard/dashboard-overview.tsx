@@ -1,7 +1,27 @@
 "use client";
 
 import { DashboardEmptyState } from "@/components/dashboard-empty-state";
-import { AppIcon, Button, PageChrome, formatHandshakeAge, type AppView, type HealthPanelData, type RecoveryState, type DashboardBusyAction, type TunnelRecord, type VpnNodeRecord } from "./shared";
+import { AppIcon, Button, ConnectionTimer, PageChrome, formatHandshakeAge, type AppView, type HealthPanelData, type RecoveryState, type DashboardBusyAction, type TunnelRecord, type VpnNodeRecord } from "./shared";
+import { describeEgress, describeIpv6, handshakeFreshness, type EgressTone } from "@/lib/connection-display";
+
+/** Maps an egress verdict onto the theme's colour tokens. */
+const EGRESS_TONE_VAR: Record<EgressTone, string> = {
+  positive: "var(--secondary)",
+  warning: "var(--tertiary)",
+  muted: "var(--on-surface-variant)",
+};
+
+/**
+ * WireGuard's cipher suite is fixed by the protocol — there is no negotiation and no backend
+ * field reporting it, which is why this is a constant rather than a value read from a snapshot.
+ *
+ * It previously read "AES-256", which WireGuard does not use at all.
+ */
+const WIREGUARD_SUITE = "ChaCha20-Poly1305";
+const WIREGUARD_SUITE_DETAIL = "Curve25519 · BLAKE2s";
+
+/** Handshakes refresh on the keepalive interval, so this is the window a live peer stays within. */
+const HANDSHAKE_FRESH_WINDOW_SECONDS = 180;
 
 type ThroughputSample = {
   timestamp: number;
@@ -48,13 +68,42 @@ function buildLinePath(values: number[], maxValue: number, width: number, height
     .join(" ");
 }
 
+/**
+ * Re-polls the health snapshot on click.
+ *
+ * This used to be a bare decorative SVG with no handler — it looked actionable and did nothing.
+ * Polling never elevates, so this cannot raise a UAC prompt.
+ */
+function RefreshButton({
+  label,
+  busy,
+  onRefresh,
+}: {
+  label: string;
+  busy: boolean;
+  onRefresh: () => Promise<void>;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={busy}
+      onClick={() => { void onRefresh(); }}
+      className="rounded-full p-1 text-[var(--on-surface-variant)] transition hover:bg-[color:rgba(255,255,255,0.06)] hover:text-[var(--on-surface)] disabled:opacity-50"
+    >
+      <AppIcon name="refresh" className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />
+    </button>
+  );
+}
+
 export function DashboardOverview({
   activeView,
   noServerConfigured,
   activeNode,
   connectedTunnel,
   health,
-  canConnect,
+  tunnelConnected,
   throughputSamples,
   recovery,
   busyAction,
@@ -62,13 +111,14 @@ export function DashboardOverview({
   onConnectTunnel,
   onDisconnectTunnel,
   onRefresh,
+  onRefreshHealth,
 }: {
   activeView: AppView;
   noServerConfigured: boolean;
   activeNode: VpnNodeRecord | null;
   connectedTunnel: TunnelRecord | null;
   health: HealthPanelData | null;
-  canConnect: boolean;
+  tunnelConnected: boolean;
   throughputSamples: ThroughputSample[];
   recovery: RecoveryState | null;
   busyAction: DashboardBusyAction;
@@ -76,13 +126,15 @@ export function DashboardOverview({
   onConnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onDisconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onRefresh: () => Promise<void>;
+  onRefreshHealth: () => Promise<void>;
 }) {
   if (noServerConfigured && activeView === "dashboard") {
     return <DashboardEmptyState />;
   }
 
   if (!(noServerConfigured && activeView === "dashboard") && activeView === "dashboard") {
-    const tunnelConnected = connectedTunnel?.status.toLowerCase() === "connected";
+    // Every connection widget reads the same live value, so the headline can no longer contradict
+    // the handshake card beside it.
     const statusLabel = recovery
       ? "Status: Attention"
       : tunnelConnected
@@ -90,29 +142,46 @@ export function DashboardOverview({
         : connectedTunnel
           ? "Status: Disconnected"
           : "Status: Idle";
+    const statusTone = recovery
+      ? "var(--tertiary)"
+      : tunnelConnected
+        ? "var(--secondary)"
+        : "var(--on-surface-variant)";
     const isConnectBusy = busyAction === "connect-tunnel" || busyAction === "create-tunnel";
-    const buttonLabel = connectedTunnel
-      ? canConnect
-        ? (isConnectBusy ? "Connecting" : "Connect")
-        : (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect")
+    const buttonLabel = tunnelConnected
+      ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect")
       : (isConnectBusy ? "Connecting" : "Connect");
-    const buttonTone = connectedTunnel && !canConnect ? "danger" : "primary";
+    const buttonTone = tunnelConnected ? "danger" : "primary";
+
+    // Known only when this app established the session. A tunnel already running at startup has
+    // no recorded start, and inventing one would render a timer counting from an arbitrary moment.
+    const sessionStartedAt = tunnelConnected ? health?.connected_at ?? null : null;
+
     const latestThroughput = throughputSamples[throughputSamples.length - 1] ?? null;
-    const graphPoints = throughputSamples.length > 0
-      ? throughputSamples
-      : Array.from({ length: 12 }, (_, index) => ({
-        timestamp: index,
-        downloadBytesPerSecond: 0,
-        uploadBytesPerSecond: 0,
-      }));
-    const downloadSeries = graphPoints.map((point) => point.downloadBytesPerSecond);
-    const uploadSeries = graphPoints.map((point) => point.uploadBytesPerSecond);
+    const hasThroughput = throughputSamples.length > 1;
+    const downloadSeries = throughputSamples.map((point) => point.downloadBytesPerSecond);
+    const uploadSeries = throughputSamples.map((point) => point.uploadBytesPerSecond);
     const graphMax = Math.max(1, ...downloadSeries, ...uploadSeries);
     const downloadPath = buildLinePath(downloadSeries, graphMax, 1000, 180, 10);
     const uploadPath = buildLinePath(uploadSeries, graphMax, 1000, 180, 10);
-    const signalStrength = health?.handshake_age_seconds === null || health?.handshake_age_seconds === undefined
-      ? 14
-      : Math.max(8, Math.min(100, 100 - (Math.min(health.handshake_age_seconds, 240) / 2.4)));
+    // Measured from the samples themselves rather than assumed from the poll interval, which
+    // drifts whenever a poll runs slow.
+    const windowSeconds = hasThroughput
+      ? Math.round((throughputSamples[throughputSamples.length - 1].timestamp - throughputSamples[0].timestamp) / 1000)
+      : 0;
+
+    // Handshake age needs administrator, so it is genuinely absent on most runs. Null means no
+    // bar at all rather than a placeholder width.
+    const freshness = handshakeFreshness(health?.handshake_age_seconds, HANDSHAKE_FRESH_WINDOW_SECONDS);
+
+    const egress = describeEgress({
+      tunnelConnected,
+      observedEgress: health?.external_ipv4 ?? null,
+      serverIp: health?.endpoint_ip ?? activeNode?.public_ipv4 ?? null,
+    });
+    const egressTone = EGRESS_TONE_VAR[egress.tone];
+    const ipv6 = describeIpv6({ tunnelConnected, observedIpv6: health?.external_ipv6 ?? null });
+    const isHealthRefreshing = busyAction === "refresh-health";
 
     return (
       <PageChrome>
@@ -120,8 +189,8 @@ export function DashboardOverview({
           <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] px-6 py-8">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.26em] text-[var(--secondary)]">
-                  <span className="h-2.5 w-2.5 rounded-full bg-[var(--secondary)] shadow-[0_0_0_6px_rgba(78,222,163,0.12)]" />
+                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.26em]" style={{ color: statusTone }}>
+                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: statusTone }} />
                   <span>{statusLabel}</span>
                 </div>
                 <h2 className="mt-3 text-[56px] font-semibold leading-none tracking-tight text-[var(--on-surface)]">{activeNode?.name ?? "No active node"}</h2>
@@ -136,10 +205,10 @@ export function DashboardOverview({
                   }
 
                   if (connectedTunnel) {
-                    if (canConnect) {
-                      void onConnectTunnel(connectedTunnel);
-                    } else {
+                    if (tunnelConnected) {
                       void onDisconnectTunnel(connectedTunnel);
+                    } else {
+                      void onConnectTunnel(connectedTunnel);
                     }
                     return;
                   }
@@ -155,11 +224,19 @@ export function DashboardOverview({
             <div className="mt-24 grid grid-cols-2 gap-6">
               <div>
                 <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">Connection Time</div>
-                <div className="mt-1 font-mono text-[22px] font-semibold text-[var(--on-surface)]">{health ? "Live" : "--:--:--"}</div>
+                <div className="mt-1 font-mono text-[22px] font-semibold text-[var(--on-surface)]">
+                  {sessionStartedAt ? <ConnectionTimer startedAt={sessionStartedAt} /> : "--:--:--"}
+                </div>
+                {tunnelConnected && sessionStartedAt === null ? (
+                  <div className="mt-1 text-[11px] text-[var(--on-surface-variant)]" title="This tunnel was already running when the app started, so its start time is not known.">
+                    Started before this session
+                  </div>
+                ) : null}
               </div>
               <div>
                 <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">Encryption Protocol</div>
-                <div className="mt-1 flex items-center gap-2 text-[22px] font-semibold text-[var(--on-surface)]"><AppIcon name="lock" className="h-5 w-5 text-[var(--primary)]" />WireGuard AES-256</div>
+                <div className="mt-1 flex items-center gap-2 text-[22px] font-semibold text-[var(--on-surface)]"><AppIcon name="lock" className="h-5 w-5 text-[var(--primary)]" />{WIREGUARD_SUITE}</div>
+                <div className="mt-1 text-[11px] text-[var(--on-surface-variant)]">WireGuard · {WIREGUARD_SUITE_DETAIL}</div>
               </div>
             </div>
           </div>
@@ -168,12 +245,25 @@ export function DashboardOverview({
             <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] px-5 py-4">
               <div className="flex items-start justify-between">
                 <div>
-                  <div className="text-sm text-[var(--on-surface-variant)]">Public IP Address</div>
-                  <div className="mt-3 text-[18px] font-semibold tracking-tight text-[var(--on-surface)]">{health?.external_ipv4 ?? activeNode?.public_ipv4 ?? "n/a"}</div>
+                  <div className="text-sm text-[var(--on-surface-variant)]">My IP Address</div>
+                  <div className="mt-3 text-[18px] font-semibold tracking-tight text-[var(--on-surface)]">{egress.value}</div>
                 </div>
-                <AppIcon name="refresh" className="h-4 w-4 text-[var(--on-surface-variant)]" />
+                <RefreshButton label="Re-check my IP address" busy={isHealthRefreshing} onRefresh={onRefreshHealth} />
               </div>
-              <div className="mt-8 flex items-center gap-2 text-[12px] text-[var(--secondary)]"><span className="h-2 w-2 rounded-full bg-[var(--secondary)]" />{tunnelConnected ? "Egress IP observed through tunnel" : "Connect to verify egress IP"}</div>
+              <div className="mt-3 flex items-center gap-2 text-[12px]" style={{ color: egressTone }}>
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: egressTone }} />
+                {egress.caption}
+              </div>
+              {ipv6 ? (
+                <div className="mt-4 border-t border-[color:var(--outline-variant)] pt-3">
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">IPv6</div>
+                  <div className="mt-1 truncate text-[13px] font-medium text-[var(--on-surface)]" title={ipv6.value}>{ipv6.value}</div>
+                  <div className="mt-1 flex items-center gap-2 text-[11px]" style={{ color: EGRESS_TONE_VAR[ipv6.tone] }}>
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: EGRESS_TONE_VAR[ipv6.tone] }} />
+                    {ipv6.caption}
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] px-5 py-4">
@@ -183,33 +273,63 @@ export function DashboardOverview({
                   <div className="mt-3 text-[18px] font-semibold tracking-tight text-[var(--on-surface)]">{health?.tunnel_status ?? "Pending"}</div>
                   <div className="mt-1 text-xs text-[var(--on-surface-variant)]">Last handshake: {formatHandshakeAge(health?.handshake_age_seconds, health?.tunnel_status)}</div>
                 </div>
-                <AppIcon name="refresh" className="h-4 w-4 text-[var(--on-surface-variant)]" />
+                <RefreshButton label="Refresh handshake state" busy={isHealthRefreshing} onRefresh={onRefreshHealth} />
               </div>
-              <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-[color:rgba(255,255,255,0.07)]"><div className="h-full rounded-full bg-[var(--primary)]" style={{ width: `${signalStrength.toFixed(0)}%` }} /></div>
-              <div className="mt-1 text-right text-[10px] text-[var(--on-surface-variant)]">Signal Strength: {tunnelConnected ? "Live" : "Pending"}</div>
+              {freshness === null ? (
+                <div
+                  className="mt-5 text-[11px] text-[var(--on-surface-variant)]"
+                  title="Handshake age comes from the WireGuard tunnel service's pipe, which is restricted to administrators. The tunnel itself is unaffected."
+                >
+                  {tunnelConnected ? "Handshake age requires administrator" : "No active handshake"}
+                </div>
+              ) : (
+                <>
+                  <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-[color:rgba(255,255,255,0.07)]">
+                    <div className="h-full rounded-full bg-[var(--primary)]" style={{ width: `${freshness.toFixed(0)}%` }} />
+                  </div>
+                  <div className="mt-1 text-right text-[10px] text-[var(--on-surface-variant)]">Handshake freshness</div>
+                </>
+              )}
             </div>
           </div>
         </div>
 
         <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(15,18,26,0.98),rgba(15,18,26,0.98))] px-6 py-5">
           <div className="flex items-center justify-between gap-4">
-            <h3 className="text-[18px] font-semibold tracking-tight text-[var(--on-surface)]">Network Throughput (60s)</h3>
-            <div className="flex items-center gap-4 text-[11px] text-[var(--on-surface-variant)]">
-              <span className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-[var(--primary)]" />DL: {formatRate(latestThroughput?.downloadBytesPerSecond ?? 0)}</span>
-              <span className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-[var(--tertiary)]" />UL: {formatRate(latestThroughput?.uploadBytesPerSecond ?? 0)}</span>
-            </div>
+            <h3 className="text-[18px] font-semibold tracking-tight text-[var(--on-surface)]">
+              Network Throughput{windowSeconds > 0 ? ` (${windowSeconds}s)` : ""}
+            </h3>
+            {hasThroughput ? (
+              <div className="flex items-center gap-4 text-[11px] text-[var(--on-surface-variant)]">
+                <span className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-[var(--primary)]" />DL: {formatRate(latestThroughput?.downloadBytesPerSecond ?? 0)}</span>
+                <span className="flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-[var(--tertiary)]" />UL: {formatRate(latestThroughput?.uploadBytesPerSecond ?? 0)}</span>
+              </div>
+            ) : null}
           </div>
-          <div className="mt-5 h-[180px] rounded-[8px] border border-[color:rgba(255,255,255,0.03)] bg-[linear-gradient(180deg,rgba(11,14,21,0.96),rgba(11,14,21,0.96))] px-2 py-4">
-            <svg viewBox="0 0 1000 180" className="h-full w-full text-[var(--on-surface-variant)]" preserveAspectRatio="none" aria-hidden="true">
-              <g opacity="0.16" stroke="currentColor">
-                <path d="M0 28H1000" />
-                <path d="M0 68H1000" />
-                <path d="M0 108H1000" />
-                <path d="M0 148H1000" />
-              </g>
-              <path d={downloadPath} fill="none" stroke="rgba(171,199,255,0.95)" strokeWidth="3" />
-              <path d={uploadPath} fill="none" stroke="rgba(255,185,95,0.9)" strokeWidth="2.5" />
-            </svg>
+          <div className="relative mt-5 h-[180px] rounded-[8px] border border-[color:rgba(255,255,255,0.03)] bg-[linear-gradient(180deg,rgba(11,14,21,0.96),rgba(11,14,21,0.96))] px-2 py-4">
+            {hasThroughput ? (
+              <>
+                {/* Absolute scale, so the shape of the line means something. */}
+                <div className="pointer-events-none absolute left-3 top-2 text-[10px] text-[var(--on-surface-variant)]">{formatRate(graphMax)}</div>
+                <div className="pointer-events-none absolute bottom-2 left-3 text-[10px] text-[var(--on-surface-variant)]">0 B/s</div>
+                <svg viewBox="0 0 1000 180" className="h-full w-full text-[var(--on-surface-variant)]" preserveAspectRatio="none" aria-hidden="true">
+                  <g opacity="0.16" stroke="currentColor">
+                    <path d="M0 28H1000" />
+                    <path d="M0 68H1000" />
+                    <path d="M0 108H1000" />
+                    <path d="M0 148H1000" />
+                  </g>
+                  <path d={downloadPath} fill="none" stroke="rgba(171,199,255,0.95)" strokeWidth="3" />
+                  <path d={uploadPath} fill="none" stroke="rgba(255,185,95,0.9)" strokeWidth="2.5" />
+                </svg>
+              </>
+            ) : (
+              // An empty chart, rather than a flat zero line: no measurement is a different claim
+              // from a measured zero, and the two used to look identical.
+              <div className="flex h-full items-center justify-center text-[12px] text-[var(--on-surface-variant)]">
+                {tunnelConnected ? "Sampling throughput…" : "Connect to measure throughput"}
+              </div>
+            )}
           </div>
         </div>
       </PageChrome>

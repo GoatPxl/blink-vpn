@@ -134,19 +134,40 @@ export interface TunnelRecord {
   tx_bytes: number | null;
   stats_updated_at: string | null;
   last_error: string | null;
+  /** When the current session began. `null` means not connected, or start time unknown. */
+  connected_at: string | null;
   created_at: string;
   updated_at: string;
 }
 
+/**
+ * Which measurement produced the byte counters.
+ *
+ * `peer` is `wg show` (per-peer WireGuard counters, needs admin); `adapter` is the interface's
+ * own lifetime octets (no elevation). They count different things, so anything differencing
+ * samples over time must reset its baseline when this changes.
+ */
+export type TunnelMetricsSource = "peer" | "adapter";
+
 export interface HealthPanelData {
   node_id: string;
   tunnel_id: string | null;
+  /** The provisioned server's address. Not the machine's egress address. */
   endpoint_ip: string | null;
   handshake_age_seconds: number | null;
   rx_bytes: number | null;
   tx_bytes: number | null;
+  /** The address the internet currently sees, measured in every state. `null` if the probe failed. */
   external_ipv4: string | null;
+  /**
+   * Present only when this machine has IPv6 egress.
+   *
+   * The tunnel is IPv4-only, so a value here while connected means IPv6 traffic is bypassing it.
+   */
+  external_ipv6: string | null;
   tunnel_status: string | null;
+  metrics_source: TunnelMetricsSource | null;
+  connected_at: string | null;
 }
 
 export interface DiagnosticsBundle {
@@ -382,10 +403,19 @@ export async function forceDisconnectNodeService(nodeId: string): Promise<void> 
   await invokeCommand<void>("force_disconnect_node_service", { nodeId });
 }
 
-export async function getHealthPanelData(nodeId: string, tunnelId?: string | null): Promise<HealthPanelData> {
+/**
+ * @param forceIpProbe bypasses the backend's egress-IP cache. Set it for a user-initiated
+ * refresh; leave it off for the ambient poll, which would otherwise hammer a third-party service.
+ */
+export async function getHealthPanelData(
+  nodeId: string,
+  tunnelId?: string | null,
+  forceIpProbe = false,
+): Promise<HealthPanelData> {
   return invokeCommand<HealthPanelData>("get_health_panel_data", {
     nodeId,
     tunnelId: tunnelId ?? null,
+    forceIpProbe,
   });
 }
 

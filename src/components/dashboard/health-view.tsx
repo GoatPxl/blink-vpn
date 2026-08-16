@@ -83,7 +83,8 @@ export function HealthView({
           {health ? (
             <div className="grid gap-4 md:grid-cols-2">
               <MetricCard title="Endpoint" value={health.endpoint_ip ?? "n/a"} detail={`Node ${health.node_id}`} tone="primary" />
-              <MetricCard title="External IP" value={health.external_ipv4 ?? "n/a"} detail={`Tunnel ${health.tunnel_id ?? "n/a"}`} tone="secondary" />
+              {/* Only ever a measured egress address now; absent means unverified, not unknown. */}
+              <MetricCard title="Egress IP" value={health.external_ipv4 ?? "Not verified"} detail={health.external_ipv4 ? "Observed through the tunnel" : "Connect to verify"} tone="secondary" />
               <MetricCard title="Handshake" value={formatHandshakeAge(health.handshake_age_seconds, health.tunnel_status)} detail={`Tunnel status ${health.tunnel_status ?? "n/a"}`} tone="tertiary" />
               <MetricCard title="Traffic" value={`RX ${formatBytes(health.rx_bytes)} / TX ${formatBytes(health.tx_bytes)}`} detail={`Selected tunnel ${selectedTunnelId || "none"}`} tone="primary" />
             </div>

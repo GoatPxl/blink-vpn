@@ -58,8 +58,15 @@ Columns:
 - `rx_bytes` INTEGER NULL
 - `tx_bytes` INTEGER NULL
 - `stats_updated_at` TEXT NULL
+- `connected_at` TEXT NULL
 - `created_at` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
+
+`connected_at` is the start of the current session, stamped on a successful connect and cleared on
+every disconnect path. NULL therefore means either "not connected" or "connected, but the start is
+unknown" — a tunnel already running when the app started, which reconciliation deliberately does
+**not** backfill, because the real start time is unknowable at that point. The dashboard renders
+the unknown case as unknown rather than counting from an arbitrary moment.
 
 Indexes:
 

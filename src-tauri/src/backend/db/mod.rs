@@ -20,6 +20,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (12, include_str!("../../../migrations/0012_vpn_node_client_key.sql")),
   (13, include_str!("../../../migrations/0013_vpn_node_endpoint_port.sql")),
   (14, include_str!("../../../migrations/0014_drop_wireguard_connection_mode.sql")),
+  (15, include_str!("../../../migrations/0015_tunnel_connected_at.sql")),
 ];
 
 
@@ -261,6 +262,9 @@ pub struct TunnelRecord {
   pub tx_bytes: Option<i64>,
   pub stats_updated_at: Option<String>,
   pub last_error: Option<String>,
+  /// When the current session was established. `None` means either "not connected" or
+  /// "connected, start time unknown" — never a stand-in for zero elapsed time.
+  pub connected_at: Option<String>,
   pub created_at: String,
   pub updated_at: String,
 }
@@ -907,7 +911,7 @@ impl Database {
       .query_row(
         "SELECT id, node_id, name, status, client_private_key_ref, client_address_cidr,
           dns_server, allowed_ips, interface_name, assigned_ipv4, last_handshake_age_seconds,
-          rx_bytes, tx_bytes, stats_updated_at, last_error, created_at, updated_at
+          rx_bytes, tx_bytes, stats_updated_at, last_error, connected_at, created_at, updated_at
          FROM tunnels
          WHERE id = ?1",
         params![id],
@@ -928,7 +932,7 @@ impl Database {
       .prepare(
         "SELECT id, node_id, name, status, client_private_key_ref, client_address_cidr,
           dns_server, allowed_ips, interface_name, assigned_ipv4, last_handshake_age_seconds,
-          rx_bytes, tx_bytes, stats_updated_at, last_error, created_at, updated_at
+          rx_bytes, tx_bytes, stats_updated_at, last_error, connected_at, created_at, updated_at
          FROM tunnels
          WHERE node_id = ?1
          ORDER BY created_at ASC",
@@ -1070,6 +1074,41 @@ impl Database {
         entity: "tunnel",
         id: id.to_string(),
         detail: "Client configuration update skipped because no row matched the id.".to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
+  /// Stamps or clears the session start time.
+  ///
+  /// Stamping preserves an existing value, so an idempotent re-connect of an already-connected
+  /// tunnel does not restart the clock. Clearing is unconditional, so a disconnect always ends
+  /// the session.
+  pub fn set_tunnel_connected_at(&self, id: &str, connected: bool) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let changed = connection
+      .execute(
+        "UPDATE tunnels
+         SET connected_at = CASE
+               WHEN ?2 = 1 THEN COALESCE(connected_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+               ELSE NULL
+             END,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1",
+        params![id, connected],
+      )
+      .map_err(|source| DbError::Query {
+        action: "set_tunnel_connected_at",
+        detail: "Failed updating tunnel session start time.".to_string(),
+        source,
+      })?;
+
+    if changed == 0 {
+      return Err(DbError::NotFound {
+        entity: "tunnel",
+        id: id.to_string(),
+        detail: "Session start update skipped because no row matched the id.".to_string(),
       });
     }
 
@@ -1287,8 +1326,9 @@ fn map_tunnel_row(row: &Row<'_>) -> rusqlite::Result<TunnelRecord> {
     tx_bytes: row.get(12)?,
     stats_updated_at: row.get(13)?,
     last_error: row.get(14)?,
-    created_at: row.get(15)?,
-    updated_at: row.get(16)?,
+    connected_at: row.get(15)?,
+    created_at: row.get(16)?,
+    updated_at: row.get(17)?,
   })
 }
 
@@ -1412,6 +1452,44 @@ mod tests {
       .expect("tunnel query should succeed")
       .expect("tunnel should exist");
     assert_eq!(tunnel.status, TunnelStatus::Connected);
+  }
+
+  #[test]
+  fn tunnel_session_start_is_stamped_on_connect_and_cleared_on_disconnect() {
+    let db = setup_db("tunnel_connected_at");
+
+    db.create_provider("provider-ca", "DigitalOcean", "do-ca", None)
+      .expect("provider insert should succeed");
+    db.create_vpn_node("node-ca", "provider-ca", "Primary", "fra1")
+      .expect("node insert should succeed");
+    db.create_tunnel("tunnel-ca", "node-ca", "Main Tunnel", Some("wg0"))
+      .expect("tunnel insert should succeed");
+
+    let fresh = db.get_tunnel("tunnel-ca").expect("query").expect("row");
+    assert_eq!(fresh.connected_at, None, "a new tunnel has no session");
+
+    db.set_tunnel_connected_at("tunnel-ca", true).expect("stamp should succeed");
+    let started = db
+      .get_tunnel("tunnel-ca")
+      .expect("query")
+      .expect("row")
+      .connected_at
+      .expect("connecting should stamp a session start");
+
+    // Re-connecting an already-connected tunnel must not restart the clock, so an idempotent
+    // connect does not make an hours-old session look brand new.
+    db.set_tunnel_connected_at("tunnel-ca", true).expect("re-stamp should succeed");
+    assert_eq!(
+      db.get_tunnel("tunnel-ca").expect("query").expect("row").connected_at.as_deref(),
+      Some(started.as_str()),
+    );
+
+    db.set_tunnel_connected_at("tunnel-ca", false).expect("clear should succeed");
+    assert_eq!(
+      db.get_tunnel("tunnel-ca").expect("query").expect("row").connected_at,
+      None,
+      "disconnecting ends the session",
+    );
   }
 
   #[test]

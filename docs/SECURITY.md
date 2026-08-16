@@ -20,6 +20,25 @@
 - Backend to the WireGuard tunnel service: privileged local boundary (elevation on connect and disconnect only).
 - Backend to Docker runtime: local process boundary with validated command output.
 
+## Tunnel Coverage
+
+**The tunnel carries IPv4 only.** The server bootstrap enables IPv4 forwarding and installs
+`iptables` MASQUERADE rules; there is no `ip6tables` equivalent, no IPv6 server CIDR, and the
+client interface is issued a `/32` with no IPv6 address.
+
+The client config does list `::/0` in `AllowedIPs`, which is what stops IPv6 from silently
+egressing on the physical interface. That is a routing assertion, not IPv6 support: any IPv6
+traffic that *does* reach the internet while connected has bypassed the tunnel.
+
+The dashboard probes IPv6 egress in every state and reports a reachable address while connected as
+a bypass rather than as a second protected route. Treat a persistent warning there as a real
+finding. Adding genuine IPv6 support is a bootstrap and addressing change, not a UI change.
+
+The egress probe contacts a third-party IP service (`ipify` / `icanhazip`) in both connected and
+disconnected states, so that service observes the user's real address while disconnected. This is
+inherent to measuring egress; it is cached for 60 seconds and re-probed on a connection change, so
+it is not issued on every poll.
+
 ## Redaction Policy
 
 Always redact:

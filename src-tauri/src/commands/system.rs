@@ -33,8 +33,18 @@ pub struct HealthPanelData {
   pub handshake_age_seconds: Option<u64>,
   pub rx_bytes: Option<u64>,
   pub tx_bytes: Option<u64>,
+  /// The address the internet currently sees, measured in every connection state. `None` means
+  /// the probe failed. Callers must not present `endpoint_ip` as though it were this value.
   pub external_ipv4: Option<String>,
+  /// Present only when the machine has IPv6 egress. This tunnel is IPv4-only, so a value here
+  /// while connected means IPv6 traffic is bypassing it.
+  pub external_ipv6: Option<String>,
   pub tunnel_status: Option<String>,
+  /// `"peer"` or `"adapter"` — which tier produced the byte counters. Consumers differencing
+  /// samples must reset their baseline when this changes.
+  pub metrics_source: Option<String>,
+  /// Session start time, or `None` when not connected or the start time is unknown.
+  pub connected_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -539,6 +549,7 @@ pub fn connect_tunnel(
   pub fn get_health_panel_data(
     node_id: String,
     tunnel_id: Option<String>,
+    force_ip_probe: Option<bool>,
     backend: State<'_, Backend>,
   ) -> Result<HealthPanelData, CommandError> {
     let summary = backend
@@ -549,6 +560,7 @@ pub fn connect_tunnel(
         &backend.secure_storage,
         &node_id,
         tunnel_id.as_deref(),
+        force_ip_probe.unwrap_or(false),
       )
       .map_err(CommandError::from)?;
 
@@ -560,7 +572,10 @@ pub fn connect_tunnel(
       rx_bytes: summary.rx_bytes,
       tx_bytes: summary.tx_bytes,
       external_ipv4: summary.external_ipv4,
+      external_ipv6: summary.external_ipv6,
       tunnel_status: summary.tunnel_status.map(|status| status.to_string()),
+      metrics_source: summary.metrics_source.map(|source| source.as_str().to_string()),
+      connected_at: summary.connected_at,
     })
   }
 

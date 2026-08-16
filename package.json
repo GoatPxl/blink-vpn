@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint . --ignore-pattern src-tauri/target/**",
     "typecheck": "tsc --noEmit",
+    "test:unit": "node --test \"tests/unit/*.test.mts\"",
     "tauri:e2e:docker:real": "playwright test --config=playwright.tauri.config.ts --project=tauri-real",
     "backend:test:docker:real": "cargo test --manifest-path src-tauri/Cargo.toml real_docker -- --ignored --nocapture",
     "backend:test:docker:clientconf": "cargo test --manifest-path src-tauri/Cargo.toml real_docker_emits_connectable_client_config -- --ignored --nocapture",

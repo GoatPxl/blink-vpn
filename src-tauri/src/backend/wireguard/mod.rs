@@ -520,7 +520,10 @@ impl WireGuardManager {
     self.read_tunnel_status_service(tunnel_name)
   }
 
-  /// Read service state and peer metrics. Neither `sc query` nor `wg show` needs elevation.
+  /// Read service state and peer metrics.
+  ///
+  /// `sc query` needs no elevation and decides whether the tunnel is up. `wg show` does need
+  /// administrator, so peer metrics degrade through the tiers described below rather than failing.
   fn read_tunnel_status_service(&self, tunnel_name: &str) -> Result<TunnelRuntimeStatus, WireGuardError> {
     validate_tunnel_name(tunnel_name)?;
 
@@ -540,6 +543,7 @@ impl WireGuardManager {
         last_handshake_age_seconds: None,
         rx_bytes: None,
         tx_bytes: None,
+        metrics_source: None,
       });
     }
 
@@ -594,6 +598,7 @@ impl WireGuardManager {
       last_handshake_age_seconds: peer_metrics.last_handshake_age_seconds,
       rx_bytes: peer_metrics.rx_bytes,
       tx_bytes: peer_metrics.tx_bytes,
+      metrics_source: peer_metrics.metrics_source,
     })
   }
 
@@ -698,6 +703,30 @@ pub enum TunnelServiceState {
   Unknown,
 }
 
+/// Which measurement produced the byte counters in a status read.
+///
+/// The two tiers count different things: `wg show` reports per-peer WireGuard payload counters,
+/// while the adapter reports whole-interface lifetime octets. A consumer differencing samples
+/// over time must reset its baseline when this value changes, or the switch registers as a
+/// phantom throughput spike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelMetricsSource {
+  /// `wg show <name> dump` — requires administrator.
+  Peer,
+  /// Win32 `GetIfTable2` interface counters — no elevation needed.
+  Adapter,
+}
+
+impl TunnelMetricsSource {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Peer => "peer",
+      Self::Adapter => "adapter",
+    }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TunnelRuntimeStatus {
   pub tunnel_name: String,
@@ -705,6 +734,8 @@ pub struct TunnelRuntimeStatus {
   pub last_handshake_age_seconds: Option<u64>,
   pub rx_bytes: Option<u64>,
   pub tx_bytes: Option<u64>,
+  /// `None` when no counters could be read at all.
+  pub metrics_source: Option<TunnelMetricsSource>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -745,6 +776,7 @@ struct PeerMetrics {
   last_handshake_age_seconds: Option<u64>,
   rx_bytes: Option<u64>,
   tx_bytes: Option<u64>,
+  metrics_source: Option<TunnelMetricsSource>,
 }
 
 impl PeerMetrics {
@@ -755,6 +787,7 @@ impl PeerMetrics {
       last_handshake_age_seconds: None,
       rx_bytes: None,
       tx_bytes: None,
+      metrics_source: None,
     }
   }
 
@@ -767,6 +800,7 @@ impl PeerMetrics {
       last_handshake_age_seconds: None,
       rx_bytes: Some(rx_bytes),
       tx_bytes: Some(tx_bytes),
+      metrics_source: Some(TunnelMetricsSource::Adapter),
     }
   }
 }
@@ -1102,6 +1136,7 @@ fn parse_wg_dump_metrics(now_unix_seconds: u64, dump: &str) -> Result<PeerMetric
     last_handshake_age_seconds,
     rx_bytes: if peer_count == 0 { None } else { Some(rx_total) },
     tx_bytes: if peer_count == 0 { None } else { Some(tx_total) },
+    metrics_source: if peer_count == 0 { None } else { Some(TunnelMetricsSource::Peer) },
   })
 }
 

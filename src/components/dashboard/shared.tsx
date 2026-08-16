@@ -1,6 +1,7 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { formatElapsed } from "@/lib/connection-display";
 import type {
   CommandErrorKind,
   ProviderPlanPricing,
@@ -174,6 +175,30 @@ export function formatHandshakeAge(
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
   return `${Math.floor(minutes / 60)}h ago`;
+}
+
+/**
+ * Ticks once a second for as long as it is mounted.
+ *
+ * Mount it only where a clock is actually shown: the initial value is read on mount, so a
+ * component rendered fresh when a session starts needs no resynchronisation, and nothing ticks
+ * while there is nothing to count.
+ */
+export function useNow(): number {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return now;
+}
+
+/** Live elapsed session time. Mounted only when a start time is known. */
+export function ConnectionTimer({ startedAt }: { startedAt: string }) {
+  const now = useNow();
+  return <>{formatElapsed(startedAt, now) ?? "--:--:--"}</>;
 }
 
 export function formatCurrency(value: number | null | undefined, digits = 2): string {

@@ -2,7 +2,8 @@ use thiserror::Error;
 use uuid::Uuid;
 use serde::Serialize;
 use std::net::IpAddr;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::backend::bootstrap::{
   Bootstrap, BootstrapError, BootstrapParams, DEFAULT_CLIENT_CIDR, DEFAULT_INTERFACE_NAME,
@@ -10,7 +11,7 @@ use crate::backend::bootstrap::{
 };
 use crate::backend::crypto::keypair::{generate_client_keypair, generate_server_keypair, KeygenError};
 use crate::backend::db::Database;
-use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelStatus};
+use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelRecord, TunnelStatus};
 use crate::backend::logging;
 use crate::backend::provider::{
   BootstrapWaitRequest, NodeInitRequest, ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError,
@@ -20,14 +21,32 @@ use crate::backend::secure_storage::SecureStorage;
 use crate::backend::secure_storage::SecretStoreError;
 use crate::backend::wireguard::{
   ClientConfigParams, DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS,
-  TunnelRuntimeStatus, WireGuardError,
+  TunnelMetricsSource, TunnelRuntimeStatus, WireGuardError,
   WireGuardManager,
 };
 
 #[derive(Clone)]
-pub struct Orchestrator;
+pub struct Orchestrator {
+  ip_probe: Arc<dyn ExternalIpProbe>,
+  external_ip: Arc<Mutex<Option<ExternalIpSnapshot>>>,
+}
+
+/// The last measured egress addresses, and the tunnel state they were measured under.
+#[derive(Debug, Clone)]
+struct ExternalIpSnapshot {
+  ipv4: Option<String>,
+  ipv6: Option<String>,
+  observed_at: Instant,
+  /// Re-probing is forced when this stops matching reality, so connecting updates the card
+  /// immediately instead of after the TTL.
+  measured_while_connected: bool,
+}
 
 const DEFAULT_TUNNEL_BASENAME: &str = "primary";
+const EXTERNAL_IP_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Health polls every few seconds; probing that often would hammer a third-party service for a
+/// value that rarely changes. A connection state change bypasses this entirely.
+const EXTERNAL_IP_CACHE_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateVpnNodeRequest {
@@ -138,8 +157,21 @@ pub struct HealthSummary {
   pub handshake_age_seconds: Option<u64>,
   pub rx_bytes: Option<u64>,
   pub tx_bytes: Option<u64>,
+  /// The IPv4 address the internet currently sees for this machine, measured in every connection
+  /// state. `None` means the probe failed — never the server's own address, because substituting
+  /// it would make an unverified state indistinguishable from a verified one.
   pub external_ipv4: Option<String>,
+  /// The IPv6 address the internet currently sees, if the machine has IPv6 egress at all.
+  ///
+  /// This deployment's tunnel is IPv4-only — the bootstrap configures `iptables` MASQUERADE and
+  /// IPv4 forwarding, and the client interface has no IPv6 address — so any value present here
+  /// while connected is traffic leaving outside the tunnel.
+  pub external_ipv6: Option<String>,
   pub tunnel_status: Option<TunnelStatus>,
+  /// Which tier produced `rx_bytes`/`tx_bytes`; see `TunnelMetricsSource`.
+  pub metrics_source: Option<TunnelMetricsSource>,
+  /// When the current session began, or `None` if not connected or the start time is unknown.
+  pub connected_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,7 +229,50 @@ pub enum OrchestratorError {
 
 impl Orchestrator {
   pub fn new() -> Self {
-    Self
+    Self::with_ip_probe(Arc::new(HttpExternalIpProbe))
+  }
+
+  pub fn with_ip_probe(ip_probe: Arc<dyn ExternalIpProbe>) -> Self {
+    Self {
+      ip_probe,
+      external_ip: Arc::new(Mutex::new(None)),
+    }
+  }
+
+  /// The addresses the internet currently sees, cached.
+  ///
+  /// Probed regardless of connection state: the card's whole purpose is showing the address
+  /// change when the tunnel comes up, which needs a reading from both sides of the transition.
+  /// Both families are probed together so one family's timeout does not delay the other.
+  fn external_ips(&self, connected: bool, force: bool) -> (Option<String>, Option<String>) {
+    if !force {
+      if let Ok(cache) = self.external_ip.lock() {
+        if let Some(snapshot) = cache.as_ref() {
+          if snapshot.measured_while_connected == connected
+            && snapshot.observed_at.elapsed() < EXTERNAL_IP_CACHE_TTL
+          {
+            return (snapshot.ipv4.clone(), snapshot.ipv6.clone());
+          }
+        }
+      }
+    }
+
+    let v4_probe = Arc::clone(&self.ip_probe);
+    let v6_probe = Arc::clone(&self.ip_probe);
+    let v4_handle = std::thread::spawn(move || v4_probe.probe(IpFamily::V4));
+    let ipv6 = v6_probe.probe(IpFamily::V6);
+    let ipv4 = v4_handle.join().unwrap_or(None);
+
+    if let Ok(mut cache) = self.external_ip.lock() {
+      *cache = Some(ExternalIpSnapshot {
+        ipv4: ipv4.clone(),
+        ipv6: ipv6.clone(),
+        observed_at: Instant::now(),
+        measured_while_connected: connected,
+      });
+    }
+
+    (ipv4, ipv6)
   }
 
   pub fn status(&self) -> &'static str {
@@ -1318,12 +1393,16 @@ impl Orchestrator {
       })?;
 
     if status == TunnelStatus::Connected {
+      // Stamps the session start so the dashboard can show a real elapsed timer. Best-effort:
+      // an uptime display is not worth failing an otherwise successful connect over.
+      let _ = db.set_tunnel_connected_at(&request.tunnel_id, true);
       let _ = db.transition_vpn_node_status(&request.node_id, NodeLifecycleStatus::Connected, None);
       return Ok(());
     }
 
     let _ = wireguard.unregister_tunnel(&canonical_tunnel_name);
     let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Ready, Some("Tunnel runtime did not report Running; service was removed."));
+    let _ = db.set_tunnel_connected_at(&request.tunnel_id, false);
 
     Err(OrchestratorError::InvalidState {
       node_id: request.node_id.clone(),
@@ -1392,6 +1471,7 @@ impl Orchestrator {
       })?;
 
     let _ = db.update_tunnel_stats_snapshot(&request.tunnel_id, None, None, None);
+    let _ = db.set_tunnel_connected_at(&request.tunnel_id, false);
 
     db
       .update_tunnel_status(&request.tunnel_id, TunnelStatus::Disconnected, None)
@@ -1432,6 +1512,7 @@ impl Orchestrator {
       // Unregister stops the service as part of removal, so one elevated call does both.
       let _ = wireguard.unregister_tunnel(&tunnel.name);
       let _ = db.update_tunnel_stats_snapshot(&tunnel.id, None, None, None);
+      let _ = db.set_tunnel_connected_at(&tunnel.id, false);
       let _ = db.update_tunnel_status(&tunnel.id, TunnelStatus::Disconnected, Some("Best-effort force disconnect requested from dashboard."));
     }
 
@@ -1468,6 +1549,7 @@ impl Orchestrator {
         last_handshake_age_seconds: None,
         rx_bytes: None,
         tx_bytes: None,
+        metrics_source: None,
       },
       Err(source) => {
         return Err(OrchestratorError::WireGuard {
@@ -1495,6 +1577,9 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     node_id: &str,
     tunnel_id: Option<&str>,
+    // Bypasses the egress-IP cache. Set when the user explicitly asks for a refresh, so the
+    // button does something the ambient poll would not.
+    force_ip_probe: bool,
   ) -> Result<HealthSummary, OrchestratorError> {
     let node = db
       .get_vpn_node(node_id)
@@ -1566,11 +1651,22 @@ impl Orchestrator {
       crate::backend::wireguard::TunnelServiceState::Unknown => TunnelStatus::Error,
     });
 
-    let external_ipv4 = if matches!(runtime_status, Some(TunnelStatus::Connected)) {
-      probe_external_ipv4().or_else(|| node.public_ipv4.clone())
+    let effective_status = if service_missing {
+      Some(TunnelStatus::Disconnected)
     } else {
-      node.public_ipv4.clone()
+      runtime_status.or_else(|| selected_tunnel.as_ref().map(|tunnel| tunnel.status))
     };
+
+    // Reconcile the stored row against what the service actually reports. Without this the
+    // dashboard read a stale row and showed "Idle" with a Connect button while a tunnel was up.
+    if let (Some(tunnel), Some(status)) = (selected_tunnel.as_ref(), effective_status) {
+      self.reconcile_tunnel_status(db, tunnel, status);
+    }
+
+    // Measured in every state, so the card can show the address changing as the tunnel comes up.
+    // Cached, because health polls far more often than an egress address changes.
+    let connected = matches!(effective_status, Some(TunnelStatus::Connected));
+    let (external_ipv4, external_ipv6) = self.external_ips(connected, force_ip_probe);
 
     Ok(HealthSummary {
       node_id: node.id,
@@ -1580,12 +1676,35 @@ impl Orchestrator {
       rx_bytes: runtime.as_ref().and_then(|value| value.rx_bytes),
       tx_bytes: runtime.as_ref().and_then(|value| value.tx_bytes),
       external_ipv4,
-      tunnel_status: if service_missing {
-        Some(TunnelStatus::Disconnected)
+      external_ipv6,
+      tunnel_status: effective_status,
+      metrics_source: runtime.as_ref().and_then(|value| value.metrics_source),
+      connected_at: if matches!(effective_status, Some(TunnelStatus::Connected)) {
+        selected_tunnel.as_ref().and_then(|tunnel| tunnel.connected_at.clone())
       } else {
-        runtime_status.or_else(|| selected_tunnel.map(|tunnel| tunnel.status))
+        None
       },
     })
+  }
+
+  /// Write a runtime-observed status back onto the stored tunnel row.
+  ///
+  /// Health polling runs every few seconds, so this writes only when the value actually changed —
+  /// otherwise every poll would churn `updated_at`. An `Error` status is left alone because it
+  /// carries a `last_error` the user still needs; a real connect or disconnect clears it.
+  fn reconcile_tunnel_status(&self, db: &Database, tunnel: &TunnelRecord, observed: TunnelStatus) {
+    if tunnel.status == observed || tunnel.status == TunnelStatus::Error {
+      return;
+    }
+
+    if db.update_tunnel_status(&tunnel.id, observed, None).is_ok() {
+      // Session timing follows the reconciled state. A tunnel found running whose start time was
+      // never recorded keeps `connected_at = NULL`: the true start is unknowable here, and
+      // stamping "now" would show a timer counting from an arbitrary moment.
+      if observed == TunnelStatus::Disconnected {
+        let _ = db.set_tunnel_connected_at(&tunnel.id, false);
+      }
+    }
   }
 
   pub fn build_diagnostics_bundle(
@@ -1796,6 +1915,11 @@ impl Orchestrator {
 
             if reconciled_status != tunnel.status {
               let _ = db.update_tunnel_status(&tunnel.id, reconciled_status, None);
+              // A session that ended ends its clock. One found already running keeps whatever
+              // start time it has — including none, when the app did not start it.
+              if reconciled_status == TunnelStatus::Disconnected {
+                let _ = db.set_tunnel_connected_at(&tunnel.id, false);
+              }
               report.issues.push(ReconcileIssue {
                 kind: ReconcileIssueKind::StaleTunnelStatusRepaired,
                 node_id: Some(node.id.clone()),
@@ -1812,6 +1936,7 @@ impl Orchestrator {
           Err(WireGuardError::TunnelNotFound { .. }) => {
             if tunnel.status == TunnelStatus::Connected {
               let _ = db.update_tunnel_status(&tunnel.id, TunnelStatus::Disconnected, None);
+              let _ = db.set_tunnel_connected_at(&tunnel.id, false);
               report.issues.push(ReconcileIssue {
                 kind: ReconcileIssueKind::StaleTunnelStatusRepaired,
                 node_id: Some(node.id.clone()),
@@ -3250,12 +3375,269 @@ mod tests {
     // Reports no such service, exactly as `sc query` does for a tunnel that was never installed.
     let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::missing_service()));
 
-    let summary = Orchestrator::new()
-      .get_health_summary(&wireguard, &db, &secure_storage, "node-health", Some("tunnel-health"))
+    let summary = Orchestrator::with_ip_probe(StaticIpProbe::none())
+      .get_health_summary(&wireguard, &db, &secure_storage, "node-health", Some("tunnel-health"), false)
       .expect("a missing tunnel service must not fail the health summary");
 
     assert_eq!(summary.tunnel_status, Some(TunnelStatus::Disconnected));
     assert_eq!(summary.handshake_age_seconds, None);
+  }
+
+  /// Egress probe that answers from fixed values instead of the network.
+  ///
+  /// The health path probes on every call, so without this the normal `cargo test` run would make
+  /// live HTTP requests to a third-party IP service — non-deterministic, and a network dependency
+  /// the suite is not allowed to have.
+  struct StaticIpProbe {
+    ipv4: Option<String>,
+    ipv6: Option<String>,
+  }
+
+  impl StaticIpProbe {
+    fn none() -> Arc<dyn ExternalIpProbe> {
+      Arc::new(Self { ipv4: None, ipv6: None })
+    }
+
+    fn v4(address: &str) -> Arc<dyn ExternalIpProbe> {
+      Arc::new(Self { ipv4: Some(address.to_string()), ipv6: None })
+    }
+
+    fn both(v4: &str, v6: &str) -> Arc<dyn ExternalIpProbe> {
+      Arc::new(Self { ipv4: Some(v4.to_string()), ipv6: Some(v6.to_string()) })
+    }
+  }
+
+  impl ExternalIpProbe for StaticIpProbe {
+    fn probe(&self, family: IpFamily) -> Option<String> {
+      match family {
+        IpFamily::V4 => self.ipv4.clone(),
+        IpFamily::V6 => self.ipv6.clone(),
+      }
+    }
+  }
+
+  /// Sets up a ready node with one tunnel, so health-summary tests can vary only what matters.
+  fn health_fixture(label: &str) -> (Database, SecureStorage) {
+    let db = Database::new(test_db_path(label));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+
+    db.create_vpn_node("node-h", TEST_PROVIDER_ID, "Health Node", "nyc1")
+      .expect("node should insert");
+    for status in [
+      NodeLifecycleStatus::Provisioning,
+      NodeLifecycleStatus::Bootstrapping,
+      NodeLifecycleStatus::Ready,
+    ] {
+      db.transition_vpn_node_status(&"node-h".to_string(), status, None)
+        .expect("node transition should persist");
+    }
+    db.update_vpn_node_runtime_details("node-h", Some("42"), Some("203.0.113.10"), Some("k"), Some(51820))
+      .expect("runtime details should persist");
+    db.create_tunnel("tunnel-h", "node-h", "wg-h", Some("wg-h"))
+      .expect("tunnel should insert");
+
+    (db, secure_storage)
+  }
+
+  /// The bug this fixes: the dashboard read a stale row and showed "Idle" with a Connect button
+  /// while the tunnel service was running.
+  #[test]
+  fn health_summary_repairs_a_stale_disconnected_row_when_the_service_is_running() {
+    let (db, secure_storage) = health_fixture("health_reconcile_up");
+    db.update_tunnel_status("tunnel-h", TunnelStatus::Disconnected, None)
+      .expect("stale status should persist");
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    let summary = Orchestrator::with_ip_probe(StaticIpProbe::none())
+      .get_health_summary(&wireguard, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+
+    assert_eq!(summary.tunnel_status, Some(TunnelStatus::Connected));
+    let stored = db.get_tunnel("tunnel-h").expect("query").expect("row");
+    assert_eq!(
+      stored.status,
+      TunnelStatus::Connected,
+      "the stale row must be repaired, not just papered over in the response"
+    );
+  }
+
+  /// An `Error` row carries a `last_error` the user still needs; polling must not erase it.
+  #[test]
+  fn health_summary_reconciliation_preserves_an_error_status_and_its_last_error() {
+    let (db, secure_storage) = health_fixture("health_reconcile_error");
+    db.update_tunnel_status("tunnel-h", TunnelStatus::Error, Some("import failed"))
+      .expect("error status should persist");
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    Orchestrator::with_ip_probe(StaticIpProbe::none())
+      .get_health_summary(&wireguard, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+
+    let stored = db.get_tunnel("tunnel-h").expect("query").expect("row");
+    assert_eq!(stored.status, TunnelStatus::Error);
+    assert_eq!(stored.last_error.as_deref(), Some("import failed"));
+  }
+
+  /// Health polls every few seconds, so an unchanged status must not churn `updated_at`.
+  #[test]
+  fn health_summary_does_not_touch_the_row_when_the_status_already_matches() {
+    let (db, secure_storage) = health_fixture("health_reconcile_noop");
+    db.update_tunnel_status("tunnel-h", TunnelStatus::Connected, None)
+      .expect("status should persist");
+    let before = db.get_tunnel("tunnel-h").expect("query").expect("row").updated_at;
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    Orchestrator::with_ip_probe(StaticIpProbe::none())
+      .get_health_summary(&wireguard, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+
+    let after = db.get_tunnel("tunnel-h").expect("query").expect("row").updated_at;
+    assert_eq!(before, after, "an unchanged status must not bump updated_at on every poll");
+  }
+
+  /// The card shows the user their own address in both states, so the change on connect is the
+  /// evidence the tunnel works. That needs a reading from the disconnected side too.
+  #[test]
+  fn health_summary_measures_the_egress_ip_while_disconnected() {
+    let (db, secure_storage) = health_fixture("health_egress_down");
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+    let summary = Orchestrator::with_ip_probe(StaticIpProbe::v4("198.51.100.7"))
+      .get_health_summary(&wireguard, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+
+    assert_eq!(summary.tunnel_status, Some(TunnelStatus::Disconnected));
+    assert_eq!(summary.external_ipv4.as_deref(), Some("198.51.100.7"));
+    assert_eq!(
+      summary.endpoint_ip.as_deref(),
+      Some("203.0.113.10"),
+      "the server address stays a separate field, so the two can be compared"
+    );
+  }
+
+  /// Substituting the node's own address made "verified through the tunnel" indistinguishable
+  /// from "the probe failed", which let the UI claim a check it had not performed.
+  #[test]
+  fn health_summary_reports_a_failed_egress_probe_as_absent_not_as_the_server_address() {
+    let (db, secure_storage) = health_fixture("health_egress_failed");
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    let summary = Orchestrator::with_ip_probe(StaticIpProbe::none())
+      .get_health_summary(&wireguard, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+
+    assert_eq!(summary.tunnel_status, Some(TunnelStatus::Connected));
+    assert_eq!(summary.external_ipv4, None);
+    assert_ne!(
+      summary.external_ipv4, summary.endpoint_ip,
+      "a failed probe must never be reported as a verified match against the server"
+    );
+  }
+
+  /// This deployment's tunnel is IPv4-only, so any IPv6 egress while connected is traffic leaving
+  /// outside it. The field has to survive to the UI for that to be visible.
+  #[test]
+  fn health_summary_reports_ipv6_egress_separately() {
+    let (db, secure_storage) = health_fixture("health_egress_v6");
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    let summary = Orchestrator::with_ip_probe(StaticIpProbe::both("203.0.113.10", "2001:db8::1"))
+      .get_health_summary(&wireguard, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+
+    assert_eq!(summary.external_ipv4.as_deref(), Some("203.0.113.10"));
+    assert_eq!(summary.external_ipv6.as_deref(), Some("2001:db8::1"));
+  }
+
+  /// Health polls every few seconds. Probing a third-party service that often would be abusive,
+  /// but a connection change must still update the card immediately rather than after the TTL.
+  #[test]
+  fn egress_probe_is_cached_across_polls_and_reprobed_when_the_connection_changes() {
+    struct CountingProbe {
+      calls: Mutex<usize>,
+    }
+
+    impl ExternalIpProbe for CountingProbe {
+      fn probe(&self, family: IpFamily) -> Option<String> {
+        if family == IpFamily::V4 {
+          let mut calls = self.calls.lock().expect("probe counter should lock");
+          *calls += 1;
+          return Some(format!("198.51.100.{}", *calls));
+        }
+        None
+      }
+    }
+
+    let (db, secure_storage) = health_fixture("health_egress_cache");
+    let probe = Arc::new(CountingProbe { calls: Mutex::new(0) });
+    let orchestrator = Orchestrator::with_ip_probe(probe.clone());
+
+    let stopped = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+    let first = orchestrator
+      .get_health_summary(&stopped, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+    let second = orchestrator
+      .get_health_summary(&stopped, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+
+    assert_eq!(
+      first.external_ipv4, second.external_ipv4,
+      "a repeat poll in the same state must be served from cache"
+    );
+    assert_eq!(*probe.calls.lock().expect("counter"), 1);
+
+    // Connecting changes the answer, so the cache must not be trusted across the transition.
+    let running = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    let after_connect = orchestrator
+      .get_health_summary(&running, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+
+    assert_ne!(first.external_ipv4, after_connect.external_ipv4);
+    assert_eq!(*probe.calls.lock().expect("counter"), 2);
+
+    // An explicit user refresh re-probes even though nothing else changed.
+    orchestrator
+      .get_health_summary(&running, &db, &secure_storage, "node-h", Some("tunnel-h"), true)
+      .expect("health summary should succeed");
+    assert_eq!(*probe.calls.lock().expect("counter"), 3);
+  }
+
+  /// A disconnected tunnel has no session, so it must not report a start time.
+  #[test]
+  fn health_summary_reports_no_session_start_while_disconnected() {
+    let (db, secure_storage) = health_fixture("health_connected_at_down");
+    db.set_tunnel_connected_at("tunnel-h", true)
+      .expect("stale session start should persist");
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+    let summary = Orchestrator::with_ip_probe(StaticIpProbe::none())
+      .get_health_summary(&wireguard, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+
+    assert_eq!(summary.connected_at, None);
+  }
+
+  /// A tunnel found already running has no knowable start time. Stamping "now" would render a
+  /// timer counting from an arbitrary moment, which reads as fact.
+  #[test]
+  fn reconciliation_does_not_invent_a_session_start_for_an_already_running_tunnel() {
+    let (db, secure_storage) = health_fixture("health_connected_at_unknown");
+    db.update_tunnel_status("tunnel-h", TunnelStatus::Disconnected, None)
+      .expect("status should persist");
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    let summary = Orchestrator::with_ip_probe(StaticIpProbe::none())
+      .get_health_summary(&wireguard, &db, &secure_storage, "node-h", Some("tunnel-h"), false)
+      .expect("health summary should succeed");
+
+    assert_eq!(summary.tunnel_status, Some(TunnelStatus::Connected));
+    assert_eq!(
+      summary.connected_at, None,
+      "an unknown start time must stay unknown rather than being backfilled"
+    );
   }
 
   /// Full backend path against a real DigitalOcean droplet.
@@ -3876,43 +4258,76 @@ fn extract_tunnel_name_from_wireguard_error(source_text: &str) -> Option<String>
   }
 }
 
-fn probe_external_ipv4() -> Option<String> {
-  let client = reqwest::blocking::Client::builder()
-    .timeout(Duration::from_secs(3))
-    .build()
-    .ok()?;
+/// Which address family an egress probe should report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpFamily {
+  V4,
+  V6,
+}
 
-  let endpoints = [
-    "https://api.ipify.org",
-    "https://ipv4.icanhazip.com",
-  ];
-
-  for endpoint in endpoints {
-    let response = match client.get(endpoint).send() {
-      Ok(value) => value,
-      Err(_) => continue,
-    };
-    if !response.status().is_success() {
-      continue;
-    }
-
-    let body = match response.text() {
-      Ok(value) => value,
-      Err(_) => continue,
-    };
-    let candidate = body.lines().next().unwrap_or_default().trim();
-    if candidate.is_empty() {
-      continue;
-    }
-
-    if let Ok(parsed) = candidate.parse::<IpAddr>() {
-      if parsed.is_ipv4() {
-        return Some(parsed.to_string());
-      }
+impl IpFamily {
+  /// Hosts that resolve on this family only, which is what forces the request onto it.
+  fn endpoints(self) -> [&'static str; 2] {
+    match self {
+      Self::V4 => ["https://api.ipify.org", "https://ipv4.icanhazip.com"],
+      Self::V6 => ["https://api6.ipify.org", "https://ipv6.icanhazip.com"],
     }
   }
 
-  None
+  fn matches(self, address: &IpAddr) -> bool {
+    match self {
+      Self::V4 => address.is_ipv4(),
+      Self::V6 => address.is_ipv6(),
+    }
+  }
+}
+
+/// Reads the address the internet currently sees for this machine.
+///
+/// Injectable so the normal test suite never makes a network call — the health path probes on any
+/// connected tunnel, so a hardcoded implementation would have put live HTTP requests in unit tests.
+pub trait ExternalIpProbe: Send + Sync {
+  fn probe(&self, family: IpFamily) -> Option<String>;
+}
+
+pub struct HttpExternalIpProbe;
+
+impl ExternalIpProbe for HttpExternalIpProbe {
+  fn probe(&self, family: IpFamily) -> Option<String> {
+    let client = reqwest::blocking::Client::builder()
+      .timeout(EXTERNAL_IP_PROBE_TIMEOUT)
+      .build()
+      .ok()?;
+
+    for endpoint in family.endpoints() {
+      let response = match client.get(endpoint).send() {
+        Ok(value) => value,
+        Err(_) => continue,
+      };
+      if !response.status().is_success() {
+        continue;
+      }
+
+      let body = match response.text() {
+        Ok(value) => value,
+        Err(_) => continue,
+      };
+      let candidate = body.lines().next().unwrap_or_default().trim();
+      if candidate.is_empty() {
+        continue;
+      }
+
+      // A v6 endpoint answering with a v4 address (or the reverse) means something rewrote the
+      // request; reporting it under the wrong family would misdescribe the route.
+      if let Ok(parsed) = candidate.parse::<IpAddr>() {
+        if family.matches(&parsed) {
+          return Some(parsed.to_string());
+        }
+      }
+    }
+
+    None
+  }
 }
 
 fn canonical_tunnel_name_for_node(node_name: &str) -> String {

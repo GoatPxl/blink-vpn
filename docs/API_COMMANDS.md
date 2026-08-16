@@ -52,7 +52,7 @@ Provider adapters currently included:
 | `list_providers` | none | `ProviderRecord[]` | Local provider records |
 | `list_tunnels_for_node` | `node_id` | `TunnelRecord[]` | Local tunnels for node |
 | `read_client_tunnel_status` | `tunnel_id` | `string` | Runtime status summary |
-| `get_health_panel_data` | `node_id`, `tunnel_id?` | `HealthPanelData` | Health card payload |
+| `get_health_panel_data` | `node_id`, `tunnel_id?` | `HealthPanelData` | Health card payload. Also reconciles a stale tunnel row against the live service state — see below |
 | `get_diagnostics_bundle` | none | `DiagnosticsBundleResponse` | Sanitized diagnostics payload |
 | `export_diagnostics_bundle` | none | `string` | Path to exported diagnostics JSON |
 | `check_docker_readiness` | none | `DockerReadinessResponse` | Docker runtime readiness signal |
@@ -98,6 +98,55 @@ Response:
 ```text
 Create node complete: node_id=node-1, droplet_id=42, endpoint_ip=203.0.113.10, listen_port=51820, correlation_id=..., idempotent_reuse=false
 ```
+
+### Health panel payload
+
+```json
+{
+  "node_id": "node-1",
+  "tunnel_id": "tunnel-node-1",
+  "endpoint_ip": "203.0.113.10",
+  "handshake_age_seconds": null,
+  "rx_bytes": 184320,
+  "tx_bytes": 90112,
+  "external_ipv4": "203.0.113.10",
+  "external_ipv6": null,
+  "tunnel_status": "connected",
+  "metrics_source": "adapter",
+  "connected_at": "2026-08-15T10:00:00.000Z"
+}
+```
+
+Takes an optional `force_ip_probe` flag. The egress addresses are cached for 60 seconds because
+health polls far more often than an address changes; the cache is bypassed automatically whenever
+the connection state changes, and explicitly when the user asks for a refresh. Leave it off for
+ambient polling or the app will hammer a third-party IP service.
+
+Five fields carry meaning in their absence, and callers must not paper over it:
+
+| Field | `null` means | Never |
+|---|---|---|
+| `external_ipv4` | The egress probe failed | Substituted with `endpoint_ip`. Comparing the two is the egress check, so a stand-in would make "verified" and "never checked" identical |
+| `external_ipv6` | This machine has no IPv6 egress | Treated as an error — for this deployment it is the *desired* state, see below |
+| `handshake_age_seconds` | `wg show` needs administrator (see AGENTS.md §4) | Reported as `0` |
+| `rx_bytes` / `tx_bytes` | No counters could be read | Reported as `0`, which would claim a measured idle tunnel |
+| `connected_at` | Not connected, or the session started before the app was watching | Backfilled with the current time |
+
+`external_ipv4` is measured in **every** connection state, not only while connected — the address
+changing as the tunnel comes up is the user-visible evidence that it carries traffic.
+
+**IPv6 is not carried by this tunnel.** The bootstrap configures `iptables` MASQUERADE and IPv4
+forwarding only, and the client interface is issued a `/32` with no IPv6 address. A non-null
+`external_ipv6` while connected therefore means IPv6 traffic is reaching the internet *outside*
+the tunnel, and the dashboard reports it as a bypass. If IPv6 egress is ever wanted, it needs
+`ip6tables` rules, an IPv6 server CIDR, and an IPv6 client address — not a UI change.
+
+`metrics_source` names the tier that produced the byte counters — `peer` (`wg show`, elevated) or
+`adapter` (Win32 `GetIfTable2`, unelevated). The two count different things, so anything
+differencing samples over time must reset its baseline when this value changes.
+
+This command also repairs a stale tunnel row when the stored status disagrees with the live
+service, writing only on an actual change and never over an `Error` status.
 
 ## Error Envelope
 

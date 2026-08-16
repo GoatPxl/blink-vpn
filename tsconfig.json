@@ -6,6 +6,9 @@
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
+    // Node's built-in test runner strips types and resolves the on-disk path, so unit tests
+    // import source modules by their real `.ts` filename. Safe with noEmit: nothing is rewritten.
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",

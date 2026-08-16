@@ -22,6 +22,7 @@ import {
   validateProviderToken,
   type DockerReadiness,
   type ProviderRecord,
+  type TunnelMetricsSource,
   type TunnelRecord,
   type VpnNodeRecord,
   toCommandError,
@@ -61,6 +62,16 @@ type ThroughputSample = {
   uploadBytesPerSecond: number;
 };
 
+/**
+ * Whether a snapshot describes a live tunnel.
+ *
+ * Only a connected tunnel has throughput to plot. Sampling a disconnected one fed the chart a
+ * run of zeros that looked like a connected tunnel sitting idle.
+ */
+function snapshotIsConnected(snapshot: HealthPanelData): boolean {
+  return snapshot.tunnel_status?.toLowerCase() === "connected";
+}
+
 type DashboardContextValue = {
   busyAction: DashboardBusyAction;
   toasts: Toast[];
@@ -93,7 +104,8 @@ type DashboardContextValue = {
   activeNode: VpnNodeRecord | null;
   connectedTunnel: TunnelRecord | null;
   noServerConfigured: boolean;
-  canConnect: boolean;
+  /** Live service state, not the stored row. The one value every connection widget keys off. */
+  tunnelConnected: boolean;
   throughputSamples: ThroughputSample[];
   loadDashboard: (preferredSelectedNodeId?: string) => Promise<void>;
   refreshHealth: () => Promise<void>;
@@ -173,16 +185,24 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     tunnelId: string;
     rxBytes: number;
     txBytes: number;
+    metricsSource: TunnelMetricsSource | null;
   } | null>(null);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
   const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
   const noServerConfigured = nodes.length === 0;
-  const activeNodeIsConnected = activeNode?.lifecycle_status.toLowerCase() === "connected";
-  const canConnect = !!activeNode
-    && (!connectedTunnel
-      || (connectedTunnel.status.toLowerCase() !== "connected" && !activeNodeIsConnected));
+
+  // The live Windows service decides whether a tunnel is up; the stored row is only a fallback
+  // for the moment before the first health snapshot arrives.
+  //
+  // These disagreed. The row went stale whenever a tunnel changed state outside a completed
+  // connect flow, and reading it made the dashboard show "Idle" with a Connect button while the
+  // handshake card on the same screen — fed by the runtime — correctly read "connected".
+  const runtimeStatus = health?.tunnel_status?.toLowerCase() ?? null;
+  const tunnelConnected = runtimeStatus !== null
+    ? runtimeStatus === "connected"
+    : connectedTunnel?.status.toLowerCase() === "connected";
 
   useEffect(() => {
     providerIdRef.current = providerId;
@@ -224,20 +244,32 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const recordThroughputSample = useCallback((snapshot: HealthPanelData) => {
+    // Counters absent means they could not be read, which is not the same claim as "no traffic".
+    // Coercing to zero drew a flat line that was indistinguishable from a genuinely idle tunnel.
+    if (snapshot.rx_bytes === null || snapshot.tx_bytes === null) {
+      lastTrafficSampleRef.current = null;
+      return;
+    }
+
     const now = Date.now();
     const nodeId = snapshot.node_id;
     const tunnelId = snapshot.tunnel_id ?? "";
-    const rxBytes = snapshot.rx_bytes ?? 0;
-    const txBytes = snapshot.tx_bytes ?? 0;
+    const rxBytes = snapshot.rx_bytes;
+    const txBytes = snapshot.tx_bytes;
+    const metricsSource = snapshot.metrics_source;
     const previous = lastTrafficSampleRef.current;
 
     let downloadBytesPerSecond = 0;
     let uploadBytesPerSecond = 0;
 
+    // A delta is only meaningful between two readings of the same counter. `wg show` and the
+    // adapter count different things, so a tier switch (gaining or losing elevation) changes the
+    // basis mid-series — differencing across it invents a spike the size of the whole offset.
     if (
       previous
       && previous.nodeId === nodeId
       && previous.tunnelId === tunnelId
+      && previous.metricsSource === metricsSource
       && now > previous.timestamp
     ) {
       const elapsedSeconds = (now - previous.timestamp) / 1000;
@@ -247,13 +279,25 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       }
     }
 
+    const isBaseline = previous === null
+      || previous.nodeId !== nodeId
+      || previous.tunnelId !== tunnelId
+      || previous.metricsSource !== metricsSource;
+
     lastTrafficSampleRef.current = {
       timestamp: now,
       nodeId,
       tunnelId,
       rxBytes,
       txBytes,
+      metricsSource,
     };
+
+    // The first reading establishes the baseline; there is no earlier counter to subtract, so it
+    // carries no rate. Plotting its zero would render as a drop to idle.
+    if (isBaseline) {
+      return;
+    }
 
     setThroughputSamples((current) => [
       ...current,
@@ -383,7 +427,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
       const nextHealth = await getHealthPanelData(nodeIdValue, loadedTunnels[0]?.id ?? null);
       setHealth(nextHealth);
-      if (nextHealth.tunnel_id) {
+      if (nextHealth.tunnel_id && snapshotIsConnected(nextHealth)) {
         recordThroughputSample(nextHealth);
       } else {
         clearThroughputSamples();
@@ -403,10 +447,18 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const snapshot = await getHealthPanelData(selectedNodeIdRef.current, selectedTunnelIdRef.current || null);
+      // A user-initiated refresh bypasses the backend's egress-IP cache; the ambient poll does
+      // not, so polling never hammers the third-party IP service.
+      const snapshot = await getHealthPanelData(
+        selectedNodeIdRef.current,
+        selectedTunnelIdRef.current || null,
+        !silent,
+      );
       setHealth(snapshot);
-      if (snapshot.tunnel_id) {
+      if (snapshot.tunnel_id && snapshotIsConnected(snapshot)) {
         recordThroughputSample(snapshot);
+      } else {
+        clearThroughputSamples();
       }
     } catch (error) {
       if (!silent) {
@@ -417,7 +469,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         setBusyAction(null);
       }
     }
-  }, [handleError, recordThroughputSample]);
+  }, [clearThroughputSamples, handleError, recordThroughputSample]);
 
   const refreshHealth = useCallback(async () => {
     await refreshHealthSnapshot(false);
@@ -1005,7 +1057,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     activeNode,
     connectedTunnel,
     noServerConfigured,
-    canConnect,
+    tunnelConnected,
     throughputSamples,
     loadDashboard,
     refreshHealth,

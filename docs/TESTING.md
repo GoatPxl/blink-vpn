@@ -19,6 +19,7 @@ them down before asserting anything, so a failed assertion cannot strand a dropl
 | Layer | What it covers | Cost |
 |---|---|---|
 | Rust unit/integration | state machine, parsers, config rendering, redaction, retry, error mapping | free, deterministic |
+| Frontend unit | pure presentation logic — formatters, state-to-label mapping | free, deterministic |
 | Real Docker backend | provisioning, bootstrap readiness, teardown against a live daemon | needs Docker |
 | Real Tauri E2E | the app itself — UI, commands, backend, daemon | needs Docker |
 | Real DigitalOcean | the production path against a live droplet | **billable** |
@@ -27,13 +28,26 @@ them down before asserting anything, so a failed assertion cannot strand a dropl
 
 | Change scope | Commands |
 |---|---|
-| Frontend only | `npm run typecheck` · `npm run lint` |
+| Frontend only | `npm run typecheck` · `npm run lint` · `npm run test:unit` |
 | Rust backend only | `cargo test --manifest-path src-tauri/Cargo.toml` |
 | Cross-boundary | both of the above |
 | Docker provider / bootstrap | `npm run backend:test:docker:real` |
 | UI or command surface | `npm run tauri:e2e:provisioning` |
 | Connect / disconnect | `npm run tauri:e2e:connect` (**elevated shell**) |
 | Provider adapter or cloud-init | `npm run backend:test:do:real` (**billable**) |
+
+## Frontend unit lane
+
+```bash
+npm run test:unit
+```
+
+Runs on Node's built-in test runner with native type stripping — no test framework dependency.
+Tests live in `tests/unit/*.test.mts` and import source modules directly by path.
+
+Type stripping cannot handle JSX, so anything under test must live in a plain `.ts` module.
+`src/lib/connection-display.ts` is the pattern: pure state-to-display logic pulled out of the
+components, which is also what makes the "is this value real or a placeholder" question testable.
 
 ## Real Lanes
 
