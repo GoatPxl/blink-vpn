@@ -34,7 +34,7 @@ Provider adapters currently included:
 | --- | --- | --- | --- |
 | `hello` | `name?: string` | `string` | Connectivity sanity check |
 | `register_provider_token` | `provider_id`, `provider_name`, `api_token` | `string` | Stores the credential in secure storage and persists its reference. Provider-neutral: the adapter is resolved from the stored provider record, so there is no per-provider command. |
-| `validate_provider_token` | `provider_id` | `string` | Adapter-level token validation |
+| `validate_provider_token` | `provider_id` | `string` | Checks the stored key through the adapter and records the verdict on that provider row. Reads the *stored* key, so it never validates something newly typed but unsaved |
 | `list_provider_regions` | `provider_id` | `ProviderRegion[]` | Region catalog with normalized geography — see below |
 | `list_provider_pricing` | `provider_id`, `region` | `ProviderPricingResponse` | Plan and pricing catalog |
 | `create_vpn_node_to_ready` | `node_id`, `provider_id`, `node_name`, `region`, `plan_key` | `string` | Provision and bootstrap workflow |
@@ -53,7 +53,7 @@ Provider adapters currently included:
 | `set_current_node_id` | `node_id` (nullable) | `void` | Sets or clears the default node; rejects an unknown id |
 | `get_tunnel_settings` | none | `TunnelSettings` | DNS server and keepalive used when a tunnel next starts |
 | `set_tunnel_settings` | `dns_server` (nullable), `keepalive_seconds` | `void` | Validates before storing; a non-IP DNS value is rejected with `invalid-input` |
-| `list_providers` | none | `ProviderRecord[]` | Local provider records |
+| `list_providers` | none | `ProviderRecord[]` | Local provider records, including `last_validation_status` / `last_validated_at` from the last key check |
 | `list_tunnels_for_node` | `node_id` | `TunnelRecord[]` | Local tunnels for node |
 | `read_client_tunnel_status` | `tunnel_id` | `string` | Runtime status summary |
 | `get_health_panel_data` | `node_id`, `tunnel_id?` | `HealthPanelData` | Health card payload. Also reconciles a stale tunnel row against the live service state — see below |

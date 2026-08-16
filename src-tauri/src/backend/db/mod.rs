@@ -21,6 +21,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (13, include_str!("../../../migrations/0013_vpn_node_endpoint_port.sql")),
   (14, include_str!("../../../migrations/0014_drop_wireguard_connection_mode.sql")),
   (15, include_str!("../../../migrations/0015_tunnel_connected_at.sql")),
+  (16, include_str!("../../../migrations/0016_provider_validation_result.sql")),
 ];
 
 
@@ -210,6 +211,11 @@ pub struct ProviderRecord {
   pub status: ProviderStatus,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub token_ref: Option<String>,
+  /// `"ok"` or `"failed"` from the last key check, or `None` if it has never been checked.
+  pub last_validation_status: Option<String>,
+  /// When that check ran. Travels with the result so a stale verdict can show its age instead of
+  /// asserting a check that may no longer hold.
+  pub last_validated_at: Option<String>,
   pub created_at: String,
   pub updated_at: String,
 }
@@ -426,7 +432,7 @@ impl Database {
     let connection = self.open_connection()?;
     let mut statement = connection
       .prepare(
-        "SELECT id, name, slug, status, token_ref, created_at, updated_at
+        "SELECT id, name, slug, status, token_ref, last_validation_status, last_validated_at, created_at, updated_at
          FROM providers
          ORDER BY created_at ASC",
       )
@@ -458,7 +464,7 @@ impl Database {
     let connection = self.open_connection()?;
     connection
       .query_row(
-        "SELECT id, name, slug, status, token_ref, created_at, updated_at
+        "SELECT id, name, slug, status, token_ref, last_validation_status, last_validated_at, created_at, updated_at
          FROM providers WHERE id = ?1",
         params![id],
         map_provider_row,
@@ -1084,6 +1090,32 @@ impl Database {
     Ok(())
   }
 
+  /// Records the outcome of checking a provider's key, so the verdict survives a restart.
+  ///
+  /// `None` clears it, which is what a key change or removal must do — a result describes the key
+  /// that was checked, not the provider, so carrying it onto a replacement key would mark an
+  /// unchecked credential as verified.
+  pub fn record_provider_validation(&self, id: &str, passed: Option<bool>) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let status = passed.map(|value| if value { "ok" } else { "failed" });
+
+    connection
+      .execute(
+        "UPDATE providers
+         SET last_validation_status = ?2,
+             last_validated_at = CASE WHEN ?2 IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%fZ', 'now') END
+         WHERE id = ?1",
+        params![id, status],
+      )
+      .map_err(|source| DbError::Query {
+        action: "record_provider_validation",
+        detail: "Failed recording provider validation result.".to_string(),
+        source,
+      })?;
+
+    Ok(())
+  }
+
   /// Reads a global app setting, or `None` when it was never set.
   pub fn get_setting(&self, key: &str) -> Result<Option<String>, DbError> {
     let connection = self.open_connection()?;
@@ -1308,8 +1340,10 @@ fn map_provider_row(row: &Row<'_>) -> rusqlite::Result<ProviderRecord> {
     slug: row.get(2)?,
     status,
     token_ref: row.get(4)?,
-    created_at: row.get(5)?,
-    updated_at: row.get(6)?,
+    last_validation_status: row.get(5)?,
+    last_validated_at: row.get(6)?,
+    created_at: row.get(7)?,
+    updated_at: row.get(8)?,
   })
 }
 
@@ -1538,6 +1572,35 @@ mod tests {
       None,
       "disconnecting ends the session",
     );
+  }
+
+  /// The verdict has to outlive the process, or every stored key reads "not checked" on launch.
+  #[test]
+  fn provider_validation_result_persists_and_can_be_cleared() {
+    let db = setup_db("provider_validation");
+    db.create_provider("provider-v", "DigitalOcean", "do-v", None)
+      .expect("provider insert should succeed");
+
+    let fresh = db.get_provider("provider-v").expect("query").expect("row");
+    assert_eq!(fresh.last_validation_status, None, "a new provider has not been checked");
+    assert_eq!(fresh.last_validated_at, None);
+
+    db.record_provider_validation("provider-v", Some(true)).expect("record should succeed");
+    let passed = db.get_provider("provider-v").expect("query").expect("row");
+    assert_eq!(passed.last_validation_status.as_deref(), Some("ok"));
+    assert!(passed.last_validated_at.is_some(), "a verdict carries its timestamp");
+
+    db.record_provider_validation("provider-v", Some(false)).expect("record should succeed");
+    assert_eq!(
+      db.get_provider("provider-v").expect("query").expect("row").last_validation_status.as_deref(),
+      Some("failed"),
+    );
+
+    // Clearing must drop the timestamp too, so nothing can render "checked never".
+    db.record_provider_validation("provider-v", None).expect("clear should succeed");
+    let cleared = db.get_provider("provider-v").expect("query").expect("row");
+    assert_eq!(cleared.last_validation_status, None);
+    assert_eq!(cleared.last_validated_at, None);
   }
 
   #[test]

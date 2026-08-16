@@ -6,6 +6,7 @@ import {
   countAttachedNodes,
   deriveProviderKeyStatus,
   describeKeepalive,
+  describeKeyState,
   validateDnsServer,
   validateKeepalive,
 } from "../../src/lib/settings-display.ts";
@@ -18,6 +19,8 @@ function provider(overrides: Partial<ProviderRecord> = {}): ProviderRecord {
     slug: "digitalocean",
     status: "active",
     token_ref: "do-token__provider-1__abc",
+    last_validation_status: null,
+    last_validated_at: null,
     created_at: "2026-08-16T00:00:00.000Z",
     updated_at: "2026-08-16T00:00:00.000Z",
     ...overrides,
@@ -29,47 +32,74 @@ function node(providerId: string, id: string): VpnNodeRecord {
 }
 
 describe("deriveProviderKeyStatus", () => {
-  const base = { provider: provider(), hasKey: true, isSelected: true };
-
   // The bug this replaces: the old table read only `token_ref` and `status`, so a key the provider
   // had rejected still rendered "Installed / Active".
   it("reports a rejected key as invalid", () => {
-    assert.equal(deriveProviderKeyStatus({ ...base, providerAccess: "invalid" }), "invalid");
+    const record = provider({ last_validation_status: "failed" });
+    assert.equal(deriveProviderKeyStatus({ provider: record, hasKey: true }), "invalid");
   });
 
   it("reports a validated key as verified", () => {
-    assert.equal(deriveProviderKeyStatus({ ...base, providerAccess: "ready" }), "verified");
+    const record = provider({ last_validation_status: "ok" });
+    assert.equal(deriveProviderKeyStatus({ provider: record, hasKey: true }), "verified");
   });
 
   it("reports a stored but unchecked key as unverified", () => {
-    assert.equal(deriveProviderKeyStatus({ ...base, providerAccess: "unknown" }), "unverified");
+    assert.equal(deriveProviderKeyStatus({ provider: provider(), hasKey: true }), "unverified");
   });
 
-  it("reports a missing key regardless of access state", () => {
-    assert.equal(
-      deriveProviderKeyStatus({ ...base, hasKey: false, providerAccess: "ready" }),
-      "missing",
-    );
+  it("reports a missing key regardless of any past verdict", () => {
+    const record = provider({ token_ref: null, last_validation_status: "ok" });
+    assert.equal(deriveProviderKeyStatus({ provider: record, hasKey: false }), "missing");
   });
 
   // Suspension is the more actionable fact: operations will refuse whatever the key's state.
   it("lets suspension outrank verification", () => {
-    assert.equal(
-      deriveProviderKeyStatus({
-        ...base,
-        provider: provider({ status: "suspended" }),
-        providerAccess: "ready",
-      }),
-      "suspended",
-    );
+    const record = provider({ status: "suspended", last_validation_status: "ok" });
+    assert.equal(deriveProviderKeyStatus({ provider: record, hasKey: true }), "suspended");
   });
 
-  // Validation state describes the selected provider only, so it must not leak onto other rows.
-  it("does not apply the selected provider's validation result to other rows", () => {
-    assert.equal(
-      deriveProviderKeyStatus({ ...base, isSelected: false, providerAccess: "invalid" }),
-      "unverified",
-    );
+  /**
+   * Each provider carries its own verdict on its own record.
+   *
+   * With one shared value, checking Docker moved DigitalOcean's "Verified" badge onto Docker and
+   * back again on the next check — the badge appeared to toggle between rows rather than describe
+   * either of them.
+   */
+  it("keeps each provider's result independent", () => {
+    const digitalOcean = provider({ id: "provider-1", last_validation_status: "ok" });
+    const docker = provider({ id: "provider-docker", slug: "docker", last_validation_status: "failed" });
+
+    assert.equal(deriveProviderKeyStatus({ provider: digitalOcean, hasKey: true }), "verified");
+    assert.equal(deriveProviderKeyStatus({ provider: docker, hasKey: true }), "invalid");
+
+    // Checking Docker changes only Docker's record.
+    const dockerChecked = provider({ id: "provider-docker", slug: "docker", last_validation_status: "ok" });
+    assert.equal(deriveProviderKeyStatus({ provider: dockerChecked, hasKey: true }), "verified");
+    assert.equal(deriveProviderKeyStatus({ provider: digitalOcean, hasKey: true }), "verified");
+  });
+});
+
+describe("describeKeyState", () => {
+  const CHECKED_AT = "2026-08-16T10:00:00.000Z";
+  const now = Date.parse(CHECKED_AT);
+
+  it("says when a key was last checked", () => {
+    const record = provider({ last_validation_status: "ok", last_validated_at: CHECKED_AT });
+    assert.equal(describeKeyState(record, now + 30_000), "Checked just now");
+    assert.equal(describeKeyState(record, now + 5 * 60_000), "Checked 5m ago");
+    assert.equal(describeKeyState(record, now + 3 * 3_600_000), "Checked 3h ago");
+    assert.equal(describeKeyState(record, now + 2 * 86_400_000), "Checked 2d ago");
+  });
+
+  // A verdict with no age would keep asserting a check that may be weeks old and since revoked.
+  it("distinguishes a stored key that has never been checked", () => {
+    const record = provider({ last_validation_status: null, last_validated_at: null });
+    assert.match(describeKeyState(record, now), /not checked yet/i);
+  });
+
+  it("reports no key at all", () => {
+    assert.equal(describeKeyState(provider({ token_ref: null }), now), "No key stored");
   });
 });
 

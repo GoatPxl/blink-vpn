@@ -90,12 +90,19 @@ export type TunnelStatus =
 
 export type ProviderStatus = "active" | "suspended";
 
+/** Outcome of the last key check, persisted so it survives a restart. */
+export type ProviderValidationStatus = "ok" | "failed";
+
 export interface ProviderRecord {
   id: string;
   name: string;
   slug: string;
   status: ProviderStatus;
   token_ref: string | null;
+  /** Null when the key has never been checked, or when it was cleared because the key changed. */
+  last_validation_status: ProviderValidationStatus | null;
+  /** When that check ran, so a verdict can show its age rather than implying it is current. */
+  last_validated_at: string | null;
   created_at: string;
   updated_at: string;
 }

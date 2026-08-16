@@ -2,7 +2,6 @@
 
 import { SettingsView } from "@/components/dashboard/settings-view";
 import { useDashboard } from "@/components/dashboard/dashboard-provider";
-import type { ProviderAccess } from "@/lib/settings-display";
 import type { ProviderRecord } from "@/lib/tauri";
 import { useCallback } from "react";
 
@@ -14,17 +13,15 @@ export default function DashboardSettingsPage() {
     deleteProvider,
     dockerDevEnabled,
     nodes,
-    providerAccessState,
-    providerId,
     providers,
     resumeProvider,
     saveToken,
     saveTunnelSettings,
-    selectProviderId,
     suspendProvider,
     tunnelConnected,
     tunnelSettings,
-    validateToken,
+    validateProviderKey,
+    validatingProviderId,
     wireguardReadiness,
   } = useDashboard();
 
@@ -35,11 +32,10 @@ export default function DashboardSettingsPage() {
   }, [saveToken]);
 
   const handleRevalidate = useCallback(async (provider: ProviderRecord) => {
-    // Validation reads the stored credential for the selected provider, so point it at this row
-    // first — otherwise it would re-check whichever provider happened to be selected.
-    selectProviderId(provider.id);
-    await validateToken();
-  }, [selectProviderId, validateToken]);
+    // Checks this provider and records the result against it. Notably does *not* change the
+    // app-wide selected provider — doing so made the Verified badge jump between rows.
+    await validateProviderKey(provider.id);
+  }, [validateProviderKey]);
 
   const handleReconnect = useCallback(async () => {
     if (connectedTunnel) {
@@ -50,10 +46,9 @@ export default function DashboardSettingsPage() {
   return (
     <SettingsView
       dockerDevEnabled={dockerDevEnabled}
-      providerId={providerId}
       providers={providers}
       nodes={nodes}
-      providerAccessState={providerAccessState as ProviderAccess}
+      validatingProviderId={validatingProviderId}
       onSaveKey={handleSaveKey}
       onRevalidate={handleRevalidate}
       onSuspendProvider={suspendProvider}

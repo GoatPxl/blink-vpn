@@ -132,7 +132,10 @@ type DashboardContextValue = {
   refreshHealth: () => Promise<void>;
   /** Saves and validates in one step. Resolves true only when the key was stored. */
   saveToken: (apiToken: string, targetProviderId?: string) => Promise<boolean>;
-  validateToken: () => Promise<void>;
+  /** Checks one provider's key and records the result against that provider alone. */
+  validateProviderKey: (providerId: string) => Promise<string | null>;
+  /** Which provider is being checked right now, so only that row shows a busy state. */
+  validatingProviderId: string | null;
   suspendProvider: (provider: ProviderRecord) => Promise<void>;
   resumeProvider: (provider: ProviderRecord) => Promise<void>;
   deleteProvider: (provider: ProviderRecord) => Promise<void>;
@@ -176,6 +179,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [providerAccessState, setProviderAccessState] = useState<ProviderAccessState>("unknown");
   const [providerStatusMessage, setProviderStatusMessage] = useState("Provider status has not been checked yet.");
   const [providerFeedback, setProviderFeedback] = useState("No provider action yet.");
+  const [validatingProviderId, setValidatingProviderId] = useState<string | null>(null);
   const [dockerReadinessState, setDockerReadinessState] = useState<ProviderAccessState>(
     dockerDevEnabled ? "checking" : "unknown",
   );
@@ -559,6 +563,60 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [refreshHealthSnapshot]);
 
   /**
+   * Checks one provider's stored key and records the result against **that** provider.
+   *
+   * Per-provider on purpose. A single shared "access state" described whichever provider happened
+   * to be selected, so checking Docker moved DigitalOcean's Verified badge onto Docker, and the
+   * next check moved it back — the badge looked like a toggle between rows rather than a fact
+   * about either.
+   *
+   * It also deliberately does not change the app-wide selected provider: re-checking a row should
+   * not silently repoint node creation at a different account.
+   */
+  const validateProviderKey = useCallback(async (
+    targetProviderId: string,
+    options?: { savedJustNow?: boolean },
+  ) => {
+    setValidatingProviderId(targetProviderId);
+    setBusyAction("validate-token");
+    try {
+      const result = await validateProviderToken(targetProviderId);
+      // The global access state describes the selected provider and gates provisioning, so it
+      // tracks this result only when this *is* the selected provider.
+      if (targetProviderId === providerIdRef.current) {
+        setProviderAccessState("ready");
+        setProviderStatusMessage(result);
+        setProviderFeedback(result);
+      }
+      setRecovery(null);
+      pushToast(
+        "success",
+        options?.savedJustNow ? "Key saved and verified" : "Key verified",
+        result,
+      );
+      return result;
+    } catch (error) {
+      const message = handleError(error);
+      if (targetProviderId === providerIdRef.current) {
+        setProviderAccessState("invalid");
+        setProviderStatusMessage(message);
+        setProviderFeedback(message);
+      }
+      return null;
+    } finally {
+      setValidatingProviderId(null);
+      setBusyAction(null);
+      // The backend records the verdict on the provider row, so the badge comes from a reload
+      // rather than a second copy held here.
+      try {
+        setProviders(await listProviders());
+      } catch {
+        // A failed refresh leaves the previous rows in place; the toast already reported the check.
+      }
+    }
+  }, [handleError, pushToast]);
+
+  /**
    * Stores a key and immediately checks it against the provider.
    *
    * One action, because the two used to be separate buttons and the validating one took no token —
@@ -583,44 +641,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
     // Saved. A validation failure from here is a bad key, not a lost one, so the stored value
     // stays and the field can be cleared.
-    try {
-      setBusyAction("validate-token");
-      const result = await validateProviderToken(provider);
-      setProviderAccessState("ready");
-      setProviderStatusMessage(result);
-      setProviderFeedback(result);
-      pushToast("success", "Key saved and verified", result);
-    } catch (error) {
-      setProviderAccessState("invalid");
-      const message = handleError(error);
-      setProviderStatusMessage(message);
-      setProviderFeedback(message);
-    } finally {
-      setBusyAction(null);
-    }
+    await validateProviderKey(provider, { savedJustNow: true });
 
     await loadDashboard();
     return true;
-  }, [handleError, loadDashboard, providerId, providerName, providers, pushToast]);
-
-  const validateToken = useCallback(async () => {
-    setBusyAction("validate-token");
-    try {
-      const result = await validateProviderToken(providerId);
-      setProviderAccessState("ready");
-      setProviderStatusMessage(result);
-      setProviderFeedback(result);
-      setRecovery(null);
-      pushToast("success", "Token validated", result);
-    } catch (error) {
-      setProviderAccessState("invalid");
-      const message = handleError(error);
-      setProviderStatusMessage(message);
-      setProviderFeedback(message);
-    } finally {
-      setBusyAction(null);
-    }
-  }, [handleError, providerId, pushToast]);
+  }, [handleError, loadDashboard, providerId, providerName, providers, validateProviderKey]);
 
   const validateDockerReadiness = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent ?? false;
@@ -1072,6 +1097,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const deleteProvider = useCallback(async (provider: ProviderRecord) => {
     setBusyAction("delete-provider");
     try {
+      // The backend clears the stored verdict along with the key, so the reload below drops it.
       await deleteProviderCommand(provider.id);
       if (provider.slug === "docker") {
         // `dockerKeyStored` follows the reloaded provider list, so only the readiness result needs
@@ -1138,7 +1164,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     loadDashboard,
     refreshHealth,
     saveToken,
-    validateToken,
+    validateProviderKey,
+    validatingProviderId,
     suspendProvider,
     resumeProvider,
     deleteProvider,

@@ -182,6 +182,10 @@ fn clear_provider_credential(
   db.update_provider_token_ref(provider_id, None)
     .map_err(CommandError::from)?;
 
+  // The verdict belonged to the key that just went away.
+  db.record_provider_validation(provider_id, None)
+    .map_err(CommandError::from)?;
+
   if provider.status == ProviderStatus::Suspended {
     db.resume_provider(provider_id).map_err(CommandError::from)?;
   }
@@ -995,6 +999,8 @@ mod tests {
 
     assert_eq!(provider.token_ref, None);
     assert_eq!(provider.status, ProviderStatus::Active);
+    // The verdict described the removed key; carrying it over would mark the next key verified.
+    assert_eq!(provider.last_validation_status, None);
     assert_eq!(
       secure_storage
         .get_provider_api_token(&token_ref)

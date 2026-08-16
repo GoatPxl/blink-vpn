@@ -837,6 +837,10 @@ impl ProviderRegistry {
       let _ = secure_storage.delete_provider_api_token(&previous_token_ref);
     }
 
+    // The stored verdict described the key that was just replaced. Leaving it would show a brand
+    // new, unchecked key as already verified.
+    let _ = db.record_provider_validation(provider_id, None);
+
     db
       .get_provider(provider_id)
       .map_err(|source| ProviderFlowError::Database {
@@ -858,12 +862,18 @@ impl ProviderRegistry {
   ) -> Result<Account, ProviderFlowError> {
     let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
     let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
-    adapter
+    let outcome = adapter
       .validate_token(&token)
       .map_err(|source| ProviderFlowError::Adapter {
         detail: "Token validation through provider adapter failed.".to_string(),
         source,
-      })
+      });
+
+    // Persisted so the verdict survives a restart, rather than every stored key reading
+    // "not checked" on each launch. Best-effort: failing to record it must not fail the check.
+    let _ = db.record_provider_validation(provider_id, Some(outcome.is_ok()));
+
+    outcome
   }
 
   pub fn init_provider_node(

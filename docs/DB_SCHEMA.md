@@ -13,9 +13,21 @@ Columns:
 - `id` TEXT PRIMARY KEY
 - `name` TEXT NOT NULL
 - `slug` TEXT NOT NULL UNIQUE
+- `status` TEXT NOT NULL
 - `token_ref` TEXT NULL
+- `last_validation_status` TEXT NULL
+- `last_validated_at` TEXT NULL
 - `created_at` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
+
+`last_validation_status` is `ok` or `failed` from the last key check, with `last_validated_at`
+recording when it ran. Persisted so the verdict survives a restart instead of every stored key
+reporting "not checked" on each launch — and the timestamp travels with it, because a verdict with
+no age would keep asserting a check that may be weeks old and since revoked.
+
+Both are **cleared whenever the key changes or is removed**: a result describes the key that was
+checked, not the provider, so carrying it onto a replacement would mark an unchecked credential as
+verified.
 
 Indexes:
 

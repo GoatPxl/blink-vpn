@@ -6,6 +6,7 @@ import {
   Card,
   Field,
   PageChrome,
+  useNow,
   type DashboardBusyAction,
   type ProviderRecord,
   type VpnNodeRecord,
@@ -16,9 +17,9 @@ import {
   countAttachedNodes,
   deriveProviderKeyStatus,
   describeKeepalive,
+  describeKeyState,
   validateDnsServer,
   validateKeepalive,
-  type ProviderAccess,
   type ProviderKeyStatus,
 } from "@/lib/settings-display";
 import type { TunnelSettings, WireGuardReadiness } from "@/lib/tauri";
@@ -33,10 +34,9 @@ const STATUS_CLASSES: Record<ProviderKeyStatus, string> = {
 
 export function SettingsView({
   dockerDevEnabled,
-  providerId,
   providers,
   nodes,
-  providerAccessState,
+  validatingProviderId,
   onSaveKey,
   onRevalidate,
   onSuspendProvider,
@@ -50,10 +50,9 @@ export function SettingsView({
   busyAction,
 }: {
   dockerDevEnabled: boolean;
-  providerId: string;
   providers: ProviderRecord[];
   nodes: VpnNodeRecord[];
-  providerAccessState: ProviderAccess;
+  validatingProviderId: string | null;
   onSaveKey: (providerId: string, key: string) => Promise<boolean>;
   onRevalidate: (provider: ProviderRecord) => Promise<void>;
   onSuspendProvider: (provider: ProviderRecord) => Promise<void>;
@@ -106,23 +105,20 @@ export function SettingsView({
               {visibleProviders.map((provider) => {
                 const hasKey = !!provider.token_ref;
                 const attachedNodeCount = countAttachedNodes(nodes, provider.id);
-                const status = deriveProviderKeyStatus({
-                  provider,
-                  hasKey,
-                  isSelected: provider.id === providerId,
-                  providerAccess: providerAccessState,
-                });
+                const status = deriveProviderKeyStatus({ provider, hasKey });
                 const busy = busyAction !== null;
+                const checkingThisRow = validatingProviderId === provider.id;
                 const actions = buildRowActions({ provider, hasKey, attachedNodeCount, busy });
 
                 return (
                   <tr key={provider.id} className="border-t border-[color:var(--outline-variant)]">
                     <td className="px-4 py-4 align-middle">
                       <div className="font-medium text-[var(--on-surface)]">{provider.name}</div>
-                      {/* Says a key exists without printing a masked reference that looks like part
-                          of the secret but is only an opaque handle. */}
+                      {/* Says a key exists, and when it was last checked, without printing a
+                          masked reference that looks like part of the secret but is only an
+                          opaque handle. */}
                       <div className="mt-0.5 text-xs text-[var(--on-surface-variant)]">
-                        {hasKey ? "Key stored on this device" : "No key stored"}
+                        <KeyState provider={provider} />
                       </div>
                     </td>
                     <td className="px-4 py-4 align-middle">
@@ -139,7 +135,8 @@ export function SettingsView({
                           disabled={busy || !hasKey}
                           className="px-3 py-2 text-xs"
                         >
-                          {busyAction === "validate-token" ? "Checking" : "Re-check"}
+                          {/* Only the row being checked says so; busyAction is global. */}
+                          {checkingThisRow ? "Checking" : "Re-check"}
                         </Button>
                         <RowMenu
                           open={openMenuProviderId === provider.id}
@@ -212,6 +209,12 @@ export function SettingsView({
       ) : null}
     </PageChrome>
   );
+}
+
+/** Keeps the "checked N ago" line current without a re-render of the whole page. */
+function KeyState({ provider }: { provider: ProviderRecord }) {
+  const now = useNow();
+  return <>{describeKeyState(provider, now)}</>;
 }
 
 function RowMenu({

@@ -11,7 +11,9 @@ export type ProviderKeyStatus = "missing" | "verified" | "unverified" | "invalid
 export const PROVIDER_KEY_STATUS_LABEL: Record<ProviderKeyStatus, string> = {
   missing: "No key",
   verified: "Verified",
-  unverified: "Not verified",
+  // "Not checked", not "Not verified": nothing has failed, the key simply has not been tested
+  // since the app started.
+  unverified: "Not checked",
   invalid: "Key rejected",
   suspended: "Suspended",
 };
@@ -22,30 +24,49 @@ export type ProviderAccess = "ready" | "missing" | "invalid" | "checking" | "unk
 /**
  * What a provider row should report.
  *
- * `providerAccess` is the result of the last validation and only describes the *selected* provider,
- * so it is applied only to that row — the previous table could not show a rejected key at all and
- * rendered "Installed / Active" for one.
+ * Read from the provider's **own** persisted result. It has to be per-provider: a single shared
+ * value described whichever provider was selected, so checking one row moved the "Verified" badge
+ * off the other instead of setting its own. It is persisted so the verdict survives a restart
+ * rather than resetting every key to unchecked on each launch.
  *
- * Suspension outranks verification: a suspended provider will refuse operations regardless of
- * whether its key is good, and that is the more actionable fact.
+ * Suspension outranks verification: a suspended provider refuses operations regardless of whether
+ * its key is good, and that is the more actionable fact.
  */
 export function deriveProviderKeyStatus(input: {
   provider: ProviderRecord;
   hasKey: boolean;
-  isSelected: boolean;
-  providerAccess: ProviderAccess;
 }): ProviderKeyStatus {
-  const { provider, hasKey, isSelected, providerAccess } = input;
+  const { provider, hasKey } = input;
 
   if (!hasKey) return "missing";
   if (provider.status === "suspended") return "suspended";
-
-  if (isSelected) {
-    if (providerAccess === "invalid") return "invalid";
-    if (providerAccess === "ready") return "verified";
-  }
+  if (provider.last_validation_status === "failed") return "invalid";
+  if (provider.last_validation_status === "ok") return "verified";
 
   return "unverified";
+}
+
+/**
+ * How long ago a key was checked, for the row's secondary line.
+ *
+ * A verdict without its age would keep asserting a check that might be weeks old and since
+ * revoked; showing when it happened lets the reader judge how much it is worth.
+ */
+export function describeKeyState(provider: ProviderRecord, now: number): string {
+  if (!provider.token_ref) return "No key stored";
+  if (!provider.last_validated_at) return "Key stored · not checked yet";
+
+  const checkedAt = Date.parse(provider.last_validated_at);
+  if (Number.isNaN(checkedAt)) return "Key stored on this device";
+
+  const seconds = Math.max(0, Math.floor((now - checkedAt) / 1000));
+  if (seconds < 60) return "Checked just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `Checked ${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `Checked ${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `Checked ${days}d ago`;
 }
 
 export type RowAction = {
