@@ -45,10 +45,6 @@ pub struct DigitalOceanApiClient {
 }
 
 impl DigitalOceanApiClient {
-  pub fn new(base_url: &str, retry_policy: RetryPolicy) -> Result<Self, DigitalOceanError> {
-    Self::new_with_timeout(base_url, retry_policy, Duration::from_secs(20))
-  }
-
   pub fn new_with_timeout(
     base_url: &str,
     retry_policy: RetryPolicy,
@@ -67,14 +63,6 @@ impl DigitalOceanApiClient {
       http,
       retry_policy,
     })
-  }
-
-  pub fn with_http_client(base_url: &str, retry_policy: RetryPolicy, http: Client) -> Self {
-    Self {
-      base_url: base_url.trim_end_matches('/').to_string(),
-      http,
-      retry_policy,
-    }
   }
 
   pub fn validate_token(&self, token: &str) -> Result<Account, DigitalOceanError> {
@@ -424,7 +412,7 @@ mod tests {
   };
 
   fn client(base_url: &str) -> DigitalOceanApiClient {
-    DigitalOceanApiClient::new(
+    DigitalOceanApiClient::new_with_timeout(
       base_url,
       RetryPolicy {
         max_retries: 2,
@@ -432,6 +420,7 @@ mod tests {
         max_delay_ms: 1,
         jitter_max_ms: 0,
       },
+      Duration::from_secs(20),
     )
     .expect("client should build")
   }

@@ -682,10 +682,6 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     "docker"
   }
 
-  fn default_regions(&self) -> &'static [&'static str] {
-    &[DOCKER_REGION]
-  }
-
   fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let daemon_version = Self::ensure_daemon_available()?;
@@ -1041,7 +1037,6 @@ mod tests {
       &BootstrapWaitRequest {
         droplet_id: provisioned.droplet_id,
         endpoint_ip: provisioned.public_ipv4.clone(),
-        readiness_marker_path: READINESS_MARKER_PATH.to_string(),
         server_keypair,
       },
     );
@@ -1124,7 +1119,6 @@ mod tests {
         &BootstrapWaitRequest {
           droplet_id: provisioned.droplet_id,
           endpoint_ip: provisioned.public_ipv4.clone(),
-          readiness_marker_path: READINESS_MARKER_PATH.to_string(),
           server_keypair,
         },
       )
@@ -1193,7 +1187,6 @@ mod tests {
         &BootstrapWaitRequest {
           droplet_id: provisioned.droplet_id,
           endpoint_ip: provisioned.public_ipv4.clone(),
-          readiness_marker_path: READINESS_MARKER_PATH.to_string(),
           server_keypair,
         },
       )

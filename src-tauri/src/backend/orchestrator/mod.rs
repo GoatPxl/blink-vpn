@@ -145,7 +145,6 @@ pub struct DisconnectTunnelRequest {
 pub enum ReconcileIssueKind {
   StaleTunnelStatusRepaired,
   MissingDroplet,
-  MissingTunnelArtifact,
   MissingNodeRuntimeData,
   StartupDependencyUnavailable,
   ProviderCheckFailed,
@@ -513,10 +512,6 @@ impl Orchestrator {
     (ipv4, ipv6)
   }
 
-  pub fn status(&self) -> &'static str {
-    "idle"
-  }
-
   pub fn list_nodes(
     &self,
     providers: &ProviderRegistry,
@@ -777,9 +772,6 @@ impl Orchestrator {
       region: DEFAULT_REGION.to_string(),
       size_slug: DEFAULT_SIZE.to_string(),
       init_payload: artifact.init_payload,
-      endpoint_ip: "0.0.0.0".to_string(),
-      readiness_marker_path: artifact.readiness_marker_path,
-      server_keypair,
     };
 
     let init_result = node_provider
@@ -1197,9 +1189,6 @@ impl Orchestrator {
         region: request.region.clone(),
         size_slug: selected_pricing.size_slug.clone(),
         init_payload: bootstrap_artifact.init_payload.clone(),
-        endpoint_ip: "0.0.0.0".to_string(),
-        readiness_marker_path: bootstrap_artifact.readiness_marker_path.clone(),
-        server_keypair: server_keypair.clone(),
       };
 
       let init_result = providers
@@ -1250,7 +1239,6 @@ impl Orchestrator {
           &BootstrapWaitRequest {
             droplet_id: droplet.droplet_id,
             endpoint_ip: droplet.public_ipv4.clone(),
-            readiness_marker_path: bootstrap_artifact.readiness_marker_path.clone(),
             server_keypair,
           },
         )
@@ -1513,11 +1501,6 @@ impl Orchestrator {
       }
     }
 
-    let keypair = crate::backend::wireguard::ClientKeyPair {
-      private_key,
-      public_key,
-    };
-
     db
       .update_tunnel_client_config(
         &request.tunnel_id,
@@ -1544,7 +1527,7 @@ impl Orchestrator {
     Ok(CreateClientTunnelResult {
       tunnel_id: request.tunnel_id.clone(),
       tunnel_name: canonical_tunnel_name,
-      client_public_key: keypair.public_key,
+      client_public_key: public_key,
     })
   }
 
@@ -2536,15 +2519,6 @@ impl Orchestrator {
   }
 }
 
-fn redact_text(value: &str) -> String {
-  let mut output = value.to_string();
-  if output.len() > 96 {
-    output.truncate(96);
-    output.push_str("...");
-  }
-  output
-}
-
 /// Unix epoch milliseconds as a bare number.
 ///
 /// Used for `generated_at` and therefore for the exported diagnostics filename, so it must stay
@@ -2839,10 +2813,6 @@ mod tests {
       "digitalocean"
     }
 
-    fn default_regions(&self) -> &'static [&'static str] {
-      &["nyc1"]
-    }
-
     fn validate_token(&self, _token: &str) -> Result<Account, ProviderAdapterError> {
       Ok(Account {
         uuid: "acct-1".to_string(),
@@ -3037,28 +3007,24 @@ mod tests {
       if program_name == "wg" && args == ["--version"] {
         return Ok(CommandOutput {
           stdout: "wireguard-tools v1".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "wireguard" && args == ["/help"] {
         return Ok(CommandOutput {
           stdout: "WireGuard for Windows".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "wg" && args == ["genkey"] {
         return Ok(CommandOutput {
           stdout: "client-private-key".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "wg" && args == ["pubkey"] {
         return Ok(CommandOutput {
           stdout: "client-public-key".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -3082,7 +3048,6 @@ mod tests {
 
             return Ok(CommandOutput {
               stdout: service_state.to_string(),
-              stderr: String::new(),
             });
           }
           "start" => {
@@ -3097,7 +3062,6 @@ mod tests {
             state.service_running = true;
             return Ok(CommandOutput {
               stdout: "started".to_string(),
-              stderr: String::new(),
             });
           }
           "stop" => {
@@ -3112,7 +3076,6 @@ mod tests {
             state.deactivate_calls += 1;
             return Ok(CommandOutput {
               stdout: "stopped".to_string(),
-              stderr: String::new(),
             });
           }
           _ => {}
@@ -3126,7 +3089,6 @@ mod tests {
         state.service_running = false;
         return Ok(CommandOutput {
           stdout: format!("uninstalled {}", args[1]),
-          stderr: String::new(),
         });
       }
 
@@ -3139,7 +3101,6 @@ mod tests {
         }
         return Ok(CommandOutput {
           stdout: format!("installed {}", args[1]),
-          stderr: String::new(),
         });
       }
 
@@ -3160,7 +3121,6 @@ mod tests {
         );
         return Ok(CommandOutput {
           stdout: dump,
-          stderr: String::new(),
         });
       }
 
@@ -3171,7 +3131,6 @@ mod tests {
         state.service_running = false;
         return Ok(CommandOutput {
           stdout: "uninstalled".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -3606,7 +3565,6 @@ mod tests {
     assert_eq!(node.endpoint_port, Some(49154));
   }
 
-  #[test]
   /// A default route to a server on this machine would take the host off the network.
   #[test]
   fn full_tunnel_is_scoped_to_the_subnet_for_a_loopback_endpoint() {

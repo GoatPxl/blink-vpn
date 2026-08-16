@@ -3,10 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  checkWireGuardReadiness,
   createVpnNode,
   installWireGuardWithPrerequisites,
   listProviders,
   listVpnNodes,
+  openWireGuardInstallPage,
   registerProviderToken,
   validateProviderToken,
   type ProviderPlanPricing,
@@ -23,7 +25,6 @@ import {
   saveOnboardingState,
   type OnboardingState,
 } from "@/lib/onboarding-state";
-import { runWireGuardReadinessCheck } from "@/lib/wireguard-readiness";
 
 function stepTitle(step: number): string {
   if (step === 1) return "WireGuard Readiness";
@@ -229,7 +230,7 @@ export function OnboardingWizard() {
   async function checkWireGuard() {
     setWireGuardBusy(true);
     try {
-      const readiness = await runWireGuardReadinessCheck();
+      const readiness = await checkWireGuardReadiness();
       setWireGuardReadiness(readiness);
       setState((current) => ({ ...current, lastWireGuardPassed: readiness.installed && readiness.executable_found && readiness.service_available }));
     } finally {
@@ -248,6 +249,21 @@ export function OnboardingWizard() {
       setWireGuardInstallMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setWireGuardInstallBusy(false);
+    }
+  }
+
+  /**
+   * Fallback when the in-app installer cannot run.
+   *
+   * The elevated install is one UAC prompt away from failing — declined, or blocked by policy —
+   * and onboarding cannot continue without WireGuard. Without this the user is simply stuck on
+   * step 1 with an error and nowhere to go.
+   */
+  async function onOpenWireGuardDownload() {
+    try {
+      await openWireGuardInstallPage();
+    } catch (error) {
+      setWireGuardInstallMessage(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -401,7 +417,7 @@ export function OnboardingWizard() {
   async function finalWireGuardCheck() {
     setFinalCheckBusy(true);
     try {
-      const readiness = await runWireGuardReadinessCheck();
+      const readiness = await checkWireGuardReadiness();
       setWireGuardReadiness(readiness);
       const passed = readiness.installed && readiness.executable_found && readiness.service_available;
       setState((current) => ({ ...current, lastWireGuardPassed: passed }));
@@ -499,6 +515,13 @@ export function OnboardingWizard() {
                   className="inline-flex items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[#10131b] disabled:opacity-50"
                 >
                   {wireGuardInstallBusy ? "Installing WireGuard..." : "Install WireGuard from App (Admin)"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void onOpenWireGuardDownload()}
+                  className="inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 text-sm text-[var(--on-surface-variant)] hover:text-[var(--on-surface)]"
+                >
+                  Download manually
                 </button>
               </div>
               {wireGuardInstallMessage ? (

@@ -34,7 +34,6 @@ impl Bootstrap {
     Ok(BootstrapArtifact {
       init_payload,
       readiness_marker_path: READINESS_MARKER_PATH.to_string(),
-      server_public_key_path: "/etc/wireguard/server_public.key".to_string(),
       output_contract_preview,
     })
   }
@@ -60,16 +59,7 @@ impl Bootstrap {
     Ok(BootstrapArtifact {
       init_payload,
       readiness_marker_path: READINESS_MARKER_PATH.to_string(),
-      server_public_key_path: "/etc/wireguard/server_public.key".to_string(),
       output_contract_preview,
     })
-  }
-
-  pub fn build_output_contract_from_marker(
-    &self,
-    endpoint_ip: &str,
-    marker_json: &str,
-  ) -> Result<BootstrapOutputContract, BootstrapError> {
-    super::contract::build_output_contract_from_marker(endpoint_ip, marker_json)
   }
 }

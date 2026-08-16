@@ -1,6 +1,5 @@
 use std::net::Ipv4Addr;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const DEFAULT_WIREGUARD_PORT: u16 = 51820;
@@ -41,8 +40,11 @@ impl Default for BootstrapParams {
 #[derive(Debug, Clone)]
 pub struct BootstrapArtifact {
   pub init_payload: String,
+  /// Where the bootstrap script writes its own completion marker.
+  ///
+  /// Recorded so the payload and the Docker health check agree on the path. **Nothing in the app
+  /// reads this file** — see AGENTS.md §2. It is a self-check and a debugging aid on the server.
   pub readiness_marker_path: String,
-  pub server_public_key_path: String,
   pub output_contract_preview: BootstrapOutputContract,
 }
 
@@ -53,23 +55,10 @@ pub struct BootstrapOutputContract {
   pub listen_port: u16,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ReadinessMarker {
-  pub status: String,
-  pub server_public_key: String,
-  pub listen_port: u16,
-}
-
 #[derive(Debug, Error)]
 pub enum BootstrapError {
   #[error("Invalid bootstrap parameter '{field}': {detail}")]
   InvalidParameter { field: &'static str, detail: String },
-  #[error("Bootstrap marker parsing failed: {detail}")]
-  MarkerDecode {
-    detail: String,
-    #[source]
-    source: serde_json::Error,
-  },
 }
 
 pub(crate) fn validate_bootstrap_params(params: &BootstrapParams) -> Result<(), BootstrapError> {
@@ -98,46 +87,6 @@ pub(crate) fn validate_bootstrap_params(params: &BootstrapParams) -> Result<(), 
   }
 
   Ok(())
-}
-
-pub(crate) fn build_output_contract_from_marker(
-  endpoint_ip: &str,
-  marker_json: &str,
-) -> Result<BootstrapOutputContract, BootstrapError> {
-  validate_ipv4(endpoint_ip, "server_endpoint_ip")?;
-
-  let marker: ReadinessMarker = serde_json::from_str(marker_json).map_err(|source| {
-    BootstrapError::MarkerDecode {
-      detail:
-        "Readiness marker JSON was invalid. Verify cloud-init completed and marker format is unchanged."
-          .to_string(),
-      source,
-    }
-  })?;
-
-  if marker.status != "ready" {
-    return Err(BootstrapError::InvalidParameter {
-      field: "readiness_marker.status",
-      detail:
-        "Marker status is not ready yet. Wait for cloud-init completion before consuming output contract."
-          .to_string(),
-    });
-  }
-
-  validate_listen_port(marker.listen_port)?;
-
-  if marker.server_public_key.trim().is_empty() {
-    return Err(BootstrapError::InvalidParameter {
-      field: "readiness_marker.server_public_key",
-      detail: "Server public key in marker is empty.".to_string(),
-    });
-  }
-
-  Ok(BootstrapOutputContract {
-    server_endpoint_ip: endpoint_ip.to_string(),
-    server_public_key: marker.server_public_key,
-    listen_port: marker.listen_port,
-  })
 }
 
 /// The client public key must be present and well-formed *before* the node is created.

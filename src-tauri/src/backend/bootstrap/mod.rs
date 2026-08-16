@@ -182,36 +182,55 @@ mod tests {
     assert!(err.to_string().contains("Invalid bootstrap parameter"));
   }
 
+  /// The output contract comes from what was generated locally, never from the server.
+  ///
+  /// This replaces two tests that parsed a readiness-marker JSON document into the contract. That
+  /// machinery was the original design — the server generated its own keys and the app read them
+  /// back out of `/var/lib/goatstare/bootstrap-ready.json` — and it required an SSH channel the app
+  /// does not have and must not gain (AGENTS.md §2). Nothing called it any more, so the only thing
+  /// keeping it alive was its own tests.
   #[test]
-  fn builds_output_contract_from_readiness_marker() {
+  fn the_output_contract_is_known_before_the_node_exists() {
     let bootstrap = Bootstrap::new();
-    let marker_json =
-      "{\"status\":\"ready\",\"server_public_key\":\"pubkey123\",\"listen_port\":51820}";
+    let server = generate_server_keypair().expect("server keygen should succeed");
+    let client = generate_client_keypair().expect("client keygen should succeed");
 
-    let contract = bootstrap
-      .build_output_contract_from_marker("203.0.113.8", marker_json)
-      .expect("marker parsing should succeed");
+    let artifact = bootstrap
+      .render_cloud_init(
+        &params_with_client_peer(&client.public_key),
+        &server.private_key,
+        &server.public_key,
+      )
+      .expect("render should succeed");
 
     assert_eq!(
-      contract,
+      artifact.output_contract_preview,
       BootstrapOutputContract {
-        server_endpoint_ip: "203.0.113.8".to_string(),
-        server_public_key: "pubkey123".to_string(),
-        listen_port: 51820,
-      }
+        server_endpoint_ip: "198.51.100.9".to_string(),
+        server_public_key: server.public_key,
+        listen_port: DEFAULT_WIREGUARD_PORT,
+      },
+      "every field must be derivable at render time, with nothing left to read back"
     );
   }
 
+  /// The marker is still written by the script, as a self-check. Its path travels with the artifact
+  /// so the payload and the Docker health check cannot disagree — but nothing here consumes it.
   #[test]
-  fn readiness_status_must_be_ready() {
+  fn the_readiness_marker_path_is_reported_without_being_read() {
     let bootstrap = Bootstrap::new();
-    let marker_json =
-      "{\"status\":\"running\",\"server_public_key\":\"pubkey123\",\"listen_port\":51820}";
+    let server = generate_server_keypair().expect("server keygen should succeed");
+    let client = generate_client_keypair().expect("client keygen should succeed");
 
-    let err = bootstrap
-      .build_output_contract_from_marker("203.0.113.8", marker_json)
-      .expect_err("non-ready status should fail");
+    let artifact = bootstrap
+      .render_cloud_init(
+        &params_with_client_peer(&client.public_key),
+        &server.private_key,
+        &server.public_key,
+      )
+      .expect("render should succeed");
 
-    assert!(err.to_string().contains("not ready"));
+    assert_eq!(artifact.readiness_marker_path, READINESS_MARKER_PATH);
+    assert!(artifact.init_payload.contains(READINESS_MARKER_PATH));
   }
 }

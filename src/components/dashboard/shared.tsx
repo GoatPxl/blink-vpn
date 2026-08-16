@@ -2,14 +2,10 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { formatElapsed } from "@/lib/connection-display";
-import type {
-  CommandErrorKind,
-  ProviderPlanPricing,
-  ProviderRecord,
-  TunnelRecord,
-  VpnNodeRecord,
-} from "@/lib/tauri";
+import type { CommandErrorKind, ProviderPlanPricing, VpnNodeRecord } from "@/lib/tauri";
 
+// Re-exported for views that import their types from this module; `ProviderRecord` and
+// `TunnelRecord` are not referenced here, so they are re-exported without being imported.
 export type { ProviderPlanPricing, ProviderRecord, TunnelRecord, VpnNodeRecord } from "@/lib/tauri";
 
 export type ToastKind = "info" | "success" | "warning" | "error";
@@ -38,7 +34,6 @@ export type DashboardBusyAction =
   | null;
 export type ErrorCategory = "provider" | "database" | "wireguard" | "state" | "unknown";
 export type ProviderAccessState = "missing" | "checking" | "ready" | "invalid" | "unknown";
-export type NodeSort = "newest" | "oldest";
 
 export type PlanDisplayModel = {
   planLabel: string;
@@ -68,17 +63,8 @@ export type RecoveryState = {
   message: string;
 };
 
-export type LogEntry = {
-  time: string;
-  level: string;
-  source: string;
-  message: string;
-  tone?: "neutral" | "info" | "warning" | "error" | "success";
-};
-
 export const DEFAULT_PROVIDER_ID = "provider-1";
 export const DEFAULT_PROVIDER_NAME = "DigitalOcean";
-export const DEFAULT_NODE_REGION = "nyc1";
 export const VIEW_ROUTE: Record<AppView, string> = {
   dashboard: "/dashboard",
   nodes: "/dashboard/nodes",
@@ -89,25 +75,10 @@ export const VIEW_ROUTE: Record<AppView, string> = {
 
 export const NODE_CREATE_ROUTE = "/dashboard/nodes/create";
 
-export function statusBadge(status: string) {
-  const normalized = status.toLowerCase();
-  if (normalized === "ready" || normalized === "connected" || normalized === "active") {
-    return "border-[color:rgba(78,222,163,0.2)] bg-[color:rgba(78,222,163,0.08)] text-[var(--secondary)]";
-  }
-  if (
-    normalized === "bootstrapping"
-    || normalized === "provisioning"
-    || normalized === "deleting"
-    || normalized === "new"
-    || normalized === "archive"
-  ) {
-    return "border-[color:rgba(255,185,95,0.2)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]";
-  }
-  if (normalized === "error" || normalized === "off" || normalized === "deleted") {
-    return "border-[color:rgba(255,107,107,0.2)] bg-[color:rgba(255,107,107,0.08)] text-[#ffd5d5]";
-  }
-  return "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface-variant)]";
-}
+// `statusBadge` lived here: a stringly-typed switch over lowercased status text returning Tailwind
+// classes. Every view that shows a status now derives it through a typed map instead —
+// `NODE_STATUS_LABEL` in node-display, `STATUS_STYLES` in health-view, `ACTIVITY_TONE` in
+// activity-display — each of which is exhaustive over a union rather than matching on free text.
 
 /**
  * Map a backend failure kind onto the UI's display category and heading.

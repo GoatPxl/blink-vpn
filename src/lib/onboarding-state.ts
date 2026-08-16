@@ -16,7 +16,7 @@ export interface OnboardingState {
   lastWireGuardPassed: boolean;
 }
 
-export const ONBOARDING_STORAGE_KEY = "goatstare.onboarding.v1";
+const ONBOARDING_STORAGE_KEY = "goatstare.onboarding.v1";
 
 export const DEFAULT_ONBOARDING_STATE: OnboardingState = {
   status: "not_started",
@@ -58,6 +58,3 @@ export function saveOnboardingState(state: OnboardingState): void {
   window.localStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
 }
 
-export function resetOnboardingState(): void {
-  saveOnboardingState(DEFAULT_ONBOARDING_STATE);
-}

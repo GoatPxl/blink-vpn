@@ -1,5 +1,7 @@
 use std::fmt::{Display, Formatter};
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
@@ -368,22 +370,11 @@ impl Database {
     Self { path }
   }
 
+  /// Only tests need the raw path — they open a second connection to assert on schema directly.
+  /// Production code goes through this type so every query has one place to live.
+  #[cfg(test)]
   pub fn path(&self) -> &Path {
     &self.path
-  }
-
-  pub fn health(&self) -> Result<&'static str, DbError> {
-    let connection = self.open_connection()?;
-    connection
-      .query_row("SELECT 1", [], |_| Ok(1_i64))
-      .map_err(|source| DbError::Query {
-        action: "health_check",
-        detail: "Could not run health query. Check file permissions and SQLite availability."
-          .to_string(),
-        source,
-      })?;
-
-    Ok("ok")
   }
 
   pub fn run_migrations(&self) -> Result<(), DbError> {
@@ -609,6 +600,12 @@ impl Database {
     self.update_provider_status(id, ProviderStatus::Active)
   }
 
+  /// Removes the provider row itself.
+  ///
+  /// Test-only. The app never deletes a provider: the two builtins are re-seeded on every
+  /// `list_providers`, and the user-facing "Remove key" clears the credential and leaves the row
+  /// (`clear_provider_credential`). Tests use this to prove the re-seed actually restores them.
+  #[cfg(test)]
   pub fn delete_provider(&self, id: &str) -> Result<(), DbError> {
     let connection = self.open_connection()?;
     let changed = connection

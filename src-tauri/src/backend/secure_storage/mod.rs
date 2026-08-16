@@ -37,7 +37,6 @@ pub trait SecretStore: Send + Sync {
   ) -> Result<String, SecretStoreError>;
   fn retrieve_secret(&self, secret_ref: &str) -> Result<Option<String>, SecretStoreError>;
   fn delete_secret(&self, secret_ref: &str) -> Result<(), SecretStoreError>;
-  fn backend_name(&self) -> &'static str;
 }
 
 #[derive(Debug, Error)]
@@ -77,6 +76,9 @@ impl SecureStorage {
     }
   }
 
+  /// Substitutes the backing store so tests can drive failure modes — a store that loses writes,
+  /// one that cannot be read back — which Credential Manager will not do on demand.
+  #[cfg(test)]
   pub fn from_store(store: Arc<dyn SecretStore>) -> Self {
     Self {
       inner: store,
@@ -84,15 +86,14 @@ impl SecureStorage {
     }
   }
 
+  /// In-memory storage for tests. Never reachable from a shipped Windows build, where `new()`
+  /// always resolves to Windows Credential Manager.
+  #[cfg(test)]
   pub fn dev_mock() -> Self {
     Self {
       inner: Arc::new(MockSecretStore::default()),
       session_cache: Arc::new(Mutex::new(HashMap::new())),
     }
-  }
-
-  pub fn backend_name(&self) -> &'static str {
-    self.inner.backend_name()
   }
 
   /// Write a secret and confirm it reads back before reporting success.
@@ -418,16 +419,20 @@ impl SecretStore for WindowsCredentialStore {
     Ok(())
   }
 
-  fn backend_name(&self) -> &'static str {
-    "windows-credential-manager"
-  }
 }
 
+/// Plain in-memory storage, with none of Credential Manager's protection.
+///
+/// Reachable in exactly two situations: a test, and a non-Windows build — which Phase 1 does not
+/// ship (AGENTS.md §1). Gated so a Windows release cannot contain it at all, rather than merely
+/// not calling it.
+#[cfg(any(test, not(target_os = "windows")))]
 #[derive(Clone, Default)]
 pub struct MockSecretStore {
   secrets: Arc<Mutex<HashMap<String, String>>>,
 }
 
+#[cfg(any(test, not(target_os = "windows")))]
 impl MockSecretStore {
   fn build_secret_ref(kind: SecretKind, owner_id: &str) -> String {
     let owner = sanitize_segment(owner_id);
@@ -435,6 +440,7 @@ impl MockSecretStore {
   }
 }
 
+#[cfg(any(test, not(target_os = "windows")))]
 impl SecretStore for MockSecretStore {
   fn store_secret(
     &self,
@@ -463,10 +469,6 @@ impl SecretStore for MockSecretStore {
     })?;
     guard.remove(secret_ref);
     Ok(())
-  }
-
-  fn backend_name(&self) -> &'static str {
-    "mock-in-memory"
   }
 }
 
@@ -525,10 +527,6 @@ mod tests {
     fn delete_secret(&self, secret_ref: &str) -> Result<(), SecretStoreError> {
       self.secrets.lock().expect("lock must work").remove(secret_ref);
       Ok(())
-    }
-
-    fn backend_name(&self) -> &'static str {
-      "evaporating"
     }
   }
 
@@ -656,10 +654,6 @@ mod tests {
         .expect("lock must work")
         .push(secret_ref.to_string());
       Ok(())
-    }
-
-    fn backend_name(&self) -> &'static str {
-      "unverifiable"
     }
   }
 

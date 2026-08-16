@@ -187,7 +187,7 @@ export function failingStep(run: ActivityRun): ActivityStep | null {
   return [...run.steps].reverse().find((step) => step.outcome === "error") ?? null;
 }
 
-export function describeCategory(category: string): string {
+function describeCategory(category: string): string {
   return CATEGORY_LABEL[category] ?? category;
 }
 

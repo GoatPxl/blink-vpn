@@ -40,6 +40,9 @@ impl WireGuardManager {
     }
   }
 
+  /// Substitutes the process runner so tests can drive `wireguard.exe` and `sc` without either
+  /// being installed, and without elevation.
+  #[cfg(test)]
   pub fn with_runner(runner: Arc<dyn CommandRunner>) -> Self {
     Self {
       runner,
@@ -252,18 +255,9 @@ impl WireGuardManager {
     })
   }
 
-  pub fn generate_client_keypair(&self) -> Result<ClientKeyPair, WireGuardError> {
-    self.ensure_installed()?;
-    self.record_command("defguard_wireguard_rs::key::Key::generate");
-
-    let private_key = WireguardKey::generate().to_string();
-    let public_key = self.derive_public_key(&private_key)?;
-
-    Ok(ClientKeyPair {
-      private_key,
-      public_key,
-    })
-  }
+  // Key generation lives in `crypto::keypair`, which every production path uses. A second
+  // generator here needed a WireGuard install just to make a keypair — the reason `crypto` exists
+  // is that generation is pure Rust and must not depend on `wg.exe` being on PATH.
 
   pub fn derive_public_key(&self, private_key: &str) -> Result<String, WireGuardError> {
     self.record_command("defguard_wireguard_rs::key::Key::public_key");
@@ -354,12 +348,9 @@ impl WireGuardManager {
     Ok(TunnelActivationProbeState::Unknown)
   }
 
-  
-
-  pub fn deactivate_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.deactivate_tunnel_service(tunnel_name)
-  }
-
+  /// Disconnect goes through `unregister_tunnel` alone: `/uninstalltunnelservice` stops the
+  /// service as part of removing it, so a separate deactivate step only bought a second UAC
+  /// prompt (AGENTS.md §4). The stop-without-remove pair it used to call is gone.
   pub fn unregister_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
     self.unregister_tunnel_service(tunnel_name)
   }
@@ -476,28 +467,6 @@ impl WireGuardManager {
 
         Err(error)
       }
-    }
-  }
-
-  fn deactivate_tunnel_service(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    self.ensure_installed()?;
-    validate_tunnel_name(tunnel_name)?;
-
-    let service_name = wireguard_service_name(tunnel_name);
-    self.record_command(&format!("sc stop {}", service_name));
-
-    // Stop uses the same elevation policy as start. It previously ran unelevated with no
-    // fallback, so on a machine where start could elevate, disconnect failed access-denied and
-    // stranded the user in a connected state.
-    let stop_result = self.run_elevating_on_access_denied("sc", &["stop", &service_name]);
-
-    match stop_result {
-      Ok(_) => Ok(()),
-      // Service already stopped or not started: the desired end state either way.
-      Err(CommandExecError::NonZeroExit { code: Some(1060), .. }) => Ok(()),
-      Err(CommandExecError::NonZeroExit { code: Some(1062), .. }) => Ok(()),
-      Err(CommandExecError::NonZeroExit { detail, .. }) if is_windows_service_missing_detail(&detail) => Ok(()),
-      Err(source) => Err(map_sc_tunnel_error(source, &service_name, "stop")),
     }
   }
 
@@ -619,13 +588,6 @@ impl WireGuardManager {
     })
   }
 
-  pub fn build_client_config(
-    &self,
-    params: &ClientConfigParams,
-  ) -> Result<String, WireGuardError> {
-    build_client_config(params)
-  }
-
   fn unregister_legacy_tunnel_service(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
     let wireguard_program = self.resolve_wireguard_program()?;
     self.unregister_legacy_tunnel_service_with_program(tunnel_name, &wireguard_program)
@@ -695,11 +657,6 @@ pub struct WireGuardDebugSnapshot {
   pub last_import_config_temp_path: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ClientKeyPair {
-  pub private_key: String,
-  pub public_key: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct ClientConfigParams {
@@ -877,7 +834,6 @@ fn wide_string_to_lossy(raw: &[u16]) -> String {
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
   pub stdout: String,
-  pub stderr: String,
 }
 
 pub trait CommandRunner: Send + Sync {
@@ -964,7 +920,7 @@ impl CommandRunner for ProcessCommandRunner {
       });
     }
 
-    Ok(CommandOutput { stdout, stderr })
+    Ok(CommandOutput { stdout })
   }
 }
 
@@ -1564,14 +1520,12 @@ mod tests {
       if program_name == "wg" && args == ["--version"] {
         return Ok(CommandOutput {
           stdout: "wireguard-tools v1".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "wireguard" && args == ["/help"] {
         return Ok(CommandOutput {
           stdout: "WireGuard for Windows".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -1580,7 +1534,6 @@ mod tests {
         if service_exists {
           return Ok(CommandOutput {
             stdout: "STATE              : 1  STOPPED".to_string(),
-            stderr: String::new(),
           });
         }
 
@@ -1604,7 +1557,6 @@ mod tests {
         *service_exists = false;
         return Ok(CommandOutput {
           stdout: format!("uninstalled {}", args[1]),
-          stderr: String::new(),
         });
       }
 
@@ -1625,7 +1577,6 @@ mod tests {
         *self.service_exists.lock().expect("lock must work") = true;
         return Ok(CommandOutput {
           stdout: "installed".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -1744,6 +1695,10 @@ mod tests {
       other => panic!("expected invalid output error, got {other}"),
     }
   }
+
+  /// Had no `#[test]` attribute, so it had never run once. The compiler reported it as dead code,
+  /// which is only visible with the rest of the dead-code noise cleared away.
+  #[test]
   fn import_tunnel_replaces_stale_service_and_uses_tunnel_name_basename() {
     let runner = MockImportRunner::with_service_exists(true);
     let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
@@ -1938,14 +1893,12 @@ mod tests {
       if program_name == "wg" && args == ["--version"] {
         return Ok(CommandOutput {
           stdout: "wireguard-tools v1".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "wireguard" && args == ["/help"] {
         return Ok(CommandOutput {
           stdout: "WireGuard for Windows".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -1969,7 +1922,6 @@ mod tests {
       if program_name == "wireguard" && args.len() == 2 && args[0] == "/installtunnelservice" {
         return Ok(CommandOutput {
           stdout: "installed".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -2065,21 +2017,18 @@ mod tests {
       if program_name == "wg" && args == ["-v"] {
         return Ok(CommandOutput {
           stdout: "wireguard-tools v1".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "wireguard" && args == ["/help"] {
         return Ok(CommandOutput {
           stdout: "WireGuard for Windows".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "sc" && args.len() == 2 && args[0] == "query" {
         return Ok(CommandOutput {
           stdout: "STATE              : 1  STOPPED".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -2099,7 +2048,6 @@ mod tests {
     }
   }
 
-  #[test]
   /// An adapter that does not exist yields no counters, rather than zeroes.
   ///
   /// Zeroes would read as "connected, no traffic", which is a different and misleading claim.
@@ -2148,17 +2096,16 @@ mod tests {
           .unwrap_or(program);
 
         if program_name == "wg" && args == ["--version"] {
-          return Ok(CommandOutput { stdout: "wireguard-tools v1".to_string(), stderr: String::new() });
+          return Ok(CommandOutput { stdout: "wireguard-tools v1".to_string() });
         }
 
         if program_name == "wireguard" && args == ["/help"] {
-          return Ok(CommandOutput { stdout: "WireGuard for Windows".to_string(), stderr: String::new() });
+          return Ok(CommandOutput { stdout: "WireGuard for Windows".to_string() });
         }
 
         if program_name == "sc" && args.first().is_some_and(|arg| *arg == "query") {
           return Ok(CommandOutput {
             stdout: "STATE              : 4  RUNNING".to_string(),
-            stderr: String::new(),
           });
         }
 
@@ -2229,14 +2176,12 @@ mod tests {
       if program_name == "wg" && args == ["-v"] {
         return Ok(CommandOutput {
           stdout: "wireguard-tools v1".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "wireguard" && args == ["/help"] {
         return Ok(CommandOutput {
           stdout: "WireGuard for Windows".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -2251,7 +2196,6 @@ mod tests {
       if program_name == "wg" && args == ["show", "Primary-Node-wg", "dump"] {
         return Ok(CommandOutput {
           stdout: "interface\tpub\t51820\toff\npeerpub\t(none)\t127.0.0.1:51820\t0.0.0.0/0\t1700000050\t10\t20\t25\n".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -2312,14 +2256,12 @@ mod tests {
       if program_name == "wg" && args == ["-v"] {
         return Ok(CommandOutput {
           stdout: "wireguard-tools v1".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "wireguard" && args == ["/help"] {
         return Ok(CommandOutput {
           stdout: "WireGuard for Windows".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -2334,14 +2276,12 @@ mod tests {
       if program_name == "sc" && args == ["query", "WireGuardTunnel$Primary-Node-wg"] {
         return Ok(CommandOutput {
           stdout: "STATE              : 4  RUNNING".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "wg" && args == ["show", "Primary-Node-wg", "dump"] {
         return Ok(CommandOutput {
           stdout: "interface\tpublic\t51820\toff\npeerpub\t(none)\t203.0.113.10:51820\t0.0.0.0/0\t1700000000\t128\t256\t25\n".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -2382,14 +2322,12 @@ mod tests {
       if program_name == "wg" && args == ["-v"] {
         return Ok(CommandOutput {
           stdout: "wireguard-tools v1".to_string(),
-          stderr: String::new(),
         });
       }
 
       if program_name == "wireguard" && args == ["/help"] {
         return Ok(CommandOutput {
           stdout: "WireGuard for Windows".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -2399,13 +2337,11 @@ mod tests {
         if *query_count < 2 {
           return Ok(CommandOutput {
             stdout: "STATE              : 2  START_PENDING".to_string(),
-            stderr: String::new(),
           });
         }
 
         return Ok(CommandOutput {
           stdout: "STATE              : 4  RUNNING".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -2416,7 +2352,6 @@ mod tests {
       if program_name == "wg" && args == ["show", "Primary-Node-wg", "dump"] {
         return Ok(CommandOutput {
           stdout: "interface\tpublic\t51820\toff\npeerpub\t(none)\t203.0.113.10:51820\t0.0.0.0/0\t1700000000\t128\t256\t25\n".to_string(),
-          stderr: String::new(),
         });
       }
 
@@ -2445,18 +2380,10 @@ mod tests {
     assert!(matches!(result, Err(WireGuardError::InvalidOutput { .. })));
   }
 
-  #[test]
-  fn generate_client_keypair_returns_non_empty_keys() {
-    let runner = MockImportRunner::with_service_exists(false);
-    let wireguard = WireGuardManager::with_runner(Arc::new(runner));
+  // Key generation is covered in `crypto::keypair`, which owns it. The duplicate generator that
+  // lived here needed a WireGuard install just to make a keypair, which is the coupling the crypto
+  // module exists to avoid.
 
-    let keypair = wireguard
-      .generate_client_keypair()
-      .expect("key generation should succeed when wireguard runtime is present");
-
-    assert!(!keypair.private_key.trim().is_empty());
-    assert!(!keypair.public_key.trim().is_empty());
-  }
   #[test]
   fn legacy_unregister_cleanup_skips_when_service_missing() {
     let runner = MockImportRunner::with_service_exists(false);

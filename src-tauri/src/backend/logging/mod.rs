@@ -25,71 +25,16 @@ pub fn describe_error_chain(error: &dyn std::error::Error) -> String {
   redact_sensitive_text(&parts.join(" <- "))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogVerbosity {
-  Dev,
-  Prod,
-}
-
-#[derive(Clone)]
-pub struct Logger {
-  verbosity: LogVerbosity,
-}
-
-impl Logger {
-  pub fn new() -> Self {
-    Self {
-      verbosity: if cfg!(debug_assertions) {
-        LogVerbosity::Dev
-      } else {
-        LogVerbosity::Prod
-      },
-    }
-  }
-
-  pub fn subsystem_name(&self) -> &'static str {
-    "logging"
-  }
-
-  pub fn verbosity(&self) -> LogVerbosity {
-    self.verbosity
-  }
-
-  pub fn level_filter(&self) -> log::LevelFilter {
-    match self.verbosity {
-      LogVerbosity::Dev => log::LevelFilter::Info,
-      LogVerbosity::Prod => log::LevelFilter::Warn,
-    }
-  }
-
-  pub fn log_structured(
-    &self,
-    level: log::Level,
-    event: &str,
-    correlation_id: Option<&str>,
-    fields: &[(&str, String)],
-  ) {
-    let mut message = format!("event={event}");
-    if let Some(correlation_id) = correlation_id {
-      message.push_str(&format!(" correlation_id={correlation_id}"));
-    }
-
-    for (key, value) in fields {
-      message.push(' ');
-      message.push_str(key);
-      message.push('=');
-      message.push_str(&redact_sensitive_text(value));
-    }
-
-    log::log!(level, "{}", message);
-  }
-
-  pub fn redact_sensitive_text(input: &str) -> String {
-    redact_sensitive_text(input)
-  }
-
-  pub fn sanitize_diagnostics_bundle_text(input: &str) -> String {
-    redact_sensitive_text(input)
+/// How verbose the `log` facade should be for this build.
+///
+/// Info while developing, warnings and errors in a release: a shipped app writing an info line per
+/// health poll would churn through the plugin's 40 KB log file and rotate away the incident you
+/// actually wanted.
+pub fn default_level_filter() -> log::LevelFilter {
+  if cfg!(debug_assertions) {
+    log::LevelFilter::Info
+  } else {
+    log::LevelFilter::Warn
   }
 }
 
@@ -177,7 +122,7 @@ fn redact_assignment_like(input: &str, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-  use super::{Logger, LogVerbosity, redact_sensitive_text};
+  use super::{default_level_filter, redact_sensitive_text};
 
   #[test]
   fn redacts_tokens_private_keys_and_authorization_headers() {
@@ -217,14 +162,11 @@ mod tests {
   }
 
   #[test]
-  fn logger_uses_dev_level_in_debug_builds() {
-    let logger = Logger::new();
+  fn release_builds_log_warnings_and_errors_only() {
     if cfg!(debug_assertions) {
-      assert_eq!(logger.verbosity(), LogVerbosity::Dev);
-      assert_eq!(logger.level_filter(), log::LevelFilter::Info);
+      assert_eq!(default_level_filter(), log::LevelFilter::Info);
     } else {
-      assert_eq!(logger.verbosity(), LogVerbosity::Prod);
-      assert_eq!(logger.level_filter(), log::LevelFilter::Warn);
+      assert_eq!(default_level_filter(), log::LevelFilter::Warn);
     }
   }
 }

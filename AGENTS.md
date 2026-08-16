@@ -251,10 +251,12 @@ nothing reached them. Do not reintroduce a second harness.
   concrete file paths.
 - If a task is incomplete, say so explicitly and say why. Scaling work down is the user's call.
 
-**Docs must stay true.** Several docs currently describe things that do not exist — a
-`GOATSTARE_WG_RUNTIME` env var (no code reference), and a required DLL at
-`resources-windows/binaries/wireguard-amd64.dll`. When you change behavior, update the doc in the
-same commit; when you find a false claim, fix or delete it rather than working around it.
+**Docs must stay true.** When you change behavior, update the doc in the same commit; when you find
+a false claim, fix or delete it rather than working around it.
+
+Two such claims — a `GOATSTARE_WG_RUNTIME` env var with no code reference, and a required DLL at
+`resources-windows/binaries/wireguard-amd64.dll` — have since been removed from the docs. This
+paragraph kept naming them after the fact, which made *this* file the stale one.
 
 ---
 

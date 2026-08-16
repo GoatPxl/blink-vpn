@@ -26,7 +26,6 @@ use retry::RetryPolicy;
 
 pub trait ProviderAdapter: Send + Sync {
   fn provider_name(&self) -> &'static str;
-  fn default_regions(&self) -> &'static [&'static str];
   fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError>;
   fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError>;
   /// Geography for a slug this adapter owns, without contacting the provider.
@@ -202,10 +201,6 @@ impl DigitalOceanProviderAdapter {
 impl ProviderAdapter for DigitalOceanProviderAdapter {
   fn provider_name(&self) -> &'static str {
     "digitalocean"
-  }
-
-  fn default_regions(&self) -> &'static [&'static str] {
-    &["nyc1", "sfo3", "fra1"]
   }
 
   fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
@@ -466,15 +461,18 @@ pub struct ProvisionedDroplet {
   pub endpoint_port: u16,
 }
 
+/// Everything an adapter needs to create a node.
+///
+/// It once also carried `endpoint_ip` (a `0.0.0.0` placeholder to be filled in later),
+/// `readiness_marker_path` and `server_keypair` — all inputs to reading state back off the server
+/// after create. Nothing read them, because the payload already contains the keys and the endpoint
+/// comes from provider metadata (AGENTS.md §2).
 #[derive(Debug, Clone)]
 pub struct NodeInitRequest {
   pub node_name: String,
   pub region: String,
   pub size_slug: String,
   pub init_payload: String,
-  pub endpoint_ip: String,
-  pub readiness_marker_path: String,
-  pub server_keypair: WireGuardKeypair,
 }
 
 #[derive(Debug, Clone)]
@@ -482,16 +480,18 @@ pub struct NodeInitResult {
   pub provisioned: ProvisionedDroplet,
 }
 
+/// What the adapter needs to report a node ready.
+///
+/// The keypair is here because the adapter builds the output contract from what was generated
+/// locally; `readiness_marker_path` used to accompany it, for reading the marker back.
 #[derive(Debug, Clone)]
 pub struct BootstrapWaitRequest {
   pub droplet_id: u64,
   pub endpoint_ip: String,
-  pub readiness_marker_path: String,
   pub server_keypair: WireGuardKeypair,
 }
 
 pub trait NodeProvider: Send + Sync {
-  fn provider_name(&self) -> &'static str;
   fn init(&self, token: &str, request: &NodeInitRequest) -> Result<NodeInitResult, ProviderAdapterError>;
   fn wait_for_bootstrap_ready(
     &self,
@@ -510,10 +510,6 @@ struct AdapterNodeProvider {
 }
 
 impl AdapterNodeProvider {
-  fn new(adapter: Arc<dyn ProviderAdapter>) -> Self {
-    Self { adapter, token: None }
-  }
-
   fn with_token(adapter: Arc<dyn ProviderAdapter>, token: String) -> Self {
     Self {
       adapter,
@@ -523,10 +519,6 @@ impl AdapterNodeProvider {
 }
 
 impl NodeProvider for AdapterNodeProvider {
-  fn provider_name(&self) -> &'static str {
-    self.adapter.provider_name()
-  }
-
   fn init(&self, token: &str, request: &NodeInitRequest) -> Result<NodeInitResult, ProviderAdapterError> {
     let effective_token = self.token.as_deref().unwrap_or(token);
 
@@ -649,6 +641,9 @@ impl ProviderRegistry {
     }
   }
 
+  /// A registry holding one mock adapter, so orchestrator tests can exercise the real flows
+  /// without a provider account. Production always builds the full registry via `new`.
+  #[cfg(test)]
   pub fn from_adapter(adapter: Arc<dyn ProviderAdapter>) -> Self {
     let slug = adapter.provider_name().to_string();
     let mut adapters_by_slug = HashMap::new();
@@ -667,10 +662,15 @@ impl ProviderRegistry {
       .unwrap_or_else(|| panic!("default provider adapter missing: {}", self.default_provider_slug))
   }
 
+  /// A node provider with no credential attached.
+  ///
+  /// Test-only: production always resolves through `node_provider_for_provider_id`, which reads the
+  /// stored credential. Docker needs no real token, which is what makes this usable in tests.
+  #[cfg(test)]
   pub fn node_provider_for_slug(&self, slug: &str) -> Option<Arc<dyn NodeProvider>> {
     self
       .adapter_arc_for_slug(slug)
-      .map(|adapter| Arc::new(AdapterNodeProvider::new(adapter)) as Arc<dyn NodeProvider>)
+      .map(|adapter| Arc::new(AdapterNodeProvider::with_token(adapter, String::new())) as Arc<dyn NodeProvider>)
   }
 
   pub fn node_provider_for_provider_id(
@@ -709,56 +709,10 @@ impl ProviderRegistry {
     Ok(Arc::new(AdapterNodeProvider::with_token(adapter, token)) as Arc<dyn NodeProvider>)
   }
 
-  pub fn create_digitalocean_provider_with_token(
-    &self,
-    db: &Database,
-    secure_storage: &SecureStorage,
-    provider_id: &str,
-    provider_name: &str,
-    api_token: &str,
-  ) -> Result<ProviderRecord, ProviderFlowError> {
-    self.upsert_digitalocean_provider_with_token(db, secure_storage, provider_id, provider_name, api_token)
-  }
-
-  pub fn upsert_digitalocean_provider_with_token(
-    &self,
-    db: &Database,
-    secure_storage: &SecureStorage,
-    provider_id: &str,
-    provider_name: &str,
-    api_token: &str,
-  ) -> Result<ProviderRecord, ProviderFlowError> {
-    self.upsert_provider_with_token(
-      db,
-      secure_storage,
-      provider_id,
-      provider_name,
-      "digitalocean",
-      api_token,
-    )
-  }
-
-  pub fn create_docker_provider_with_token(
-    &self,
-    db: &Database,
-    secure_storage: &SecureStorage,
-    provider_id: &str,
-    provider_name: &str,
-    api_token: &str,
-  ) -> Result<ProviderRecord, ProviderFlowError> {
-    self.upsert_docker_provider_with_token(db, secure_storage, provider_id, provider_name, api_token)
-  }
-
-  pub fn upsert_docker_provider_with_token(
-    &self,
-    db: &Database,
-    secure_storage: &SecureStorage,
-    provider_id: &str,
-    provider_name: &str,
-    api_token: &str,
-  ) -> Result<ProviderRecord, ProviderFlowError> {
-    self.upsert_provider_with_token(db, secure_storage, provider_id, provider_name, "docker", api_token)
-  }
+  // Four provider-named wrappers used to live here — create/upsert pairs for DigitalOcean and for
+  // Docker — each of which did nothing but pass a hardcoded slug to `upsert_provider_with_token`.
+  // Nothing called them, and a registry method named after one provider is the shape AGENTS.md §3
+  // exists to prevent. The slug is a parameter now, as it already was underneath.
 
   /// Register a credential against whichever adapter the provider's slug names.
   ///
@@ -1209,7 +1163,6 @@ mod tests {
         &BootstrapWaitRequest {
           droplet_id: 4242,
           endpoint_ip: String::new(),
-          readiness_marker_path: "/var/lib/goatstare/bootstrap-ready.json".to_string(),
           server_keypair: keypair.clone(),
         },
       )
@@ -1242,7 +1195,6 @@ mod tests {
         &BootstrapWaitRequest {
           droplet_id: 99,
           endpoint_ip: String::new(),
-          readiness_marker_path: "/var/lib/goatstare/bootstrap-ready.json".to_string(),
           server_keypair: generate_server_keypair().expect("keypair should generate"),
         },
       )
@@ -1257,10 +1209,6 @@ mod tests {
   impl ProviderAdapter for TestProviderAdapter {
     fn provider_name(&self) -> &'static str {
       "test-provider"
-    }
-
-    fn default_regions(&self) -> &'static [&'static str] {
-      &["test-region"]
     }
 
     fn validate_token(&self, _token: &str) -> Result<Account, ProviderAdapterError> {
@@ -1332,12 +1280,15 @@ mod tests {
     }
   }
 
+  /// Both builtin slugs resolve to a node provider, and an unregistered one resolves to none —
+  /// which is what turns an unknown slug into an explicit capability error instead of a panic.
   #[test]
-  fn node_provider_registry_can_wrap_docker_adapter() {
+  fn node_provider_resolves_for_registered_slugs_only() {
     let registry = ProviderRegistry::new();
-    let node_provider = registry.node_provider_for_slug("docker").expect("docker node provider should resolve");
 
-    assert_eq!(node_provider.provider_name(), "docker");
+    assert!(registry.node_provider_for_slug("docker").is_some());
+    assert!(registry.node_provider_for_slug("digitalocean").is_some());
+    assert!(registry.node_provider_for_slug("nimbus-cloud").is_none());
   }
 
   #[test]
@@ -1350,11 +1301,12 @@ mod tests {
     let plaintext_token = "dop_v1_sensitive_plaintext_token";
 
     let provider = registry
-      .create_digitalocean_provider_with_token(
+      .upsert_provider_with_token(
         &db,
         &secure_storage,
         "provider-1",
         "DigitalOcean",
+        "digitalocean",
         plaintext_token,
       )
       .expect("provider flow should succeed");
@@ -1399,11 +1351,12 @@ mod tests {
     let secure_storage = SecureStorage::dev_mock();
 
     let provider = registry
-      .create_digitalocean_provider_with_token(
+      .upsert_provider_with_token(
         &db,
         &secure_storage,
         "provider-1",
         "DigitalOcean",
+        "digitalocean",
         "dop_v1_stale_test_token",
       )
       .expect("provider create should succeed");
@@ -1452,9 +1405,6 @@ mod tests {
       region: "test-region".to_string(),
       size_slug: "test-size".to_string(),
       init_payload: "#!/bin/sh\necho hi".to_string(),
-      endpoint_ip: String::new(),
-      readiness_marker_path: "/tmp/marker".to_string(),
-      server_keypair: generate_server_keypair().expect("keypair generation should succeed"),
     };
 
     let result = registry
@@ -1475,11 +1425,12 @@ mod tests {
     let token = "dop_v1_windows_roundtrip_test_token";
 
     let provider = registry
-      .create_digitalocean_provider_with_token(
+      .upsert_provider_with_token(
         &db,
         &secure_storage,
         "provider-1",
         "DigitalOcean",
+        "digitalocean",
         token,
       )
       .expect("provider create should succeed with Windows secure storage");

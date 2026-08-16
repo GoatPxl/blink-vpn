@@ -171,7 +171,7 @@ export function buildRegionOptions(regions: Array<{ region: ProviderRegion | nul
 }
 
 /** Sort key for grouping the region filter by country, then city. */
-export function locationSortKey(region: ProviderRegion | null | undefined, slug: string): string {
+function locationSortKey(region: ProviderRegion | null | undefined, slug: string): string {
   const country = region?.country ?? "";
   const city = region?.city ?? "";
   // Unknown regions sort last rather than first, so recognised places lead the list.

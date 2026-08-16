@@ -14,15 +14,9 @@ pub fn run() {
   // production build could not resolve.
   tauri::Builder::default()
     .setup(move |app| {
-      let log_level = if cfg!(debug_assertions) {
-        log::LevelFilter::Info
-      } else {
-        log::LevelFilter::Warn
-      };
-
       app.handle().plugin(
         tauri_plugin_log::Builder::default()
-          .level(log_level)
+          .level(backend::logging::default_level_filter())
           .build(),
       )?;
 

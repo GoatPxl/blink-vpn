@@ -2,7 +2,7 @@
 
 import { NodesView } from "@/components/dashboard/nodes-view";
 import { useDashboard } from "@/components/dashboard/dashboard-provider";
-import { getNodePricingDisplay } from "@/components/dashboard/shared";
+import { getNodePricingDisplay, NODE_CREATE_ROUTE } from "@/components/dashboard/shared";
 import {
   NODE_STATUS_ORDER,
   buildRegionOptions,
@@ -136,7 +136,7 @@ export default function DashboardNodesPage() {
     : "Select a node to inspect health, pricing, and recovery options.";
 
   function handleNavigateToCreate() {
-    router.push("/dashboard/nodes/create");
+    router.push(NODE_CREATE_ROUTE);
   }
 
   function handleOpenNodeDetails(nodeId: string) {
