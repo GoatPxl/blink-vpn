@@ -75,7 +75,7 @@ export function toCommandError(error: unknown): CommandError {
   return new CommandError({
     kind: "unknown",
     message,
-    next_action: "Retry the action. If it keeps failing, export a diagnostics bundle from the Diagnostics page.",
+    next_action: "Retry the action. If it keeps failing, export a diagnostics bundle from the Activity page.",
   });
 }
 
@@ -230,7 +230,7 @@ export interface DiagnosticsBundle {
   providers: ProviderRecord[];
   nodes: VpnNodeRecord[];
   tunnels: TunnelRecord[];
-  init_runs?: InitRunRecord[];
+  activity?: ActivityEvent[];
   redacted_notes: string[];
   wireguard_debug?: {
     commands: string[];
@@ -240,15 +240,36 @@ export interface DiagnosticsBundle {
   };
 }
 
-export interface InitRunRecord {
+/** What the app did, one recorded step at a time. Stages of one run share a `correlation_id`. */
+export interface ActivityEvent {
   id: number;
-  node_id: string;
-  provider_slug: string;
-  init_kind: string;
+  /** Null for events belonging to the app rather than to one node. */
+  node_id: string | null;
+  provider_slug: string | null;
+  /** `provision` | `connect` | `disconnect` | `destroy` | `cleanup` | `app` */
+  category: string;
   stage: string;
+  /** `info` | `success` | `error` */
   outcome: string;
-  output: string;
+  correlation_id: string | null;
+  /** Redacted by the backend before it was written. */
+  detail: string;
   created_at: string;
+}
+
+/**
+ * A folder or file the user may need to open when reporting a problem.
+ *
+ * `reveal_app_location` takes the `key` back, never `path` — the backend resolves it, so the
+ * webview cannot hand an arbitrary target to the Windows shell.
+ */
+export interface AppLocation {
+  key: string;
+  label: string;
+  description: string;
+  path: string;
+  /** False until the app has written something there. */
+  exists: boolean;
 }
 
 export interface WireGuardReadiness {
@@ -516,4 +537,13 @@ export async function getDiagnosticsBundle(): Promise<DiagnosticsBundle> {
 
 export async function exportDiagnosticsBundle(): Promise<string> {
   return invokeCommand<string>("export_diagnostics_bundle");
+}
+
+export async function listAppLocations(): Promise<AppLocation[]> {
+  return invokeCommand<AppLocation[]>("list_app_locations");
+}
+
+/** Opens one of the locations from `listAppLocations` in Explorer. Takes its key, never a path. */
+export async function revealAppLocation(key: string): Promise<void> {
+  return invokeCommand<void>("reveal_app_location", { key });
 }

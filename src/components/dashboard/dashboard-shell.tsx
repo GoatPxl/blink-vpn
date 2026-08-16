@@ -11,14 +11,16 @@ const navItems: Array<{ id: AppView; label: string; icon: string; eyebrow: strin
   { id: "nodes", label: "Server Locations", icon: "server", eyebrow: "Provision" },
   { id: "health", label: "Kill Switch", icon: "shield", eyebrow: "Connection" },
   { id: "settings", label: "Settings", icon: "lock", eyebrow: "Preferences" },
-  { id: "diagnostics", label: "Support", icon: "support", eyebrow: "Logs" },
+  // Was "Support / Logs" with a header reading "Diagnostics" — three names for one page, and no
+  // support channel behind any of them. It is a history of what this app did.
+  { id: "activity", label: "Activity", icon: "activity", eyebrow: "History" },
 ];
 
 const titleMap: Record<AppView, string> = {
   dashboard: "Network Stats",
   nodes: "Server Locations",
   health: "Kill Switch",
-  diagnostics: "Diagnostics",
+  activity: "Activity",
   settings: "Settings",
 };
 
@@ -26,7 +28,7 @@ const subtitleMap: Record<AppView, string> = {
   dashboard: "Monitor the active tunnel, throughput, and local node state.",
   nodes: "Choose where your traffic exits, and provision new servers.",
   health: "Verify leak protection, watch for dropped tunnels, and inspect connection health.",
-  diagnostics: "Review redacted logs, recovery suggestions, and exportable bundles.",
+  activity: "What this app has done, why anything failed, and what to send when reporting it.",
   settings: "Provider keys, WireGuard tunnel options, and version information.",
 };
 

@@ -12,7 +12,9 @@ use crate::backend::bootstrap::{
 };
 use crate::backend::crypto::keypair::{generate_client_keypair, generate_server_keypair, KeygenError};
 use crate::backend::db::Database;
-use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelRecord, TunnelStatus};
+use crate::backend::db::{
+  DbError, NewActivityEvent, NodeLifecycleStatus, TunnelRecord, TunnelStatus,
+};
 use crate::backend::logging;
 use crate::backend::provider::{
   BootstrapWaitRequest, NodeInitRequest, ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError,
@@ -75,6 +77,9 @@ const EXTERNAL_IP_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Health polls every few seconds; probing that often would hammer a third-party service for a
 /// value that rarely changes. A connection state change bypasses this entirely.
 const EXTERNAL_IP_CACHE_TTL: Duration = Duration::from_secs(60);
+/// How many activity events to keep. Its predecessor table grew without bound while only
+/// provisioning wrote to it; every connect and disconnect appends now, so it needs a ceiling.
+const ACTIVITY_HISTORY_LIMIT: usize = 1000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateVpnNodeRequest {
@@ -272,9 +277,76 @@ pub struct DiagnosticsBundle {
   pub providers: Vec<crate::backend::db::ProviderRecord>,
   pub nodes: Vec<crate::backend::db::VpnNodeRecord>,
   pub tunnels: Vec<crate::backend::db::TunnelRecord>,
-  pub init_runs: Vec<crate::backend::db::InitRunLogRecord>,
+  pub activity: Vec<crate::backend::db::ActivityEvent>,
   pub redacted_notes: Vec<String>,
   pub wireguard_debug: crate::backend::wireguard::WireGuardDebugSnapshot,
+}
+
+/// Writes the activity trail for one run of one flow.
+///
+/// Holding the run's identity in one place keeps every call site down to stage, outcome and detail,
+/// and guarantees the whole run shares a `correlation_id` so the UI can collapse it into a single
+/// entry.
+struct ActivityRecorder<'a> {
+  db: &'a Database,
+  node_id: Option<&'a str>,
+  provider_slug: Option<&'a str>,
+  category: &'a str,
+  correlation_id: Option<&'a str>,
+}
+
+impl<'a> ActivityRecorder<'a> {
+  fn new(db: &'a Database, category: &'a str, correlation_id: Option<&'a str>) -> Self {
+    Self {
+      db,
+      node_id: None,
+      provider_slug: None,
+      category,
+      correlation_id,
+    }
+  }
+
+  fn for_node(mut self, node_id: &'a str) -> Self {
+    self.node_id = Some(node_id);
+    self
+  }
+
+  fn with_provider(mut self, provider_slug: Option<&'a str>) -> Self {
+    self.provider_slug = provider_slug;
+    self
+  }
+
+  /// Deliberately infallible to the caller: the history is a diagnostic aid, and failing a connect
+  /// because the diary could not be written would be the wrong trade.
+  fn record(&self, stage: &str, outcome: &str, detail: &str) {
+    let _ = self.db.append_activity_event(&NewActivityEvent {
+      node_id: self.node_id,
+      provider_slug: self.provider_slug,
+      category: self.category,
+      stage,
+      outcome,
+      correlation_id: self.correlation_id,
+      // Redacted here, at the write boundary, so nothing downstream has to remember to.
+      detail: &logging::redact_sensitive_text(detail),
+    });
+  }
+
+  fn info(&self, stage: &str, detail: &str) {
+    self.record(stage, "info", detail);
+  }
+
+  fn success(&self, stage: &str, detail: &str) {
+    self.record(stage, "success", detail);
+  }
+
+  /// Records the flattened `#[source]` chain rather than the outermost message.
+  ///
+  /// A provider rejecting a droplet name used to be stored as only "Node creation or bootstrap
+  /// setup failed", with the actual complaint attached to the error and never printed. The whole
+  /// point of keeping this history is that the recorded reason is the one you can act on.
+  fn failure(&self, stage: &str, error: &dyn std::error::Error) {
+    self.record(stage, "error", &logging::describe_error_chain(error));
+  }
 }
 
 #[derive(Debug, Error)]
@@ -359,6 +431,7 @@ impl Orchestrator {
   /// a first observation, a steady state, a stop the app asked for — is not.
   fn observe_tunnel_runtime(
     &self,
+    db: &Database,
     tunnel_id: &str,
     node_id: &str,
     connected: bool,
@@ -380,6 +453,19 @@ impl Orchestrator {
         // The app asked for this stop, so it is not a drop.
         return None;
       }
+
+      // Written here, at the transition, rather than wherever the drop is later read: `watch.drop`
+      // keeps reporting the same drop on every poll, so recording on read would append a row every
+      // few seconds until the user reconnected.
+      ActivityRecorder::new(db, "connect", None)
+        .for_node(node_id)
+        .record(
+          "connect.dropped",
+          "error",
+          &format!(
+            "tunnel_id={tunnel_id} stopped without being asked to; traffic is unprotected until reconnect"
+          ),
+        );
 
       watch.drop = Some(UnexpectedDrop {
         tunnel_id: tunnel_id.to_string(),
@@ -733,7 +819,7 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     node_id: &str,
   ) -> Result<(), OrchestratorError> {
-    let _ = self.force_cleanup_vpn_node(providers, wireguard, db, secure_storage, node_id);
+    let _ = self.cleanup_vpn_node(providers, wireguard, db, secure_storage, node_id, "destroy");
     Ok(())
   }
 
@@ -745,7 +831,25 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     node_id: &str,
   ) -> Result<ForceCleanupResult, OrchestratorError> {
+    self.cleanup_vpn_node(providers, wireguard, db, secure_storage, node_id, "cleanup")
+  }
+
+  /// Shared teardown for both Destroy and Force Cleanup.
+  ///
+  /// `category` only labels the activity trail — the two entry points do the same work, and the
+  /// user needs to be able to tell which one they asked for when reading the history back.
+  fn cleanup_vpn_node(
+    &self,
+    providers: &ProviderRegistry,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    node_id: &str,
+    category: &str,
+  ) -> Result<ForceCleanupResult, OrchestratorError> {
     let correlation_id = Uuid::new_v4().to_string();
+    let activity = ActivityRecorder::new(db, category, Some(&correlation_id)).for_node(node_id);
+    activity.info("cleanup.start", "teardown requested");
     log::warn!(
       "event=vpn_node.force_cleanup.start correlation_id={} node_id={}",
       correlation_id,
@@ -755,12 +859,14 @@ impl Orchestrator {
     let node = db.get_vpn_node(node_id).map_err(|source| OrchestratorError::Database {
       detail: "Failed loading vpn node before force cleanup flow.".to_string(),
       source,
-    })?;
+    })
+    .inspect_err(|error| activity.failure("cleanup.error", error))?;
 
     let tunnels = db.list_tunnels_for_node(node_id).map_err(|source| OrchestratorError::Database {
       detail: "Failed listing tunnels before force cleanup flow.".to_string(),
       source,
-    })?;
+    })
+    .inspect_err(|error| activity.failure("cleanup.error", error))?;
 
     for tunnel in &tunnels {
       let _ = wireguard.unregister_tunnel(&tunnel.name);
@@ -812,6 +918,21 @@ impl Orchestrator {
       node_record_removed
     );
 
+    let detail = format!(
+      "local_tunnels_removed={local_tunnels_removed} remote_droplet_delete_attempted={remote_droplet_delete_attempted} remote_droplet_delete_succeeded={remote_droplet_delete_succeeded} node_record_removed={node_record_removed}"
+    );
+    // A remote delete that was tried and failed leaves a droplet the user is still paying for while
+    // the local row disappears. That is the one outcome of this flow that must not read as success.
+    if remote_droplet_delete_attempted && !remote_droplet_delete_succeeded {
+      activity.record(
+        "cleanup.completed",
+        "error",
+        &format!("{detail} — the remote server was NOT deleted and may still be billing"),
+      );
+    } else {
+      activity.success("cleanup.completed", &detail);
+    }
+
     Ok(ForceCleanupResult {
       node_id: node_id.to_string(),
       correlation_id,
@@ -846,20 +967,15 @@ impl Orchestrator {
       })?
       .map(|provider| provider.slug)
       .unwrap_or_else(|| "digitalocean".to_string());
-    let init_kind = if provider_slug == "docker" {
-      "docker-init"
-    } else {
-      "cloud-init"
-    };
+
+    // The stage labels used to be prefixed "cloud-init" or "docker-init", chosen by comparing the
+    // slug here — a provider branch outside an adapter (AGENTS.md 3). `provider_slug` is recorded
+    // on every event and already carries that distinction.
+    let activity = ActivityRecorder::new(db, "provision", Some(&correlation_id))
+      .for_node(&request.node_id)
+      .with_provider(Some(&provider_slug));
     let record_init = |stage: &str, outcome: &str, output: String| {
-      let _ = db.append_init_run_log(
-        &request.node_id,
-        &provider_slug,
-        init_kind,
-        stage,
-        outcome,
-        &logging::redact_sensitive_text(&output),
-      );
+      activity.record(stage, outcome, &output);
     };
     record_init(
       "create.start",
@@ -1505,7 +1621,27 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     request: &ConnectTunnelRequest,
   ) -> Result<(), OrchestratorError> {
-    self.connect_tunnel_inner(wireguard, db, secure_storage, request)
+    // Recorded here rather than inside `connect_tunnel_inner`, which returns early from a dozen
+    // places; wrapping it means every one of those exits is accounted for.
+    let correlation_id = Uuid::new_v4().to_string();
+    let activity = ActivityRecorder::new(db, "connect", Some(&correlation_id))
+      .for_node(&request.node_id);
+    activity.info(
+      "connect.start",
+      &format!("tunnel_id={}", request.tunnel_id),
+    );
+
+    let outcome = self.connect_tunnel_inner(wireguard, db, secure_storage, request);
+
+    match &outcome {
+      Ok(()) => activity.success(
+        "connect.ready",
+        &format!("tunnel_id={} is connected", request.tunnel_id),
+      ),
+      Err(error) => activity.failure("connect.error", error),
+    }
+
+    outcome
   }
 
   fn connect_tunnel_inner(
@@ -1730,6 +1866,30 @@ impl Orchestrator {
   }
 
   pub fn disconnect_tunnel(
+    &self,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    request: &DisconnectTunnelRequest,
+  ) -> Result<(), OrchestratorError> {
+    let correlation_id = Uuid::new_v4().to_string();
+    let activity = ActivityRecorder::new(db, "disconnect", Some(&correlation_id))
+      .for_node(&request.node_id);
+
+    let outcome = self.disconnect_tunnel_inner(wireguard, db, secure_storage, request);
+
+    match &outcome {
+      Ok(()) => activity.success(
+        "disconnect.completed",
+        &format!("tunnel_id={} was stopped on request", request.tunnel_id),
+      ),
+      Err(error) => activity.failure("disconnect.error", error),
+    }
+
+    outcome
+  }
+
+  fn disconnect_tunnel_inner(
     &self,
     wireguard: &WireGuardManager,
     db: &Database,
@@ -1992,6 +2152,7 @@ impl Orchestrator {
     // flowing unprotected. Nothing used to notice; the row was rewritten and the badge flipped.
     let unexpected_drop = selected_tunnel.as_ref().and_then(|tunnel| {
       self.observe_tunnel_runtime(
+        db,
         &tunnel.id,
         &node.id,
         matches!(effective_status, Some(TunnelStatus::Connected)),
@@ -2083,8 +2244,8 @@ impl Orchestrator {
       })?);
     }
 
-    let init_runs = db.list_init_run_logs(200).map_err(|source| OrchestratorError::Database {
-      detail: "Failed loading init run logs for diagnostics bundle.".to_string(),
+    let activity = db.list_activity_events(200).map_err(|source| OrchestratorError::Database {
+      detail: "Failed loading activity history for diagnostics bundle.".to_string(),
       source,
     })?;
 
@@ -2116,11 +2277,13 @@ impl Orchestrator {
       })
       .collect::<Vec<_>>();
 
-    let init_runs = init_runs
+    // Redacted again on read as defence in depth: rows written before 0017 came from a path that
+    // redacted, but the bundle leaves the process and cheap belt-and-braces is worth it here.
+    let activity = activity
       .into_iter()
-      .map(|mut init_run| {
-        init_run.output = logging::redact_sensitive_text(&init_run.output);
-        init_run
+      .map(|mut event| {
+        event.detail = logging::redact_sensitive_text(&event.detail);
+        event
       })
       .collect::<Vec<_>>();
 
@@ -2143,14 +2306,14 @@ impl Orchestrator {
         ));
       }
     }
-    for init_run in &init_runs {
-      if init_run.outcome.eq_ignore_ascii_case("error") {
+    for event in &activity {
+      if event.outcome.eq_ignore_ascii_case("error") {
         redacted_notes.push(format!(
-          "init:{}:{} stage={} output={}",
-          init_run.node_id,
-          init_run.init_kind,
-          init_run.stage,
-          logging::redact_sensitive_text(&init_run.output)
+          "activity:{}:{} stage={} detail={}",
+          event.node_id.as_deref().unwrap_or("app"),
+          event.category,
+          event.stage,
+          logging::redact_sensitive_text(&event.detail)
         ));
       }
     }
@@ -2160,7 +2323,7 @@ impl Orchestrator {
       providers,
       nodes,
       tunnels,
-      init_runs,
+      activity,
       redacted_notes,
       wireguard_debug: wireguard.debug_snapshot(),
     })
@@ -2172,6 +2335,10 @@ impl Orchestrator {
     db: &Database,
     secure_storage: &SecureStorage,
   ) -> Result<ReconcileReport, OrchestratorError> {
+    // Startup is the natural moment to trim: it happens often enough to keep the table bounded and
+    // never competes with a connect the user is waiting on.
+    let _ = db.prune_activity_events(ACTIVITY_HISTORY_LIMIT);
+
     let mut report = ReconcileReport::default();
     let nodes = db
       .list_vpn_nodes()
@@ -2348,6 +2515,21 @@ impl Orchestrator {
             .to_string(),
         });
       }
+    }
+
+    // Startup is the one moment the app can notice something that changed while it was not
+    // running — a tunnel stopped, a droplet deleted from the provider's own console. Recording it
+    // means the user sees that it happened, not just the repaired end state.
+    for issue in &report.issues {
+      let mut recorder = ActivityRecorder::new(db, "app", None);
+      if let Some(node_id) = issue.node_id.as_deref() {
+        recorder = recorder.for_node(node_id);
+      }
+      recorder.record(
+        "startup.reconcile",
+        if issue.repaired { "info" } else { "error" },
+        &issue.detail,
+      );
     }
 
     Ok(report)
@@ -4054,37 +4236,142 @@ mod tests {
     assert!(!state.blocks_ipv6);
   }
 
+  /// The Amsterdam regression, at the level that caused it.
+  ///
+  /// `thiserror` prints only the outermost message, so the provider's actual complaint — "droplet
+  /// name must be a valid hostname" — was attached to the error and never recorded anywhere the
+  /// user or a later reader could see. Diagnosing it meant opening their SQLite file by hand.
+  #[test]
+  fn a_recorded_failure_carries_the_whole_cause_chain_not_just_the_outer_message() {
+    #[derive(Debug, thiserror::Error)]
+    #[error("the provider rejected the request")]
+    struct Outer {
+      #[source]
+      source: Inner,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("name must be a valid hostname")]
+    struct Inner;
+
+    let db = watch_test_db("failure_chain");
+    ActivityRecorder::new(&db, "provision", Some("run-1"))
+      .for_node("node-a")
+      .failure("create.error", &Outer { source: Inner });
+
+    let events = db.list_activity_events(10).expect("query should succeed");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].outcome, "error");
+    assert!(
+      events[0].detail.contains("name must be a valid hostname"),
+      "the cause must survive into the record: {}",
+      events[0].detail
+    );
+    assert!(
+      events[0].detail.contains("the provider rejected the request"),
+      "the outer message must survive too: {}",
+      events[0].detail
+    );
+  }
+
+  /// A failed connect must leave a trail, and it must be tied to the attempt that produced it.
+  #[test]
+  fn a_failed_connect_records_start_and_error_under_one_correlation_id() {
+    let orchestrator = Orchestrator::new();
+    let db = watch_test_db("connect_failure_recorded");
+    let wireguard = WireGuardManager::new();
+    let secure_storage = SecureStorage::dev_mock();
+
+    let result = orchestrator.connect_tunnel(
+      &wireguard,
+      &db,
+      &secure_storage,
+      &ConnectTunnelRequest {
+        node_id: "node-missing".to_string(),
+        tunnel_id: "tunnel-missing".to_string(),
+      },
+    );
+    assert!(result.is_err(), "connecting to a node that does not exist must fail");
+
+    let events = db.list_activity_events(10).expect("query should succeed");
+    let stages: Vec<&str> = events.iter().map(|event| event.stage.as_str()).collect();
+    assert!(stages.contains(&"connect.start"), "stages: {stages:?}");
+    assert!(stages.contains(&"connect.error"), "stages: {stages:?}");
+
+    let correlation_ids: HashSet<&str> = events
+      .iter()
+      .filter_map(|event| event.correlation_id.as_deref())
+      .collect();
+    assert_eq!(
+      correlation_ids.len(),
+      1,
+      "both stages belong to the same attempt: {correlation_ids:?}"
+    );
+
+    let failure = events
+      .iter()
+      .find(|event| event.stage == "connect.error")
+      .expect("the failure should be recorded");
+    assert_eq!(failure.outcome, "error");
+    assert_eq!(failure.category, "connect");
+    assert_eq!(failure.node_id.as_deref(), Some("node-missing"));
+  }
+
+  fn watch_test_db(test_name: &str) -> Database {
+    let db = Database::new(test_db_path(test_name));
+    db.run_migrations().expect("migrations should succeed");
+    db
+  }
+
   /// The distinction the app could not previously make: a crash and a Disconnect click both land
   /// on `Disconnected`, but only one leaves the user unprotected without asking.
   #[test]
   fn a_tunnel_stopping_on_its_own_is_reported_as_an_unexpected_drop() {
     let orchestrator = Orchestrator::new();
+    let db = watch_test_db("drop_reported");
 
     assert_eq!(
-      orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", true),
+      orchestrator.observe_tunnel_runtime(&db, "tunnel-a", "node-a", true),
       None,
       "a healthy observation is not a drop"
     );
 
     let drop = orchestrator
-      .observe_tunnel_runtime("tunnel-a", "node-a", false)
+      .observe_tunnel_runtime(&db, "tunnel-a", "node-a", false)
       .expect("a stop with no matching intent is a drop");
     assert_eq!(drop.tunnel_id, "tunnel-a");
     assert_eq!(drop.node_id, "node-a");
     assert!(drop.observed_at_epoch_ms > 0);
+
+    // The banner is in-memory and gone on restart; the history is what survives to explain a gap
+    // in protection the user may only notice later.
+    let events = db.list_activity_events(10).expect("query should succeed");
+    let dropped = events
+      .iter()
+      .find(|event| event.stage == "connect.dropped")
+      .expect("the drop should be recorded in activity history");
+    assert_eq!(dropped.outcome, "error");
+    assert_eq!(dropped.node_id.as_deref(), Some("node-a"));
   }
 
   #[test]
   fn a_disconnect_the_app_asked_for_is_not_reported_as_a_drop() {
     let orchestrator = Orchestrator::new();
-    orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", true);
+    let db = watch_test_db("drop_intentional");
+    orchestrator.observe_tunnel_runtime(&db, "tunnel-a", "node-a", true);
 
     orchestrator.expect_tunnel_stop("tunnel-a");
 
     assert_eq!(
-      orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", false),
+      orchestrator.observe_tunnel_runtime(&db, "tunnel-a", "node-a", false),
       None,
       "an intentional stop must not raise a drop alert"
+    );
+
+    let events = db.list_activity_events(10).expect("query should succeed");
+    assert!(
+      !events.iter().any(|event| event.stage == "connect.dropped"),
+      "an intentional stop must not be recorded as a drop either"
     );
   }
 
@@ -4093,27 +4380,42 @@ mod tests {
   #[test]
   fn a_drop_persists_across_polls_until_the_tunnel_is_connected_again() {
     let orchestrator = Orchestrator::new();
-    orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", true);
-    orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", false);
+    let db = watch_test_db("drop_persists");
+    orchestrator.observe_tunnel_runtime(&db, "tunnel-a", "node-a", true);
+    orchestrator.observe_tunnel_runtime(&db, "tunnel-a", "node-a", false);
 
     assert!(
-      orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", false).is_some(),
+      orchestrator.observe_tunnel_runtime(&db, "tunnel-a", "node-a", false).is_some(),
       "a repeat poll must keep reporting the drop"
     );
 
     assert_eq!(
-      orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", true),
+      orchestrator.observe_tunnel_runtime(&db, "tunnel-a", "node-a", true),
       None,
       "reconnecting clears it"
     );
+
+    // Health polls every 15s, so recording on read rather than on the transition would append a
+    // row per poll for as long as the tunnel stayed down.
+    let dropped = db
+      .list_activity_events(50)
+      .expect("query should succeed")
+      .into_iter()
+      .filter(|event| event.stage == "connect.dropped")
+      .count();
+    assert_eq!(dropped, 1, "one drop must record exactly one event");
   }
 
   /// A tunnel first seen stopped was not observed dropping, so warning about it would be a guess.
   #[test]
   fn a_tunnel_first_seen_stopped_is_not_a_drop() {
     let orchestrator = Orchestrator::new();
+    let db = watch_test_db("drop_first_seen_stopped");
 
-    assert_eq!(orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", false), None);
+    assert_eq!(
+      orchestrator.observe_tunnel_runtime(&db, "tunnel-a", "node-a", false),
+      None
+    );
   }
 
   /// Egress probe that answers from fixed values instead of the network.

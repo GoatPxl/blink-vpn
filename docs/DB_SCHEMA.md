@@ -94,6 +94,47 @@ Indexes:
 - `idx_tunnels_node_id`
 - `idx_tunnels_status`
 
+### activity_events
+
+Columns:
+
+- `id` INTEGER PRIMARY KEY AUTOINCREMENT
+- `node_id` TEXT NULL
+- `provider_slug` TEXT NULL
+- `category` TEXT NOT NULL — `provision` · `connect` · `disconnect` · `destroy` · `cleanup` · `app`
+- `stage` TEXT NOT NULL
+- `outcome` TEXT NOT NULL — `info` · `success` · `error`
+- `correlation_id` TEXT NULL
+- `detail` TEXT NOT NULL
+- `created_at` TEXT NOT NULL
+
+What the app did, one recorded step at a time. It is the app's memory of its own actions: without
+it, closing the window forgets every connect, disconnect and teardown.
+
+`correlation_id` groups the stages of one run, so a failed provision reads as a single entry with
+its steps rather than eight unrelated rows. `node_id` is **nullable** because a startup reconcile
+belongs to the app, not to any one node.
+
+`detail` is redacted at the **write** boundary, in `ActivityRecorder::record` — nothing redacts on
+read. An `error` outcome records `describe_error_chain`, the flattened `#[source]` chain, rather
+than the outermost message: a droplet rejected for a bad name used to record only "Node creation or
+bootstrap setup failed", with the provider's actual complaint attached to the error and printed
+nowhere.
+
+Bounded to the newest 1000 rows by `prune_activity_events`, called once from `reconcile_startup`.
+Its predecessor was never pruned, which was survivable only because a single flow wrote to it.
+
+Replaces `init_run_logs` (migration 0009, dropped by 0017), which was written **only** by
+`create_vpn_node_to_ready`. Its `node_id TEXT NOT NULL` could not hold an app-level event, and its
+`init_kind` column held `cloud-init` / `docker-init`, selected by comparing the provider slug inside
+the orchestrator — a provider branch outside an adapter, which AGENTS.md §3 forbids. `provider_slug`
+carries that distinction already, so the column was dropped rather than migrated.
+
+Indexes:
+
+- `idx_activity_events_created`
+- `idx_activity_events_node`
+
 ### app_settings
 
 Columns:
@@ -156,9 +197,15 @@ Current migration sequence in [src-tauri/migrations](src-tauri/migrations):
 6. Provider pricing snapshots
 7. Docker provider seed
 8. Provider status metadata
-9. Init run logs
+9. Init run logs *(dropped by 17)*
 10. Tunnel config metadata
 11. App settings
+12. Node client key
+13. Node endpoint port
+14. Drop `wireguard_connection_mode`
+15. Tunnel `connected_at`
+16. Provider validation result
+17. Activity events *(replaces init run logs)*
 
 Migration rules:
 

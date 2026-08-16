@@ -3,8 +3,8 @@ import { describe, it } from "node:test";
 
 import {
   buildConnectivityChecks,
-  buildLogLines,
   describeKillSwitch,
+  describeTunnelConfig,
   formatDropAge,
   type ProviderAccess,
 } from "../../src/lib/health-display.ts";
@@ -168,54 +168,73 @@ describe("buildConnectivityChecks", () => {
   });
 });
 
-describe("buildLogLines", () => {
-  const diagnostics = {
-    generated_at: "1786800000000",
-    providers: [],
-    nodes: [],
-    tunnels: [],
-    init_runs: [
-      { id: 1, node_id: "node-1", provider_slug: "digitalocean", init_kind: "cloud-init", stage: "create.start", outcome: "info", output: "init flow started", created_at: "2026-08-16T04:53:54.905Z" },
-      { id: 2, node_id: "node-1", provider_slug: "digitalocean", init_kind: "cloud-init", stage: "create.error", outcome: "error", output: "droplet create rejected", created_at: "2026-08-16T04:53:56.488Z" },
-    ],
-    redacted_notes: ["node node-1 failed: bad name"],
-    wireguard_debug: {
-      commands: ["1786800000 | sc query WireGuardTunnel$wg-node-1", "1786800005 | wg show wg-node-1 dump"],
-      last_import_tunnel_name: null,
-      last_import_config_redacted: null,
-      last_import_config_temp_path: null,
-    },
-  } as unknown as DiagnosticsBundle;
+describe("describeTunnelConfig", () => {
+  const CONFIG = [
+    "[Interface]",
+    "PrivateKey = [REDACTED]",
+    "Address = 10.66.0.2/32",
+    "DNS = 9.9.9.9",
+    "",
+    "[Peer]",
+    "PublicKey = serverpub",
+    "AllowedIPs = 0.0.0.0/0",
+    "Endpoint = 203.0.113.10:51820",
+    "PersistentKeepalive = 25",
+  ].join("\n");
 
-  it("returns nothing before diagnostics arrive", () => {
-    assert.deepEqual(buildLogLines(null, "all"), []);
+  function bundle(overrides: Record<string, unknown> = {}): DiagnosticsBundle {
+    return {
+      generated_at: "1786800000000",
+      providers: [],
+      nodes: [],
+      tunnels: [],
+      activity: [],
+      redacted_notes: [],
+      wireguard_debug: {
+        commands: [],
+        last_import_tunnel_name: "wg-primary",
+        last_import_config_redacted: CONFIG,
+        last_import_config_temp_path: "C:\\Users\\me\\AppData\\Local\\GoatStare\\tunnels\\wg-primary.conf",
+        ...overrides,
+      },
+    } as unknown as DiagnosticsBundle;
+  }
+
+  it("says it is unavailable before any diagnostics arrive", () => {
+    const result = describeTunnelConfig(null);
+    assert.equal(result.available, false);
+    assert.equal(result.configText, null);
+    assert.match(result.emptyReason, /waiting/i);
   });
 
-  it("includes real command trace and init runs on the All tab", () => {
-    const lines = buildLogLines(diagnostics, "all");
-    assert.ok(lines.some((line) => line.message.includes("sc query")), "real commands should appear");
-    assert.ok(lines.some((line) => line.message.includes("init flow started")));
-    // The fixture this replaces invented a subsystem that does not exist in the codebase.
-    assert.ok(!lines.some((line) => line.source.includes("NetGuard")));
+  // Distinct from "not loaded yet": the app is running and simply has not built a config.
+  it("distinguishes a loaded bundle with no config from an unloaded one", () => {
+    const result = describeTunnelConfig(bundle({ last_import_config_redacted: null }));
+    assert.equal(result.available, false);
+    assert.match(result.emptyReason, /connect to a server/i);
   });
 
-  it("narrows to the command trace on the WireGuard tab", () => {
-    const lines = buildLogLines(diagnostics, "wireguard");
-    assert.ok(lines.length > 0);
-    assert.ok(lines.every((line) => line.source === "WireGuard"), "only WireGuard entries");
+  it("exposes the config, its tunnel name and its source path", () => {
+    const result = describeTunnelConfig(bundle());
+    assert.equal(result.available, true);
+    assert.equal(result.tunnelName, "wg-primary");
+    assert.match(result.sourcePath ?? "", /wg-primary\.conf$/);
   });
 
-  it("narrows to failures on the Errors tab", () => {
-    const lines = buildLogLines(diagnostics, "errors");
-    assert.ok(lines.length > 0);
-    assert.ok(!lines.some((line) => line.message.includes("init flow started")), "successes are excluded");
-    assert.ok(lines.some((line) => line.message.includes("droplet create rejected")));
-    assert.ok(lines.some((line) => line.message.includes("bad name")), "recovery notes are failures too");
-  });
-
-  it("renders trace timestamps as clock times", () => {
-    const line = buildLogLines(diagnostics, "wireguard")[0];
-    assert.match(line.timestamp, /^\d{2}:\d{2}:\d{2}$/);
+  /**
+   * Passes the backend's text through untouched.
+   *
+   * The card exists so a user can confirm a DNS or keepalive change reached the running tunnel, so
+   * this must not filter the config down to a summary. That the private key is redacted is the
+   * backend's job and is asserted there — see
+   * `the_config_snapshot_hides_the_private_key_and_keeps_every_verifiable_setting`.
+   */
+  it("passes the settings through rather than summarising them", () => {
+    const text = describeTunnelConfig(bundle()).configText ?? "";
+    assert.ok(text.includes("DNS = 9.9.9.9"), "DNS must be checkable");
+    assert.ok(text.includes("AllowedIPs = 0.0.0.0/0"), "the kill-switch route must be checkable");
+    assert.ok(text.includes("PersistentKeepalive = 25"), "keepalive must be checkable");
+    assert.equal(text, CONFIG, "the backend's text is shown verbatim");
   });
 });
 

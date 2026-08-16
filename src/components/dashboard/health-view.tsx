@@ -1,28 +1,16 @@
 "use client";
 
 import { AppIcon, Button, Card, ConnectionTimer, MetricCard, PageChrome, formatBytes, formatHandshakeAge, useNow, type DashboardBusyAction, type HealthPanelData, type VpnNodeRecord } from "./shared";
-import { formatDropAge, type CheckStatus, type ConnectivityCheck, type LogLine, type LogTab } from "@/lib/health-display";
+import { formatDropAge, type CheckStatus, type ConnectivityCheck, type describeTunnelConfig } from "@/lib/health-display";
 import type { WireGuardReadiness } from "@/lib/tauri";
+
+type TunnelConfigDisplay = ReturnType<typeof describeTunnelConfig>;
 
 const STATUS_STYLES: Record<CheckStatus, { border: string; text: string; icon: string }> = {
   pass: { border: "border-[color:rgba(78,222,163,0.3)] bg-[color:rgba(78,222,163,0.07)]", text: "text-[var(--secondary)]", icon: "check" },
   fail: { border: "border-[color:rgba(255,155,155,0.35)] bg-[color:rgba(255,155,155,0.07)]", text: "text-[#ff9b9b]", icon: "lock" },
   warn: { border: "border-[color:rgba(255,185,95,0.3)] bg-[color:rgba(255,185,95,0.07)]", text: "text-[var(--tertiary)]", icon: "lock" },
   unknown: { border: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]", text: "text-[var(--on-surface-variant)]", icon: "lock" },
-};
-
-const LOG_TABS: Array<{ id: LogTab; label: string }> = [
-  { id: "all", label: "All Logs" },
-  { id: "errors", label: "Errors" },
-  { id: "wireguard", label: "WireGuard" },
-];
-
-const LOG_TONE_CLASS: Record<LogLine["tone"], string> = {
-  error: "text-[#ff9b9b]",
-  warning: "text-[var(--tertiary)]",
-  success: "text-[var(--secondary)]",
-  info: "text-[var(--primary)]",
-  neutral: "text-[var(--on-surface-variant)]",
 };
 
 /**
@@ -39,9 +27,8 @@ export function HealthView({
   health,
   killSwitch,
   checks,
-  logLines,
-  logTab,
-  onSelectLogTab,
+  tunnelConfig,
+  onCopyConfig,
   readiness,
   tunnelConnected,
   lastCheckedAt,
@@ -54,9 +41,8 @@ export function HealthView({
   health: HealthPanelData | null;
   killSwitch: { headline: string; detail: string; status: CheckStatus };
   checks: ConnectivityCheck[];
-  logLines: LogLine[];
-  logTab: LogTab;
-  onSelectLogTab: (tab: LogTab) => void;
+  tunnelConfig: TunnelConfigDisplay;
+  onCopyConfig: (() => Promise<void>) | null;
   readiness: WireGuardReadiness | null;
   tunnelConnected: boolean;
   lastCheckedAt: number | null;
@@ -147,43 +133,32 @@ export function HealthView({
           </div>
         </Card>
 
+        {/* Sits beside the kill-switch verdict because AllowedIPs is what decides it: a config
+            without a /0 route is exactly the case the banner above reports as unprotected. */}
         <Card
-          title="Live Logs"
-          description="Real WireGuard commands and provisioning runs, redacted."
+          title="Tunnel Configuration"
+          description="What the tunnel service was handed. The private key is redacted."
           action={
-            <div className="flex items-center gap-2">
-              {LOG_TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => onSelectLogTab(tab.id)}
-                  aria-pressed={logTab === tab.id}
-                  className={`rounded-[10px] border px-3 py-1.5 text-xs transition-colors ${logTab === tab.id
-                    ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)] text-[var(--primary)]"
-                    : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface-variant)] hover:text-[var(--on-surface)]"}`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
+            onCopyConfig ? (
+              <Button tone="secondary" onClick={() => void onCopyConfig()}>Copy</Button>
+            ) : null
           }
         >
-          <div className="max-h-[320px] overflow-auto rounded-[8px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(8,10,16,0.96),rgba(8,10,16,0.96))] p-4 font-mono text-[12px] leading-6">
-            {logLines.length === 0 ? (
-              <div className="text-[var(--on-surface-variant)]">
-                {logTab === "errors" ? "No failures recorded." : "No activity captured yet."}
+          {tunnelConfig.available ? (
+            <>
+              <pre className="max-h-[320px] overflow-auto rounded-[8px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(8,10,16,0.96),rgba(8,10,16,0.96))] p-4 font-mono text-[12px] leading-6 text-[var(--on-surface)]">
+                {tunnelConfig.configText}
+              </pre>
+              <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-[var(--on-surface-variant)]">
+                {tunnelConfig.tunnelName ? <span>Tunnel: <span className="font-mono">{tunnelConfig.tunnelName}</span></span> : null}
+                {tunnelConfig.sourcePath ? <span className="break-all">Source: <span className="font-mono">{tunnelConfig.sourcePath}</span></span> : null}
               </div>
-            ) : (
-              logLines.map((line) => (
-                <div key={line.id} className="flex gap-2">
-                  <span className="w-[68px] shrink-0 text-[var(--on-surface-variant)]">{line.timestamp}</span>
-                  <span className={`w-[56px] shrink-0 ${LOG_TONE_CLASS[line.tone]}`}>[{line.level}]</span>
-                  <span className="w-[150px] shrink-0 truncate text-[var(--on-surface-variant)]" title={line.source}>{line.source}</span>
-                  <span className="flex-1 break-all text-[var(--on-surface)]">{line.message}</span>
-                </div>
-              ))
-            )}
-          </div>
+            </>
+          ) : (
+            <div className="rounded-[10px] border border-dashed border-[color:var(--outline-variant)] px-4 py-6 text-sm text-[var(--on-surface-variant)]">
+              {tunnelConfig.emptyReason}
+            </div>
+          )}
         </Card>
       </div>
 

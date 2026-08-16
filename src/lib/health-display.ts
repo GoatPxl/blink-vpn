@@ -160,80 +160,32 @@ export function buildConnectivityChecks(input: {
   return checks;
 }
 
-export type LogTab = "all" | "errors" | "wireguard";
-
-export type LogLine = {
-  id: string;
-  timestamp: string;
-  level: string;
-  source: string;
-  message: string;
-  tone: "info" | "success" | "warning" | "error" | "neutral";
-};
-
 /**
- * Real log lines from the diagnostics bundle.
+ * What the tunnel service was actually handed, for the Tunnel Configuration card.
  *
- * Replaces four invented lines that quoted a "NetGuard VPN Engine" this codebase does not contain,
- * with three timestamps hardcoded. Everything here was actually emitted, and is already redacted
- * server-side.
+ * The private key is already replaced with a redaction marker by the backend. Everything else —
+ * `Address`, `DNS`, `AllowedIPs`, `Endpoint`, `PersistentKeepalive` — is shown, because verifying
+ * that a settings change reached the running tunnel is the entire point of the card.
  */
-export function buildLogLines(diagnostics: DiagnosticsBundle | null, tab: LogTab): LogLine[] {
-  if (!diagnostics) return [];
+export function describeTunnelConfig(diagnostics: DiagnosticsBundle | null): {
+  available: boolean;
+  tunnelName: string | null;
+  configText: string | null;
+  sourcePath: string | null;
+  emptyReason: string;
+} {
+  const debug = diagnostics?.wireguard_debug;
+  const configText = debug?.last_import_config_redacted ?? null;
 
-  const lines: LogLine[] = [];
-
-  if (tab === "all" || tab === "wireguard") {
-    for (const [index, command] of (diagnostics.wireguard_debug?.commands ?? []).entries()) {
-      // Trace entries are stored as "<epoch seconds> | <command>".
-      const separator = command.indexOf(" | ");
-      const stamp = separator > 0 ? command.slice(0, separator) : "";
-      const body = separator > 0 ? command.slice(separator + 3) : command;
-      lines.push({
-        id: `wg-${index}`,
-        timestamp: formatEpochSeconds(stamp),
-        level: "WG",
-        source: "WireGuard",
-        message: body,
-        tone: "neutral",
-      });
-    }
-  }
-
-  if (tab === "all" || tab === "errors") {
-    for (const run of diagnostics.init_runs ?? []) {
-      const failed = run.outcome.toLowerCase() === "error";
-      if (tab === "errors" && !failed) continue;
-
-      lines.push({
-        id: `init-${run.id}`,
-        timestamp: run.created_at.slice(11, 19),
-        level: failed ? "ERROR" : run.outcome.toUpperCase(),
-        source: `${run.provider_slug}/${run.stage}`,
-        message: run.output,
-        tone: failed ? "error" : run.outcome.toLowerCase() === "success" ? "success" : "info",
-      });
-    }
-
-    for (const [index, note] of (diagnostics.redacted_notes ?? []).entries()) {
-      lines.push({
-        id: `note-${index}`,
-        timestamp: "",
-        level: "WARN",
-        source: "Recovery",
-        message: note,
-        tone: "warning",
-      });
-    }
-  }
-
-  return lines;
-}
-
-function formatEpochSeconds(raw: string): string {
-  const seconds = Number(raw);
-  if (!Number.isFinite(seconds) || seconds <= 0) return "";
-  return new Date(seconds * 1000).toISOString().slice(11, 19);
+  return {
+    available: Boolean(configText),
+    tunnelName: debug?.last_import_tunnel_name ?? null,
+    configText,
+    sourcePath: debug?.last_import_config_temp_path ?? null,
+    emptyReason: diagnostics
+      ? "No tunnel config has been rendered yet. Connect to a server and it appears here."
+      : "Waiting for the first diagnostics read.",
+  };
 }
 
 /** How long ago a drop happened, for the alert copy. */

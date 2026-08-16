@@ -49,12 +49,13 @@ test.describe("Docker provisioning (real backend)", () => {
     expect(node?.public_ipv4).not.toBe("0.0.0.0");
 
     // Bootstrap readiness is resolved from provider metadata, not by reading the server.
-    const bootstrapReady = (diagnostics.init_runs ?? []).some(
-      (run) =>
-        run.node_id === nodeId
-        && run.provider_slug === "docker"
-        && run.stage === "bootstrap.wait"
-        && run.outcome === "success",
+    const bootstrapReady = (diagnostics.activity ?? []).some(
+      (entry) =>
+        entry.node_id === nodeId
+        && entry.provider_slug === "docker"
+        && entry.category === "provision"
+        && entry.stage === "bootstrap.wait"
+        && entry.outcome === "success",
     );
     expect(bootstrapReady, "bootstrap.wait should have succeeded").toBe(true);
 

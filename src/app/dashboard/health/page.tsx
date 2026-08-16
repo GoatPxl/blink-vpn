@@ -4,18 +4,18 @@ import { HealthView } from "@/components/dashboard/health-view";
 import { useDashboard } from "@/components/dashboard/dashboard-provider";
 import {
   buildConnectivityChecks,
-  buildLogLines,
   describeKillSwitch,
-  type LogTab,
+  describeTunnelConfig,
   type ProviderAccess,
 } from "@/lib/health-display";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
 export default function DashboardHealthPage() {
   const {
     busyAction,
     connectedTunnel,
     connectTunnel,
+    copyText,
     diagnostics,
     health,
     healthUpdatedAt,
@@ -29,10 +29,8 @@ export default function DashboardHealthPage() {
     wireguardReadiness,
   } = useDashboard();
 
-  const [logTab, setLogTab] = useState<LogTab>("all");
-
-  // The diagnostics bundle is otherwise fetched only by loadDashboard, so the log panel would show
-  // whatever was captured on mount and never move. Deliberately the silent refresher: a full
+  // The diagnostics bundle is otherwise fetched only by loadDashboard, so the config card would
+  // show whatever was captured on mount and never move. Deliberately the silent refresher: a full
   // dashboard reload sets `busyAction`, which would disable Reconnect every time it fired.
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -53,7 +51,7 @@ export default function DashboardHealthPage() {
     [health, providerAccessState, tunnelConnected, wireguardReadiness],
   );
 
-  const logLines = useMemo(() => buildLogLines(diagnostics, logTab), [diagnostics, logTab]);
+  const tunnelConfig = useMemo(() => describeTunnelConfig(diagnostics), [diagnostics]);
 
   const handleRunChecks = useCallback(async () => {
     await Promise.all([refreshWireGuardReadiness(), refreshDiagnostics(), refreshHealth()]);
@@ -65,14 +63,19 @@ export default function DashboardHealthPage() {
     }
   }, [connectTunnel, connectedTunnel]);
 
+  const handleCopyConfig = useCallback(async () => {
+    if (tunnelConfig.configText) {
+      await copyText(tunnelConfig.configText, "Tunnel config");
+    }
+  }, [copyText, tunnelConfig.configText]);
+
   return (
     <HealthView
       health={health}
       killSwitch={killSwitch}
       checks={checks}
-      logLines={logLines}
-      logTab={logTab}
-      onSelectLogTab={setLogTab}
+      tunnelConfig={tunnelConfig}
+      onCopyConfig={tunnelConfig.configText ? handleCopyConfig : null}
       readiness={wireguardReadiness}
       tunnelConnected={tunnelConnected}
       lastCheckedAt={healthUpdatedAt}

@@ -89,7 +89,7 @@ impl CommandError {
     Self::new(
       CommandErrorKind::Unknown,
       message,
-      "Retry the action. If it keeps failing, export a diagnostics bundle from the Diagnostics page.",
+      "Retry the action. If it keeps failing, export a diagnostics bundle from the Activity page.",
     )
   }
 }

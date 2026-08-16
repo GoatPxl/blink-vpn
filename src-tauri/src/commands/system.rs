@@ -24,6 +24,8 @@ const BUILTIN_DIGITALOCEAN_PROVIDER_SLUG: &str = "digitalocean";
 const BUILTIN_DOCKER_PROVIDER_ID: &str = "provider-docker";
 const BUILTIN_DOCKER_PROVIDER_NAME: &str = "Docker";
 const BUILTIN_DOCKER_PROVIDER_SLUG: &str = "docker";
+/// Subdirectory of the app data directory that exported bundles are written to.
+const DIAGNOSTICS_DIR_NAME: &str = "diagnostics";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthPanelData {
@@ -58,9 +60,24 @@ pub struct DiagnosticsBundleResponse {
   pub providers: Vec<crate::backend::db::ProviderRecord>,
   pub nodes: Vec<VpnNodeRecord>,
   pub tunnels: Vec<TunnelRecord>,
-  pub init_runs: Vec<crate::backend::db::InitRunLogRecord>,
+  pub activity: Vec<crate::backend::db::ActivityEvent>,
   pub redacted_notes: Vec<String>,
   pub wireguard_debug: crate::backend::wireguard::WireGuardDebugSnapshot,
+}
+
+/// A folder or file the user may need to open when reporting a problem.
+///
+/// The path is resolved in Rust and handed out for display only. `reveal_app_location` takes the
+/// `key` back, never a path, so the frontend cannot ask the shell to open somewhere else.
+#[derive(Debug, Clone, Serialize)]
+pub struct AppLocation {
+  pub key: String,
+  pub label: String,
+  pub description: String,
+  pub path: String,
+  /// False when the file or folder has not been created yet — an export that never ran, a log
+  /// directory a fresh install has not written to.
+  pub exists: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -649,7 +666,7 @@ pub fn connect_tunnel(
       providers: bundle.providers,
       nodes: bundle.nodes,
       tunnels: bundle.tunnels,
-      init_runs: bundle.init_runs,
+      activity: bundle.activity,
       redacted_notes: bundle.redacted_notes,
       wireguard_debug: bundle.wireguard_debug,
     })
@@ -672,7 +689,7 @@ pub fn export_diagnostics_bundle(
     .path()
     .app_data_dir()
     .map_err(CommandError::from)?
-    .join("diagnostics");
+    .join(DIAGNOSTICS_DIR_NAME);
 
   std::fs::create_dir_all(&diagnostics_dir).map_err(CommandError::from)?;
 
@@ -815,6 +832,101 @@ pub fn check_docker_readiness(
   }
 }
 
+/// Keys `list_app_locations` reports and `reveal_app_location` accepts.
+///
+/// The two commands share this list so a location can never be shown without being openable, or
+/// openable without being shown.
+const APP_LOCATION_KEYS: [&str; 4] = ["diagnostics", "logs", "tunnels", "database"];
+
+/// Takes the base directories rather than an `AppHandle` so the catalog can be tested without a
+/// running Tauri app — an unknown key must be rejected, and that is worth proving.
+fn resolve_app_location(
+  key: &str,
+  app_data_dir: &std::path::Path,
+  app_log_dir: &std::path::Path,
+) -> Result<AppLocation, CommandError> {
+  let (label, description, path) = match key {
+    "diagnostics" => (
+      "Diagnostics exports",
+      "Redacted bundles written by Export.",
+      app_data_dir.join(DIAGNOSTICS_DIR_NAME),
+    ),
+    "logs" => (
+      "Application log",
+      "Written by the app itself. Warnings and errors only in release builds.",
+      app_log_dir.to_path_buf(),
+    ),
+    "tunnels" => (
+      "Tunnel configuration",
+      "The .conf files handed to the WireGuard tunnel service.",
+      crate::backend::wireguard::tunnel_config_dir_path(),
+    ),
+    "database" => (
+      "Local database",
+      "Provider, node, tunnel and activity records. Holds secret references, never secrets.",
+      app_data_dir.join(crate::backend::db::DATABASE_FILE_NAME),
+    ),
+    _ => {
+      return Err(CommandError::invalid_input(
+        format!("'{key}' is not a location this app can open."),
+        "Choose one of the listed locations.",
+      ));
+    }
+  };
+
+  Ok(AppLocation {
+    key: key.to_string(),
+    label: label.to_string(),
+    description: description.to_string(),
+    exists: path.exists(),
+    path: path.display().to_string(),
+  })
+}
+
+#[tauri::command]
+pub fn list_app_locations(app: AppHandle) -> Result<Vec<AppLocation>, CommandError> {
+  let app_data_dir = app.path().app_data_dir()?;
+  let app_log_dir = app.path().app_log_dir()?;
+
+  APP_LOCATION_KEYS
+    .iter()
+    .map(|key| resolve_app_location(key, &app_data_dir, &app_log_dir))
+    .collect()
+}
+
+/// Opens one of the known locations in Explorer.
+///
+/// Takes a **key, never a path**: accepting a caller-supplied path would let anything running in
+/// the webview hand an arbitrary target to the shell. The path is resolved here.
+#[tauri::command]
+pub fn reveal_app_location(key: String, app: AppHandle) -> Result<(), CommandError> {
+  if !cfg!(target_os = "windows") {
+    return Err(CommandError::dependency(
+      "Opening a folder is supported on Windows only in Phase 1.",
+      "Open the path shown next to the location manually.",
+    ));
+  }
+
+  let location = resolve_app_location(&key, &app.path().app_data_dir()?, &app.path().app_log_dir()?)?;
+  let path = PathBuf::from(&location.path);
+
+  if !path.exists() {
+    return Err(CommandError::invalid_input(
+      format!("{} has not been created yet.", location.label),
+      "It appears once the app has written something there.",
+    ));
+  }
+
+  // `/select,` highlights a file inside its folder; for a directory it opens the parent with the
+  // directory selected, which is the behaviour a user expects from "reveal".
+  Command::new("explorer.exe")
+    .arg(format!("/select,{}", path.display()))
+    .spawn()
+    .map_err(|error| format!("Could not open the folder: {error}"))?;
+
+  Ok(())
+}
+
 #[tauri::command]
 pub fn open_wireguard_install_page() -> Result<(), CommandError> {
   if !cfg!(target_os = "windows") {
@@ -937,7 +1049,10 @@ if (-not $service) {
 
 #[cfg(test)]
 mod tests {
-  use super::{clear_provider_credential, ensure_builtin_providers, CommandErrorKind};
+  use super::{
+    clear_provider_credential, ensure_builtin_providers, resolve_app_location, CommandErrorKind,
+    APP_LOCATION_KEYS,
+  };
   use crate::backend::db::{Database, ProviderStatus};
   use crate::backend::secure_storage::SecureStorage;
   use std::fs;
@@ -958,6 +1073,35 @@ mod tests {
     let db = Database::new(path.clone());
     db.run_migrations().expect("migrations should succeed");
     (db, path)
+  }
+
+  /// The reveal command resolves paths from a key rather than accepting one, so anything running
+  /// in the webview cannot hand an arbitrary target to the Windows shell. An unrecognised key must
+  /// be refused rather than falling through to some default.
+  #[test]
+  fn an_unknown_location_key_is_rejected_as_invalid_input() {
+    let error = resolve_app_location(
+      "c:\\windows\\system32",
+      &PathBuf::from("data"),
+      &PathBuf::from("logs"),
+    )
+    .expect_err("an unlisted key must not resolve");
+
+    assert_eq!(error.kind, CommandErrorKind::InvalidInput);
+  }
+
+  /// The listing and the opener share one catalog; a key in one but not the other would either
+  /// show a location that cannot be opened or open one that is never shown.
+  #[test]
+  fn every_listed_location_key_resolves() {
+    for key in APP_LOCATION_KEYS {
+      let location = resolve_app_location(key, &PathBuf::from("data"), &PathBuf::from("logs"))
+        .unwrap_or_else(|_| panic!("listed key '{key}' should resolve"));
+
+      assert_eq!(location.key, key);
+      assert!(!location.label.is_empty(), "'{key}' needs a label");
+      assert!(!location.path.is_empty(), "'{key}' needs a path");
+    }
   }
 
   #[test]

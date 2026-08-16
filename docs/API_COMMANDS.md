@@ -57,8 +57,10 @@ Provider adapters currently included:
 | `list_tunnels_for_node` | `node_id` | `TunnelRecord[]` | Local tunnels for node |
 | `read_client_tunnel_status` | `tunnel_id` | `string` | Runtime status summary |
 | `get_health_panel_data` | `node_id`, `tunnel_id?` | `HealthPanelData` | Health card payload. Also reconciles a stale tunnel row against the live service state — see below |
-| `get_diagnostics_bundle` | none | `DiagnosticsBundleResponse` | Sanitized diagnostics payload |
+| `get_diagnostics_bundle` | none | `DiagnosticsBundleResponse` | Sanitized diagnostics payload, including the `activity` history — see below |
 | `export_diagnostics_bundle` | none | `string` | Path to exported diagnostics JSON |
+| `list_app_locations` | none | `AppLocation[]` | The folders this app writes to, with a `key`, a display `path`, and whether it `exists` yet |
+| `reveal_app_location` | `key` | `void` | Opens one listed location in Explorer. **Takes a key, never a path** — see below |
 | `check_docker_readiness` | none | `DockerReadinessResponse` | Docker runtime readiness signal |
 | `delete_provider_droplet` | `provider_id`, `droplet_id` | `void` | Direct provider cleanup helper |
 | `provision_provider_droplet` | `provider_id`, `droplet_name` | `string` | Lower-level provision helper |
@@ -124,6 +126,44 @@ unrecognised slug carries no geography rather than a guessed city — **render t
 never a fallback place name.** The same shape is attached to each node as `region_geo` by
 `list_vpn_nodes`, resolved from the adapter's own table with no token and no network call, so the
 fleet stays readable when a provider key goes bad.
+
+### Activity history
+
+`get_diagnostics_bundle` carries the newest 200 rows of `activity_events` as `activity`:
+
+```json
+[
+  {
+    "id": 41,
+    "node_id": "node-1",
+    "provider_slug": "digitalocean",
+    "category": "provision",
+    "stage": "create.error",
+    "outcome": "error",
+    "correlation_id": "6f0c…",
+    "detail": "Node creation or bootstrap setup failed <- droplet name must be a valid hostname",
+    "created_at": "2026-08-16T10:00:09.123Z"
+  }
+]
+```
+
+`category` is `provision` · `connect` · `disconnect` · `destroy` · `cleanup` · `app`; `outcome` is
+`info` · `success` · `error`. Stages sharing a `correlation_id` are one run, and the UI collapses
+them into one entry — a failed provision writes eight rows, of which one says what went wrong.
+
+An `error` detail carries the **flattened source chain** (`outer <- cause`), not just the outermost
+message. `node_id` is null for app-level events such as a startup reconcile.
+
+This field replaced `init_runs`, whose records came only from the create flow. Consumers must read
+`activity`; there is no `init_runs` fallback.
+
+### App locations
+
+`reveal_app_location` accepts only a `key` returned by `list_app_locations` — `diagnostics`,
+`logs`, `tunnels`, or `database` — and resolves the path in Rust. **It must never take a path from
+the caller**: passing a webview-supplied path to the Windows shell would let anything running in the
+page open an arbitrary target. An unrecognised key returns `invalid-input`, and a path that does not
+exist yet is refused rather than opened.
 
 ### Health panel payload
 

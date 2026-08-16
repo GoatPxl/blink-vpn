@@ -137,11 +137,14 @@ export type DiagnosticsBundle = {
     rx_bytes: number | null;
     tx_bytes: number | null;
   }>;
-  init_runs?: Array<{
-    node_id: string;
-    provider_slug: string;
+  activity?: Array<{
+    node_id: string | null;
+    provider_slug: string | null;
+    category: string;
     stage: string;
     outcome: string;
+    correlation_id: string | null;
+    detail: string;
   }>;
 };
 

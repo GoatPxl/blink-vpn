@@ -35,7 +35,7 @@ pub fn run() {
       });
 
       std::fs::create_dir_all(&app_data_dir)?;
-      let database_path = app_data_dir.join("goatstare_phase1.sqlite3");
+      let database_path = app_data_dir.join(backend::db::DATABASE_FILE_NAME);
       let backend = backend::Backend::new(database_path);
 
       let wireguard_diagnostics = backend.wireguard.resolution_diagnostics();
@@ -115,6 +115,8 @@ pub fn run() {
       commands::system::get_health_panel_data,
       commands::system::get_diagnostics_bundle,
       commands::system::export_diagnostics_bundle,
+      commands::system::list_app_locations,
+      commands::system::reveal_app_location,
       commands::system::read_client_tunnel_status,
       commands::system::validate_provider_token,
       commands::system::provision_provider_droplet,

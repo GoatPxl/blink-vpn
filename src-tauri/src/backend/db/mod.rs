@@ -5,6 +5,12 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use thiserror::Error;
 
+/// The SQLite file inside the app data directory.
+///
+/// Named once so that startup and the "where are my files" listing cannot drift apart and point the
+/// user at a database that does not exist.
+pub const DATABASE_FILE_NAME: &str = "goatstare_phase1.sqlite3";
+
 const MIGRATIONS: &[(i64, &str)] = &[
   (1, include_str!("../../../migrations/0001_init.sql")),
   (2, include_str!("../../../migrations/0002_indexes.sql")),
@@ -22,6 +28,8 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (14, include_str!("../../../migrations/0014_drop_wireguard_connection_mode.sql")),
   (15, include_str!("../../../migrations/0015_tunnel_connected_at.sql")),
   (16, include_str!("../../../migrations/0016_provider_validation_result.sql")),
+  (17, include_str!("../../../migrations/0017_activity_events.sql")),
+  (18, include_str!("../../../migrations/0018_backfill_legacy_correlation_ids.sql")),
 ];
 
 
@@ -279,16 +287,36 @@ pub struct TunnelRecord {
   pub updated_at: String,
 }
 
+/// One recorded step of something the app did.
+///
+/// Stages of a single run share a `correlation_id`, so a failed provision reads as one entry with
+/// its steps rather than eight unrelated rows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct InitRunLogRecord {
+pub struct ActivityEvent {
   pub id: i64,
-  pub node_id: String,
-  pub provider_slug: String,
-  pub init_kind: String,
+  /// `None` for events that belong to the app rather than to one node.
+  pub node_id: Option<String>,
+  pub provider_slug: Option<String>,
+  pub category: String,
   pub stage: String,
   pub outcome: String,
-  pub output: String,
+  pub correlation_id: Option<String>,
+  pub detail: String,
   pub created_at: String,
+}
+
+/// What a caller supplies to record an event. Separate from [`ActivityEvent`] because `id` and
+/// `created_at` are the database's to assign.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewActivityEvent<'a> {
+  pub node_id: Option<&'a str>,
+  pub provider_slug: Option<&'a str>,
+  pub category: &'a str,
+  pub stage: &'a str,
+  pub outcome: &'a str,
+  pub correlation_id: Option<&'a str>,
+  /// Must already be redacted — this is the write boundary, and nothing redacts on read.
+  pub detail: &'a str,
 }
 
 #[derive(Debug, Error)]
@@ -1253,64 +1281,86 @@ impl Database {
     Ok(())
   }
 
-  pub fn append_init_run_log(
-    &self,
-    node_id: &str,
-    provider_slug: &str,
-    init_kind: &str,
-    stage: &str,
-    outcome: &str,
-    output: &str,
-  ) -> Result<(), DbError> {
+  pub fn append_activity_event(&self, event: &NewActivityEvent<'_>) -> Result<(), DbError> {
     let connection = self.open_connection()?;
     connection
       .execute(
-        "INSERT INTO init_run_logs (node_id, provider_slug, init_kind, stage, outcome, output)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![node_id, provider_slug, init_kind, stage, outcome, output],
+        "INSERT INTO activity_events
+           (node_id, provider_slug, category, stage, outcome, correlation_id, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+          event.node_id,
+          event.provider_slug,
+          event.category,
+          event.stage,
+          event.outcome,
+          event.correlation_id,
+          event.detail
+        ],
       )
       .map_err(|source| DbError::Query {
-        action: "append_init_run_log",
-        detail: "Failed writing init run log row.".to_string(),
+        action: "append_activity_event",
+        detail: "Failed writing activity event row.".to_string(),
         source,
       })?;
 
     Ok(())
   }
 
-  pub fn list_init_run_logs(&self, limit: usize) -> Result<Vec<InitRunLogRecord>, DbError> {
+  pub fn list_activity_events(&self, limit: usize) -> Result<Vec<ActivityEvent>, DbError> {
     let connection = self.open_connection()?;
     let mut statement = connection
       .prepare(
-        "SELECT id, node_id, provider_slug, init_kind, stage, outcome, output, created_at
-         FROM init_run_logs
+        "SELECT id, node_id, provider_slug, category, stage, outcome, correlation_id, detail, created_at
+         FROM activity_events
          ORDER BY id DESC
          LIMIT ?1",
       )
       .map_err(|source| DbError::Query {
-        action: "list_init_run_logs_prepare",
-        detail: "Failed preparing init run log query.".to_string(),
+        action: "list_activity_events_prepare",
+        detail: "Failed preparing activity event query.".to_string(),
         source,
       })?;
 
     let rows = statement
-      .query_map(params![limit as i64], map_init_run_log_row)
+      .query_map(params![limit as i64], map_activity_event_row)
       .map_err(|source| DbError::Query {
-        action: "list_init_run_logs_query",
-        detail: "Failed running init run log query.".to_string(),
+        action: "list_activity_events_query",
+        detail: "Failed running activity event query.".to_string(),
         source,
       })?;
 
     let mut output = Vec::new();
     for row in rows {
       output.push(row.map_err(|source| DbError::Query {
-        action: "list_init_run_logs_collect",
-        detail: "Failed decoding init run log rows.".to_string(),
+        action: "list_activity_events_collect",
+        detail: "Failed decoding activity event rows.".to_string(),
         source,
       })?);
     }
 
     Ok(output)
+  }
+
+  /// Keeps the newest `keep` events and drops the rest.
+  ///
+  /// The predecessor table grew without bound while only provisioning wrote to it. Now that every
+  /// connect and disconnect appends, an unbounded table would grow with ordinary daily use.
+  pub fn prune_activity_events(&self, keep: usize) -> Result<usize, DbError> {
+    let connection = self.open_connection()?;
+    let removed = connection
+      .execute(
+        "DELETE FROM activity_events
+         WHERE id NOT IN (SELECT id FROM activity_events ORDER BY id DESC LIMIT ?1)",
+        params![keep as i64],
+      )
+      .map_err(|source| DbError::Query {
+        action: "prune_activity_events",
+        detail: "Failed pruning activity event history.".to_string(),
+        source,
+      })?;
+
+    Ok(removed)
   }
 
   fn open_connection(&self) -> Result<Connection, DbError> {
@@ -1414,22 +1464,26 @@ fn map_tunnel_row(row: &Row<'_>) -> rusqlite::Result<TunnelRecord> {
   })
 }
 
-fn map_init_run_log_row(row: &Row<'_>) -> rusqlite::Result<InitRunLogRecord> {
-  Ok(InitRunLogRecord {
+fn map_activity_event_row(row: &Row<'_>) -> rusqlite::Result<ActivityEvent> {
+  Ok(ActivityEvent {
     id: row.get(0)?,
     node_id: row.get(1)?,
     provider_slug: row.get(2)?,
-    init_kind: row.get(3)?,
+    category: row.get(3)?,
     stage: row.get(4)?,
     outcome: row.get(5)?,
-    output: row.get(6)?,
-    created_at: row.get(7)?,
+    correlation_id: row.get(6)?,
+    detail: row.get(7)?,
+    created_at: row.get(8)?,
   })
 }
 
 #[cfg(test)]
 mod tests {
-  use super::{Database, DbError, NodeLifecycleStatus, ProviderStatus, TunnelStatus};
+  use super::{
+    ActivityEvent, Database, DbError, NewActivityEvent, NodeLifecycleStatus, ProviderStatus,
+    TunnelStatus,
+  };
 
   use std::path::PathBuf;
   use std::time::{SystemTime, UNIX_EPOCH};
@@ -1678,8 +1732,8 @@ mod tests {
   }
 
   #[test]
-  fn init_run_log_roundtrip() {
-    let db = setup_db("init_run_log_roundtrip");
+  fn activity_event_roundtrip() {
+    let db = setup_db("activity_event_roundtrip");
 
     let provider_id = "provider-test-d";
     db
@@ -1690,22 +1744,242 @@ mod tests {
       .expect("node insert should succeed");
 
     db
-      .append_init_run_log(
-        "node-1",
-        "digitalocean",
-        "cloud-init",
-        "bootstrap-ready",
-        "success",
-        "readiness marker parsed",
-      )
-      .expect("init run log insert should succeed");
+      .append_activity_event(&NewActivityEvent {
+        node_id: Some("node-1"),
+        provider_slug: Some("digitalocean"),
+        category: "provision",
+        stage: "bootstrap-ready",
+        outcome: "success",
+        correlation_id: Some("run-1"),
+        detail: "readiness marker parsed",
+      })
+      .expect("activity event insert should succeed");
 
-    let logs = db
-      .list_init_run_logs(20)
-      .expect("init run log query should succeed");
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].node_id, "node-1");
-    assert_eq!(logs[0].init_kind, "cloud-init");
-    assert_eq!(logs[0].outcome, "success");
+    let events = db
+      .list_activity_events(20)
+      .expect("activity event query should succeed");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].node_id.as_deref(), Some("node-1"));
+    assert_eq!(events[0].category, "provision");
+    assert_eq!(events[0].outcome, "success");
+    assert_eq!(events[0].correlation_id.as_deref(), Some("run-1"));
+  }
+
+  /// Startup reconcile has no node to attribute its findings to, which the predecessor table's
+  /// `node_id TEXT NOT NULL` made impossible to record at all.
+  #[test]
+  fn activity_event_accepts_an_app_level_event_with_no_node() {
+    let db = setup_db("activity_event_app_level");
+
+    db
+      .append_activity_event(&NewActivityEvent {
+        node_id: None,
+        provider_slug: None,
+        category: "app",
+        stage: "startup.reconcile",
+        outcome: "info",
+        correlation_id: None,
+        detail: "no stale tunnel rows found",
+      })
+      .expect("app-level activity event should insert");
+
+    let events = db.list_activity_events(20).expect("query should succeed");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].node_id, None);
+    assert_eq!(events[0].category, "app");
+  }
+
+  #[test]
+  fn prune_activity_events_keeps_only_the_newest() {
+    let db = setup_db("prune_activity_events");
+
+    for index in 0..10 {
+      db
+        .append_activity_event(&NewActivityEvent {
+          node_id: None,
+          provider_slug: None,
+          category: "app",
+          stage: "tick",
+          outcome: "info",
+          correlation_id: None,
+          detail: &format!("event {index}"),
+        })
+        .expect("insert should succeed");
+    }
+
+    let removed = db.prune_activity_events(4).expect("prune should succeed");
+    assert_eq!(removed, 6);
+
+    let events = db.list_activity_events(20).expect("query should succeed");
+    assert_eq!(events.len(), 4);
+    // Newest first, so the survivors are events 9 down to 6.
+    assert_eq!(events[0].detail, "event 9");
+    assert_eq!(events[3].detail, "event 6");
+  }
+
+  /// Rows written before migration 0017 must still be readable afterwards, categorised as the
+  /// provisioning runs they were.
+  #[test]
+  fn migration_carries_existing_init_run_logs_into_activity_events() {
+    let path = test_db_path("migration_carries_init_runs");
+    let _ = std::fs::remove_file(&path);
+
+    // Stand up the predecessor table with a row the old code would have written, and mark every
+    // earlier migration applied so that 0017 runs against it in isolation.
+    {
+      let connection = rusqlite::Connection::open(&path).expect("sqlite open should succeed");
+      connection
+        .execute_batch(
+          "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+           CREATE TABLE init_run_logs (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             node_id TEXT NOT NULL,
+             provider_slug TEXT NOT NULL,
+             init_kind TEXT NOT NULL,
+             stage TEXT NOT NULL,
+             outcome TEXT NOT NULL,
+             output TEXT NOT NULL,
+             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+           );
+           INSERT INTO init_run_logs (node_id, provider_slug, init_kind, stage, outcome, output)
+             VALUES ('node-legacy', 'digitalocean', 'cloud-init', 'create.error', 'error', 'droplet rejected');",
+        )
+        .expect("legacy schema setup should succeed");
+
+      // A second node with two separate attempts, to prove runs are partitioned rather than merged.
+      connection
+        .execute_batch(
+          "INSERT INTO init_run_logs (node_id, provider_slug, init_kind, stage, outcome, output) VALUES
+             ('node-two', 'digitalocean', 'cloud-init', 'create.start', 'info', 'attempt one'),
+             ('node-two', 'digitalocean', 'cloud-init', 'create.error', 'error', 'attempt one failed'),
+             ('node-two', 'digitalocean', 'cloud-init', 'create.start', 'info', 'attempt two'),
+             ('node-two', 'digitalocean', 'cloud-init', 'create.ready', 'success', 'attempt two worked');",
+        )
+        .expect("legacy multi-run setup should succeed");
+
+      for version in 1..=16 {
+        connection
+          .execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, '2026-08-01T00:00:00.000Z')",
+            rusqlite::params![version as i64],
+          )
+          .expect("marking a migration applied should succeed");
+      }
+    }
+
+    let db = Database::new(path);
+    db.run_migrations().expect("migrations should apply over the legacy table");
+
+    let events = db.list_activity_events(20).expect("query should succeed");
+    assert_eq!(events.len(), 5);
+
+    let legacy = events
+      .iter()
+      .find(|event| event.node_id.as_deref() == Some("node-legacy"))
+      .expect("the legacy row should survive");
+    assert_eq!(legacy.category, "provision");
+    assert_eq!(legacy.stage, "create.error");
+    assert_eq!(legacy.detail, "droplet rejected");
+
+    /*
+     * Every migrated row needs a correlation id, and rows from separate attempts need *different*
+     * ones. Migrating them all as NULL made each row its own single-step run in the UI, so a failed
+     * attempt's one useful line was buried among the successful steps around it.
+     */
+    assert!(
+      events.iter().all(|event| event.correlation_id.is_some()),
+      "no migrated row may be left without a run to belong to"
+    );
+
+    let node_two: Vec<&ActivityEvent> = events
+      .iter()
+      .filter(|event| event.node_id.as_deref() == Some("node-two"))
+      .collect();
+    assert_eq!(node_two.len(), 4);
+
+    let runs: std::collections::HashSet<&str> = node_two
+      .iter()
+      .filter_map(|event| event.correlation_id.as_deref())
+      .collect();
+    assert_eq!(runs.len(), 2, "two attempts must not be merged into one run: {runs:?}");
+
+    // The failed attempt's steps belong together, and apart from the attempt that succeeded.
+    let failed_run = node_two
+      .iter()
+      .find(|event| event.stage == "create.error")
+      .and_then(|event| event.correlation_id.as_deref())
+      .expect("the failed step should carry a run id");
+    let succeeded_run = node_two
+      .iter()
+      .find(|event| event.stage == "create.ready")
+      .and_then(|event| event.correlation_id.as_deref())
+      .expect("the successful step should carry a run id");
+    assert_ne!(failed_run, succeeded_run);
+  }
+
+  /// Migration 0017 originally copied rows without a correlation id, so any database that ran it
+  /// before the fix still holds ungrouped rows. 0018 repairs those in place.
+  #[test]
+  fn migration_backfills_correlation_ids_left_null_by_the_first_cut_of_0017() {
+    let path = test_db_path("backfill_legacy_correlation");
+    let _ = std::fs::remove_file(&path);
+
+    {
+      let connection = rusqlite::Connection::open(&path).expect("sqlite open should succeed");
+      connection
+        .execute_batch(
+          "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+           CREATE TABLE activity_events (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             node_id TEXT NULL,
+             provider_slug TEXT NULL,
+             category TEXT NOT NULL,
+             stage TEXT NOT NULL,
+             outcome TEXT NOT NULL,
+             correlation_id TEXT NULL,
+             detail TEXT NOT NULL,
+             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+           );
+           INSERT INTO activity_events (node_id, provider_slug, category, stage, outcome, correlation_id, detail) VALUES
+             ('node-a', 'digitalocean', 'provision', 'create.start', 'info', NULL, 'first attempt'),
+             ('node-a', 'digitalocean', 'provision', 'create.error', 'error', NULL, 'first attempt failed'),
+             ('node-a', 'digitalocean', 'provision', 'create.start', 'info', NULL, 'second attempt'),
+             ('node-a', 'digitalocean', 'provision', 'create.ready', 'success', NULL, 'second attempt worked'),
+             ('node-a', NULL, 'connect', 'connect.ready', 'success', 'live-run', 'written by the live path');",
+        )
+        .expect("post-0017 schema setup should succeed");
+
+      for version in 1..=17 {
+        connection
+          .execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, '2026-08-16T00:00:00.000Z')",
+            rusqlite::params![version as i64],
+          )
+          .expect("marking a migration applied should succeed");
+      }
+    }
+
+    let db = Database::new(path);
+    db.run_migrations().expect("0018 should apply");
+
+    let events = db.list_activity_events(20).expect("query should succeed");
+    assert!(
+      events.iter().all(|event| event.correlation_id.is_some()),
+      "every provisioning row should now belong to a run"
+    );
+
+    let provision_runs: std::collections::HashSet<&str> = events
+      .iter()
+      .filter(|event| event.category == "provision")
+      .filter_map(|event| event.correlation_id.as_deref())
+      .collect();
+    assert_eq!(provision_runs.len(), 2, "the two attempts stay separate: {provision_runs:?}");
+
+    // Ids the live code path wrote must be left exactly as they were.
+    let live = events
+      .iter()
+      .find(|event| event.category == "connect")
+      .expect("the live-path row should still be there");
+    assert_eq!(live.correlation_id.as_deref(), Some("live-run"));
   }
 }

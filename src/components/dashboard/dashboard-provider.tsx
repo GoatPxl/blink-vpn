@@ -18,13 +18,16 @@ import {
   setTunnelSettings as setTunnelSettingsCommand,
   getDiagnosticsBundle,
   getHealthPanelData,
+  listAppLocations,
   listProviders,
   listTunnelsForNode,
   listVpnNodes,
   registerProviderToken,
   resumeProvider as resumeProviderCommand,
+  revealAppLocation,
   suspendProvider as suspendProviderCommand,
   validateProviderToken,
+  type AppLocation,
   type DockerReadiness,
   type ProviderRecord,
   type TunnelMetricsSource,
@@ -92,7 +95,8 @@ type DashboardContextValue = {
   setSelectedTunnelId: (value: string) => void;
   health: HealthPanelData | null;
   diagnostics: DiagnosticsBundle | null;
-  diagnosticsExportPath: string;
+  diagnosticsExportPath: string | null;
+  appLocations: AppLocation[];
   providerId: string;
   providerName: string;
   selectProviderId: (providerId: string) => void;
@@ -149,8 +153,11 @@ type DashboardContextValue = {
   destroyNode: (node: VpnNodeRecord) => Promise<void>;
   connectNode: (node: VpnNodeRecord) => Promise<void>;
   forceCleanupSelectedNode: () => Promise<void>;
+  forceCleanupNode: (nodeId: string) => Promise<void>;
   copyDiagnostics: () => Promise<void>;
   exportDiagnostics: () => Promise<void>;
+  copyText: (value: string, label: string) => Promise<void>;
+  revealLocation: (key: string) => Promise<void>;
 };
 
 const DashboardContext = createContext<DashboardContextValue | null>(null);
@@ -173,7 +180,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [tunnelSettings, setTunnelSettings] = useState<TunnelSettings | null>(null);
   const [throughputSamples, setThroughputSamples] = useState<ThroughputSample[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsBundle | null>(null);
-  const [diagnosticsExportPath, setDiagnosticsExportPath] = useState("No export yet.");
+  // Null rather than a "No export yet." sentinel: the UI hides the row instead of printing prose
+  // where a path belongs.
+  const [diagnosticsExportPath, setDiagnosticsExportPath] = useState<string | null>(null);
+  const [appLocations, setAppLocations] = useState<AppLocation[]>([]);
   const [providerId, setProviderId] = useState(DEFAULT_PROVIDER_ID);
   const [providerName, setProviderName] = useState(DEFAULT_PROVIDER_NAME);
   const [providerAccessState, setProviderAccessState] = useState<ProviderAccessState>("unknown");
@@ -437,12 +447,20 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const loadDashboard = useCallback(async (preferredSelectedNodeId?: string) => {
     setBusyAction("refresh");
     try {
-      const [loadedNodes, loadedDiagnostics, loadedProviders, loadedCurrentNodeId, loadedTunnelSettings] = await Promise.all([
+      const [
+        loadedNodes,
+        loadedDiagnostics,
+        loadedProviders,
+        loadedCurrentNodeId,
+        loadedTunnelSettings,
+        loadedLocations,
+      ] = await Promise.all([
         listVpnNodes(),
         getDiagnosticsBundle(),
         listProviders(),
         getCurrentNodeId(),
         getTunnelSettings(),
+        listAppLocations(),
       ]);
 
       setNodes(loadedNodes);
@@ -450,6 +468,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setProviders(loadedProviders);
       setCurrentNodeIdState(loadedCurrentNodeId);
       setTunnelSettings(loadedTunnelSettings);
+      setAppLocations(loadedLocations);
 
       const configuredProvider = loadedProviders.find((provider) => provider.id === providerIdRef.current)
         ?? loadedProviders[0]
@@ -944,28 +963,40 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [handleError, loadDashboard, pushToast]);
 
 
+  /**
+   * Force cleanup for a node named by id.
+   *
+   * The Activity page recovers the node a failed run names, which is not necessarily the selected
+   * one — so the id is the parameter and selection is a caller's concern.
+   */
+  const forceCleanupNode = useCallback(async (nodeId: string) => {
+    const node = nodes.find((candidate) => candidate.id === nodeId) ?? null;
+
+    setBusyAction("force-cleanup");
+    try {
+      const result = await forceCleanupVpnNode(nodeId);
+      setRecovery(null);
+      pushToast(
+        "success",
+        "Force cleanup complete",
+        `Removed ${result.local_tunnels_removed} tunnel(s) for ${node?.name ?? nodeId}.`,
+      );
+      await loadDashboard(nodeId);
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [handleError, loadDashboard, nodes, pushToast]);
+
   const forceCleanupSelectedNode = useCallback(async () => {
     if (!selectedNode) {
       pushToast("warning", "No node selected", "Select a node before forcing cleanup.");
       return;
     }
 
-    setBusyAction("force-cleanup");
-    try {
-      const result = await forceCleanupVpnNode(selectedNode.id);
-      setRecovery(null);
-      pushToast(
-        "success",
-        "Force cleanup complete",
-        `Removed ${result.local_tunnels_removed} tunnel(s) for ${selectedNode.name}.`,
-      );
-      await loadDashboard(selectedNode.id);
-    } catch (error) {
-      handleError(error);
-    } finally {
-      setBusyAction(null);
-    }
-  }, [handleError, loadDashboard, pushToast, selectedNode]);
+    await forceCleanupNode(selectedNode.id);
+  }, [forceCleanupNode, pushToast, selectedNode]);
 
   const copyDiagnostics = useCallback(async () => {
     if (!diagnostics) {
@@ -991,12 +1022,32 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setDiagnosticsExportPath(path);
       setRecovery(null);
       pushToast("success", "Diagnostics exported", path);
+      // The export just created the folder, so its Open button must stop being disabled.
+      setAppLocations(await listAppLocations());
     } catch (error) {
       handleError(error);
     } finally {
       setBusyAction(null);
     }
   }, [handleError, pushToast]);
+
+  /** Copies any single value — a path, a config — with a toast naming what was copied. */
+  const copyText = useCallback(async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      pushToast("success", "Copied", `${label} copied to clipboard.`);
+    } catch (error) {
+      handleError(error);
+    }
+  }, [handleError, pushToast]);
+
+  const revealLocation = useCallback(async (key: string) => {
+    try {
+      await revealAppLocation(key);
+    } catch (error) {
+      handleError(error);
+    }
+  }, [handleError]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -1134,6 +1185,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     health,
     diagnostics,
     diagnosticsExportPath,
+    appLocations,
     providerId,
     providerName,
     selectProviderId,
@@ -1179,8 +1231,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     forceDisconnectNodeService,
     destroyNode,
     forceCleanupSelectedNode,
+    forceCleanupNode,
     copyDiagnostics,
     exportDiagnostics,
+    copyText,
+    revealLocation,
   };
 
   return <DashboardContext.Provider value={value}>{children}</DashboardContext.Provider>;

@@ -1192,12 +1192,20 @@ fn wireguard_service_name(tunnel_name: &str) -> String {
 ///
 /// Under `%LOCALAPPDATA%`, so no elevation is needed to write it, and the per-user ACL keeps the
 /// private key out of other users' reach while still readable by the SYSTEM-hosted tunnel service.
-fn tunnel_config_dir() -> Result<PathBuf, WireGuardError> {
+/// Where tunnel `.conf` files live, without creating anything.
+///
+/// Separate from [`tunnel_config_dir`] so that showing the user the path — on the Activity page —
+/// does not have the side effect of creating a directory they may never need.
+pub fn tunnel_config_dir_path() -> PathBuf {
   let base = std::env::var_os("LOCALAPPDATA")
     .map(PathBuf::from)
     .unwrap_or_else(std::env::temp_dir);
 
-  let dir = base.join("GoatStare").join("tunnels");
+  base.join("GoatStare").join("tunnels")
+}
+
+fn tunnel_config_dir() -> Result<PathBuf, WireGuardError> {
+  let dir = tunnel_config_dir_path();
 
   fs::create_dir_all(&dir).map_err(|source| WireGuardError::Io {
     action: "create_tunnel_config_dir",
@@ -1605,7 +1613,8 @@ mod tests {
           .file_name()
           .and_then(|value| value.to_str())
           .unwrap_or("");
-        if !file_name.ends_with(".conf") || !file_name.starts_with("wg-node-1") {
+        // The point is that the config is named after the tunnel, not after any one test's tunnel.
+        if !file_name.ends_with(".conf") || !file_name.starts_with("wg-node-") {
           return Err(CommandExecError::NonZeroExit {
             program: "wireguard".to_string(),
             code: Some(1),
@@ -1740,21 +1749,21 @@ mod tests {
     let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
 
     let result = wireguard.import_tunnel(
-      "wg-node-1",
+      "wg-node-replace",
       "[Interface]\nPrivateKey = priv\nAddress = 10.66.0.2/32\n\n[Peer]\nPublicKey = pub\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:51820\nPersistentKeepalive = 25\n",
     );
 
     assert!(result.is_ok());
 
     let calls = runner.calls();
-    assert!(calls.iter().any(|(_, args)| args == &["/uninstalltunnelservice".to_string(), "wg-node-1".to_string()]));
+    assert!(calls.iter().any(|(_, args)| args == &["/uninstalltunnelservice".to_string(), "wg-node-replace".to_string()]));
 
     let install_call = calls
       .iter()
       .find(|(_, args)| args.first().is_some_and(|arg| arg == "/installtunnelservice"))
       .expect("install command should be issued");
 
-    assert!(install_call.1[1].ends_with("wg-node-1.conf"));
+    assert!(install_call.1[1].ends_with("wg-node-replace.conf"));
   }
 
   #[test]
@@ -1763,7 +1772,7 @@ mod tests {
     let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
 
     let result = wireguard.import_tunnel(
-      "wg-node-1",
+      "wg-node-fresh",
       "[Interface]\nPrivateKey = priv\nAddress = 10.66.0.2/32\n\n[Peer]\nPublicKey = pub\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:51820\nPersistentKeepalive = 25\n",
     );
 
@@ -1772,7 +1781,7 @@ mod tests {
     let calls = runner.calls();
     assert!(!calls.iter().any(|(_, args)| args == &[
       "/uninstalltunnelservice".to_string(),
-      "wg-node-1".to_string(),
+      "wg-node-fresh".to_string(),
     ]));
     assert!(calls.iter().any(|(_, args)| args.first().is_some_and(|arg| arg == "/installtunnelservice")));
   }
@@ -1782,6 +1791,48 @@ mod tests {
   /// `/installtunnelservice` records the path in the service command line and reads it on every
   /// start; it does not copy the file. Deleting it after import — which this used to do — created
   /// services that imported cleanly and then failed every start, because the file was gone.
+  /// The config snapshot is shown to the user on the Kill Switch page, so what it hides and what it
+  /// keeps is a security decision, not a formatting one.
+  ///
+  /// AGENTS.md §6 requires the private key to be redacted. It deliberately does **not** require
+  /// blanking the whole `[Interface]` section: `Address`, `DNS`, `AllowedIPs` and
+  /// `PersistentKeepalive` are not secret, and they are the only way a user can confirm a settings
+  /// change reached the running tunnel or that the kill switch has a `/0` route.
+  #[test]
+  fn the_config_snapshot_hides_the_private_key_and_keeps_every_verifiable_setting() {
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockImportRunner::with_service_exists(false)));
+
+    wireguard.record_connect_trace_snapshot(
+      "wg-node-snapshot",
+      "[Interface]\nPrivateKey = uP7xK2mQvR4tY6wA9sD1fG3hJ5kL8nB0cV2xZ4aQ6eE=\nAddress = 10.66.0.2/32\nDNS = 9.9.9.9\n\n[Peer]\nPublicKey = serverpubkey\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:51820\nPersistentKeepalive = 25\n",
+    );
+
+    let config = wireguard
+      .debug_snapshot()
+      .last_import_config_redacted
+      .expect("the connect trace should record a config");
+
+    assert!(
+      !config.contains("uP7xK2mQvR4tY6wA9sD1fG3hJ5kL8nB0cV2xZ4aQ6eE="),
+      "the private key must not survive into anything the user can see: {config}"
+    );
+    assert!(config.contains("[REDACTED]"), "the redaction must be visible: {config}");
+
+    for setting in [
+      "Address = 10.66.0.2/32",
+      "DNS = 9.9.9.9",
+      "AllowedIPs = 0.0.0.0/0",
+      "Endpoint = 203.0.113.10:51820",
+      "PersistentKeepalive = 25",
+    ] {
+      assert!(config.contains(setting), "'{setting}' must stay checkable: {config}");
+    }
+  }
+
+  //
+  // Each filesystem-touching test uses its own tunnel name. They all shared `wg-node-1`, and so
+  // shared one path under `%LOCALAPPDATA%\GoatStare\tunnels\` — one test's unregister could delete
+  // the file another had just imported, failing at random under the default parallel runner.
   #[test]
   fn imported_config_survives_import_and_is_removed_on_unregister() {
     let runner = MockImportRunner::with_service_exists(false);
@@ -1789,7 +1840,7 @@ mod tests {
 
     wireguard
       .import_tunnel(
-        "wg-node-1",
+        "wg-node-lifetime",
         "[Interface]\nPrivateKey = priv\nAddress = 10.66.0.2/32\n\n[Peer]\nPublicKey = pub\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:51820\nPersistentKeepalive = 25\n",
       )
       .expect("import should succeed");
@@ -1808,7 +1859,7 @@ mod tests {
     );
 
     wireguard
-      .unregister_legacy_tunnel_service_with_program("wg-node-1", "wireguard")
+      .unregister_legacy_tunnel_service_with_program("wg-node-lifetime", "wireguard")
       .expect("unregister should succeed");
 
     assert!(
@@ -1828,7 +1879,7 @@ mod tests {
     let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
 
     wireguard
-      .unregister_tunnel("wg-node-1")
+      .unregister_tunnel("wg-node-single-command")
       .expect("unregister should succeed");
 
     let calls = runner.calls();
@@ -1936,7 +1987,7 @@ mod tests {
     let wireguard = WireGuardManager::with_runner(runner);
 
     let result = wireguard.import_tunnel(
-      "wg-node-1",
+      "wg-node-missing-service-text",
       "[Interface]\nPrivateKey = priv\nAddress = 10.66.0.2/32\n\n[Peer]\nPublicKey = pub\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:51820\nPersistentKeepalive = 25\n",
     );
 
@@ -2411,7 +2462,8 @@ mod tests {
     let runner = MockImportRunner::with_service_exists(false);
     let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
 
-    let result = wireguard.unregister_legacy_tunnel_service_with_program("wg-node-1", "wireguard");
+    let result =
+      wireguard.unregister_legacy_tunnel_service_with_program("wg-node-legacy-absent", "wireguard");
     assert!(result.is_ok());
 
     let calls = runner.calls();
@@ -2425,12 +2477,13 @@ mod tests {
     let runner = MockImportRunner::with_service_exists(true);
     let wireguard = WireGuardManager::with_runner(Arc::new(runner.clone()));
 
-    let result = wireguard.unregister_legacy_tunnel_service_with_program("wg-node-1", "wireguard");
+    let result =
+      wireguard.unregister_legacy_tunnel_service_with_program("wg-node-legacy-present", "wireguard");
     assert!(result.is_ok());
 
     let calls = runner.calls();
     assert!(calls.iter().any(|(_, args)| {
-      args == &["/uninstalltunnelservice".to_string(), "wg-node-1".to_string()]
+      args == &["/uninstalltunnelservice".to_string(), "wg-node-legacy-present".to_string()]
     }));
   }
 

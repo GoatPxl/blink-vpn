@@ -181,3 +181,26 @@ from `sc query`, and a handshake is only observable once the peer actually respo
 - **Provider naming rules belong to the adapter.** A node name is free text chosen by the user;
   DigitalOcean requires a droplet name that is a valid hostname. The adapter maps between them
   rather than constraining what a node may be called, and the local record keeps the user's label.
+
+## The Activity Log
+
+`activity_events` is the app's memory of what it did. Every lifecycle flow — provision, connect,
+disconnect, destroy, force cleanup, an unexpected tunnel drop, a startup reconcile finding — appends
+through `ActivityRecorder`, which stamps the run's `correlation_id` and redacts before writing.
+
+Two rules make it worth keeping:
+
+- **Failures record the flattened cause chain**, via `describe_error_chain`. A recorded reason that
+  is not actionable is not worth the row.
+- **The record is written where intent is known.** A user-initiated disconnect and a tunnel that
+  stopped on its own both end at `Disconnected`; only the code that asked for the stop can tell them
+  apart. An unexpected drop is therefore recorded at the state transition inside
+  `observe_tunnel_runtime`, not wherever the drop is later read — health polls every 15 seconds, and
+  recording on read would append a row per poll until the user reconnected.
+
+It replaced `init_run_logs`, which only the create flow wrote to, so the app forgot every connect and
+disconnect the moment it closed. Bounded at 1000 rows, pruned on startup.
+
+The Activity page reads it through `get_diagnostics_bundle` rather than a dedicated list command:
+the bundle already carries the rows and is already polled, and a second command returning a subset
+would be a parallel path to the same data.

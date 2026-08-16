@@ -142,8 +142,14 @@ only way to learn which path executed was to trace four levels of dispatch.
 
 - **Never** in SQLite, logs, error messages, diagnostics bundles, test fixtures, snapshots, or any
   committed file. SQLite stores a `*_ref` pointer; the secret lives in Windows Credential Manager.
-- Redact at the log boundary: API tokens, private keys, `Authorization` headers, and any
-  `[Interface]` section.
+- Redact at the log boundary: API tokens, `Authorization` headers, and **private keys — the
+  `PrivateKey` value in a WireGuard config, not the whole `[Interface]` section.** The rest of a
+  config (`Address`, `DNS`, `AllowedIPs`, `PublicKey`, `Endpoint`, `PersistentKeepalive`) is not
+  secret, and it is the only way a user can confirm that a settings change reached the running
+  tunnel or that the kill switch has a `/0` route. This rule previously said "any `[Interface]`
+  section"; the code never did that, and blanking the section would have removed a real diagnostic
+  for no security gain. Redaction is applied at the **write** boundary — `ActivityRecorder::record`,
+  `record_last_import_snapshot` — so nothing has to remember to redact on read.
 - **A live DigitalOcean API token was previously committed** to `tests/e2e/fixtures/tauri-mocks.ts`,
   disguised as a fake `token_ref`. It was removed from the tree but remains in git history. Fake
   credentials in fixtures must be *obviously* fake (`dop_v1_EXAMPLE_NOT_A_REAL_TOKEN`), never a
