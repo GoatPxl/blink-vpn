@@ -188,6 +188,34 @@ export interface HealthPanelData {
   tunnel_status: string | null;
   metrics_source: TunnelMetricsSource | null;
   connected_at: string | null;
+  kill_switch: KillSwitchState;
+  unexpected_drop: UnexpectedDrop | null;
+}
+
+export type KillSwitchReason = "active" | "tunnel_not_running" | "routes_scoped";
+
+/**
+ * Whether untunneled traffic is currently blocked.
+ *
+ * The app installs no firewall rules. WireGuard for Windows enables WFP filters that block traffic
+ * outside the tunnel when a config has one peer, an `AllowedIPs` carrying a `/0` route, and no
+ * `Table = off`. This reports whether that actually holds for the running tunnel — including the
+ * case where routes were scoped to a local endpoint and nothing is blocked.
+ */
+export interface KillSwitchState {
+  active: boolean;
+  blocks_ipv4: boolean;
+  blocks_ipv6: boolean;
+  reason: KillSwitchReason;
+  /** The routes the running config carries, so the UI can show its working. */
+  routes: string[];
+}
+
+/** A tunnel that stopped without the app asking it to, leaving traffic unprotected. */
+export interface UnexpectedDrop {
+  tunnel_id: string;
+  node_id: string;
+  observed_at_epoch_ms: number;
 }
 
 export interface DiagnosticsBundle {
@@ -220,7 +248,10 @@ export interface WireGuardReadiness {
   installed: boolean;
   executable_found: boolean;
   service_available: boolean;
+  /** Installed WireGuard version from `wg --version`, or null when it could not be read. */
   version: string | null;
+  /** This app's own version. */
+  app_version: string;
   message: string;
   action_guidance: string;
 }

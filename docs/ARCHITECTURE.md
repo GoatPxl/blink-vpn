@@ -50,6 +50,11 @@ flowchart LR
 
 - There is one connection path: the WireGuard for Windows tunnel service.
 - Elevation is requested for connect and disconnect only, and only after a direct attempt is refused for permissions. Status reads never elevate.
+- **Leak protection comes from WireGuard for Windows, not from this app.** Its WFP filters engage
+  automatically for a full-tunnel config; the app installs no firewall rules and adds no second
+  mechanism. It reports whether those filters are actually in force for the running tunnel, and
+  detects — but does not prevent — the window after a tunnel service stops unexpectedly. See
+  `docs/SECURITY.md`.
 - An earlier `Admin Mode` / `User Mode` toggle was removed. It promised a second, in-process adapter runtime that could not work — the adapter was destroyed when its creating function returned, and interface reads always failed for want of an adapter handle — so Admin Mode silently fell back to the service path and the two modes were identical in practice.
 
 ## Global App Settings

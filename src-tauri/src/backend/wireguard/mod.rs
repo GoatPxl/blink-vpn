@@ -205,10 +205,27 @@ impl WireGuardManager {
       installed,
       executable_found,
       service_available,
-      version: None,
+      // Best-effort: `wg` may be absent from PATH even when `wireguard.exe` resolves, and an
+      // unknown version is not a readiness failure.
+      version: self.read_wireguard_version(),
       message,
       action_guidance,
     }
+  }
+
+  /// The installed WireGuard version, from `wg --version`.
+  ///
+  /// Reported for display only. `wg` needs no elevation for `--version`, unlike the interface
+  /// reads that talk to the tunnel service pipe.
+  fn read_wireguard_version(&self) -> Option<String> {
+    let output = self.runner.run("wg", &["--version"], None).ok()?;
+    let line = output.stdout.lines().next()?.trim();
+
+    if line.is_empty() {
+      return None;
+    }
+
+    Some(line.to_string())
   }
 
   pub fn resolution_diagnostics(&self) -> WireGuardResolutionDiagnostics {

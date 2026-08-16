@@ -60,7 +60,7 @@ Provider adapters currently included:
 | `check_docker_readiness` | none | `DockerReadinessResponse` | Docker runtime readiness signal |
 | `delete_provider_droplet` | `provider_id`, `droplet_id` | `void` | Direct provider cleanup helper |
 | `provision_provider_droplet` | `provider_id`, `droplet_name` | `string` | Lower-level provision helper |
-| `check_wireguard_readiness` | none | `WireGuardReadinessResponse` | Local WireGuard install probe. Infallible — reports readiness in the payload rather than erroring |
+| `check_wireguard_readiness` | none | `WireGuardReadinessResponse` | Local WireGuard install probe, plus `version` (from `wg --version`, null when unreadable) and `app_version`. Infallible — reports readiness in the payload rather than erroring |
 | `open_wireguard_install_page` | none | `void` | Opens the WireGuard download page in the default browser (Windows only) |
 | `install_wireguard_with_prerequisites` | none | `WireGuardInstallResult` | Runs the WireGuard installer with elevation (Windows only) |
 | `force_disconnect_node_service` | `node_id` | `void` | Best-effort teardown of every tunnel service for a node; ignores individual failures |
@@ -137,9 +137,28 @@ fleet stays readable when a provider key goes bad.
   "external_ipv6": null,
   "tunnel_status": "connected",
   "metrics_source": "adapter",
-  "connected_at": "2026-08-15T10:00:00.000Z"
+  "connected_at": "2026-08-15T10:00:00.000Z",
+  "kill_switch": {
+    "active": true,
+    "blocks_ipv4": true,
+    "blocks_ipv6": true,
+    "reason": "active",
+    "routes": ["0.0.0.0/0", "::/0"]
+  },
+  "unexpected_drop": null
 }
 ```
+
+`kill_switch` reports whether WireGuard's own WFP filters are blocking untunneled traffic. It is
+derived from the routes the **running config** carries — `scope_allowed_ips_for_endpoint`, not the
+stored `allowed_ips` column, because the two differ for a locally-scoped endpoint and the column
+would claim protection a Docker dev tunnel does not have. `reason` is `active`,
+`tunnel_not_running`, or `routes_scoped`.
+
+`unexpected_drop` is set when the tunnel stopped without the app asking — traffic is unprotected
+until reconnect. A user-initiated disconnect records intent first and is never reported here.
+`observed_at_epoch_ms` is Unix milliseconds, unlike the ISO-8601 timestamps elsewhere in this
+payload.
 
 Takes an optional `force_ip_probe` flag. The egress addresses are cached for 60 seconds because
 health polls far more often than an address changes; the cache is bypassed automatically whenever

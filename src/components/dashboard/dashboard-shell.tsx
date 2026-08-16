@@ -17,7 +17,7 @@ const navItems: Array<{ id: AppView; label: string; icon: string; eyebrow: strin
 const titleMap: Record<AppView, string> = {
   dashboard: "Network Stats",
   nodes: "Server Locations",
-  health: "Connection Health",
+  health: "Kill Switch",
   diagnostics: "Diagnostics",
   settings: "Provider Integration",
 };
@@ -25,7 +25,7 @@ const titleMap: Record<AppView, string> = {
 const subtitleMap: Record<AppView, string> = {
   dashboard: "Monitor the active tunnel, throughput, and local node state.",
   nodes: "Choose where your traffic exits, and provision new servers.",
-  health: "Inspect runtime handshake, endpoint, and tunnel health.",
+  health: "Verify leak protection, watch for dropped tunnels, and inspect connection health.",
   diagnostics: "Review redacted logs, recovery suggestions, and exportable bundles.",
   settings: "Register and validate provider tokens used for orchestration.",
 };

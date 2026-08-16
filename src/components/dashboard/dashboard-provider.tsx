@@ -2,6 +2,7 @@
 
 import {
   checkDockerReadiness,
+  checkWireGuardReadiness,
   connectTunnel as connectTunnelCommand,
   createAndActivateClientTunnel,
   deleteProvider as deleteProviderCommand,
@@ -27,6 +28,7 @@ import {
   type TunnelMetricsSource,
   type TunnelRecord,
   type VpnNodeRecord,
+  type WireGuardReadiness,
   toCommandError,
 } from "@/lib/tauri";
 import {
@@ -113,6 +115,13 @@ type DashboardContextValue = {
   setCurrentNode: (nodeId: string) => Promise<void>;
   /** Clears the recovery banner. It otherwise persists until the next successful operation. */
   dismissRecovery: () => void;
+  /** Local WireGuard install probe, refreshed with the dashboard rather than on its own timer. */
+  wireguardReadiness: WireGuardReadiness | null;
+  refreshWireGuardReadiness: () => Promise<void>;
+  /** When the last health snapshot landed, so a page can show a real "last checked". */
+  healthUpdatedAt: number | null;
+  /** Re-fetches the diagnostics bundle without the busy state a full dashboard reload sets. */
+  refreshDiagnostics: () => Promise<void>;
   throughputSamples: ThroughputSample[];
   loadDashboard: (preferredSelectedNodeId?: string) => Promise<void>;
   refreshHealth: () => Promise<void>;
@@ -153,6 +162,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [health, setHealth] = useState<HealthPanelData | null>(null);
   // Named to keep the React setter distinct from the `setCurrentNodeId` Tauri command.
   const [currentNodeId, setCurrentNodeIdState] = useState<string | null>(null);
+  const [wireguardReadiness, setWireguardReadiness] = useState<WireGuardReadiness | null>(null);
+  const [healthUpdatedAt, setHealthUpdatedAt] = useState<number | null>(null);
   const [throughputSamples, setThroughputSamples] = useState<ThroughputSample[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsBundle | null>(null);
   const [diagnosticsExportPath, setDiagnosticsExportPath] = useState("No export yet.");
@@ -375,6 +386,25 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     setRecovery(null);
   }, []);
 
+  const refreshWireGuardReadiness = useCallback(async () => {
+    try {
+      setWireguardReadiness(await checkWireGuardReadiness());
+    } catch {
+      // A probe that cannot run is reported as "not checked" rather than as an install failure.
+      setWireguardReadiness(null);
+    }
+  }, []);
+
+  /// Silent on purpose: the log panel refreshes on a timer, and setting `busyAction` would disable
+  /// every button on the page for the duration of each poll.
+  const refreshDiagnostics = useCallback(async () => {
+    try {
+      setDiagnostics(await getDiagnosticsBundle());
+    } catch {
+      // Leave the previous bundle in place; a failed refresh is not worth clearing real logs for.
+    }
+  }, []);
+
   const setCurrentNode = useCallback(async (nodeId: string) => {
     try {
       await setCurrentNodeId(nodeId);
@@ -409,6 +439,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       }
 
       await refreshProviderAccessStatus(configuredProvider);
+      // Rides along with the dashboard refresh rather than running its own timer; the install
+      // state only changes when the user installs or repairs WireGuard.
+      void refreshWireGuardReadiness();
       setRecovery(null);
 
       const preferredExists = preferredSelectedNodeId
@@ -433,7 +466,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     } finally {
       setBusyAction(null);
     }
-  }, [handleError, refreshProviderAccessStatus]);
+  }, [handleError, refreshProviderAccessStatus, refreshWireGuardReadiness]);
 
   const loadNodeDetails = useCallback(async (nodeIdValue: string) => {
     if (!nodeIdValue) {
@@ -458,6 +491,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
       const nextHealth = await getHealthPanelData(nodeIdValue, loadedTunnels[0]?.id ?? null);
       setHealth(nextHealth);
+      setHealthUpdatedAt(Date.now());
       if (nextHealth.tunnel_id && snapshotIsConnected(nextHealth)) {
         recordThroughputSample(nextHealth);
       } else {
@@ -486,6 +520,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         !silent,
       );
       setHealth(snapshot);
+      setHealthUpdatedAt(Date.now());
       if (snapshot.tunnel_id && snapshotIsConnected(snapshot)) {
         recordThroughputSample(snapshot);
       } else {
@@ -1094,6 +1129,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     currentNodeId,
     setCurrentNode,
     dismissRecovery,
+    wireguardReadiness,
+    refreshWireGuardReadiness,
+    healthUpdatedAt,
+    refreshDiagnostics,
     throughputSamples,
     loadDashboard,
     refreshHealth,

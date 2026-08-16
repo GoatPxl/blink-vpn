@@ -1,7 +1,7 @@
 use thiserror::Error;
 use uuid::Uuid;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -30,6 +30,25 @@ use crate::backend::wireguard::{
 pub struct Orchestrator {
   ip_probe: Arc<dyn ExternalIpProbe>,
   external_ip: Arc<Mutex<Option<ExternalIpSnapshot>>>,
+  tunnel_watch: Arc<Mutex<TunnelWatch>>,
+}
+
+/// Tracks whether a tunnel stopping was the app's doing.
+///
+/// Both a crash and a Disconnect click land on `TunnelStatus::Disconnected` with nothing to tell
+/// them apart, so the app could not warn about a drop that left traffic unprotected. Intent has to
+/// be recorded at the point it is known.
+///
+/// In-memory on purpose: a drop is only actionable inside the session that saw it, and startup
+/// reconciliation already reports a stale connected row as a repaired issue.
+#[derive(Debug, Default)]
+struct TunnelWatch {
+  /// Last runtime state observed per tunnel, so a transition can be spotted.
+  last_connected: HashMap<String, bool>,
+  /// Tunnels the app is deliberately stopping; a stop here is not a drop.
+  expected_stop: HashSet<String>,
+  /// The most recent unexpected stop, until the user reconnects.
+  drop: Option<UnexpectedDrop>,
 }
 
 /// The last measured egress addresses, and the tunnel state they were measured under.
@@ -175,6 +194,48 @@ pub struct HealthSummary {
   pub metrics_source: Option<TunnelMetricsSource>,
   /// When the current session began, or `None` if not connected or the start time is unknown.
   pub connected_at: Option<String>,
+  /// Whether untunneled traffic is currently blocked, and why.
+  pub kill_switch: KillSwitchState,
+  /// Set when the tunnel stopped without the app asking it to; `None` otherwise.
+  pub unexpected_drop: Option<UnexpectedDrop>,
+}
+
+/// Why leak protection is or is not in force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KillSwitchReason {
+  /// WireGuard's WFP filters are blocking untunneled traffic.
+  Active,
+  /// No tunnel service is running, so no filters exist.
+  TunnelNotRunning,
+  /// The tunnel carries only a scoped route, so WireGuard restricts nothing.
+  RoutesScoped,
+}
+
+/// Whether untunneled traffic is currently blocked, and by what.
+///
+/// This app installs no firewall rules of its own. WireGuard for Windows enables WFP filters that
+/// block traffic outside the tunnel when a config has exactly one peer, an `AllowedIPs` containing
+/// a `/0` route, and no `Table = off`. This reports whether those preconditions actually hold for
+/// the running tunnel — not whether the app would like them to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KillSwitchState {
+  pub active: bool,
+  pub blocks_ipv4: bool,
+  pub blocks_ipv6: bool,
+  pub reason: KillSwitchReason,
+  /// The routes the running config actually carries, so the UI can show its working.
+  pub routes: Vec<String>,
+}
+
+/// A tunnel that stopped without the app asking it to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnexpectedDrop {
+  pub tunnel_id: String,
+  pub node_id: String,
+  /// Unix epoch milliseconds. Named for its unit because the rest of this payload carries ISO-8601
+  /// strings from SQLite, and a bare `observed_at` would invite parsing it as one.
+  pub observed_at_epoch_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,7 +300,63 @@ impl Orchestrator {
     Self {
       ip_probe,
       external_ip: Arc::new(Mutex::new(None)),
+      tunnel_watch: Arc::new(Mutex::new(TunnelWatch::default())),
     }
+  }
+
+  /// Records that the app is about to stop this tunnel, so the next poll does not call it a drop.
+  fn expect_tunnel_stop(&self, tunnel_id: &str) {
+    if let Ok(mut watch) = self.tunnel_watch.lock() {
+      watch.expected_stop.insert(tunnel_id.to_string());
+      watch.drop = None;
+    }
+  }
+
+  /// Records a successful connect, clearing any drop the user has now recovered from.
+  fn note_tunnel_connected(&self, tunnel_id: &str) {
+    if let Ok(mut watch) = self.tunnel_watch.lock() {
+      watch.expected_stop.remove(tunnel_id);
+      watch.last_connected.insert(tunnel_id.to_string(), true);
+      watch.drop = None;
+    }
+  }
+
+  /// Folds one observation into the watch and reports an unexpected stop if this was one.
+  ///
+  /// A drop is a `connected -> not connected` transition with no matching intent. Anything else —
+  /// a first observation, a steady state, a stop the app asked for — is not.
+  fn observe_tunnel_runtime(
+    &self,
+    tunnel_id: &str,
+    node_id: &str,
+    connected: bool,
+  ) -> Option<UnexpectedDrop> {
+    let mut watch = self.tunnel_watch.lock().ok()?;
+
+    let was_connected = watch.last_connected.insert(tunnel_id.to_string(), connected);
+
+    if connected {
+      watch.expected_stop.remove(tunnel_id);
+      if watch.drop.as_ref().is_some_and(|drop| drop.tunnel_id == tunnel_id) {
+        watch.drop = None;
+      }
+      return None;
+    }
+
+    if was_connected == Some(true) {
+      if watch.expected_stop.remove(tunnel_id) {
+        // The app asked for this stop, so it is not a drop.
+        return None;
+      }
+
+      watch.drop = Some(UnexpectedDrop {
+        tunnel_id: tunnel_id.to_string(),
+        node_id: node_id.to_string(),
+        observed_at_epoch_ms: epoch_millis(),
+      });
+    }
+
+    watch.drop.clone()
   }
 
   /// The addresses the internet currently sees, cached.
@@ -1504,6 +1621,9 @@ impl Orchestrator {
       // Stamps the session start so the dashboard can show a real elapsed timer. Best-effort:
       // an uptime display is not worth failing an otherwise successful connect over.
       let _ = db.set_tunnel_connected_at(&request.tunnel_id, true);
+      // Clears any drop the user has now recovered from, and gives the watch a baseline so the
+      // next stop can be classified.
+      self.note_tunnel_connected(&request.tunnel_id);
       // Connecting to a node is the clearest possible statement that it is the one you want.
       let _ = self.set_current_node_id(db, Some(&request.node_id));
       let _ = db.transition_vpn_node_status(&request.node_id, NodeLifecycleStatus::Connected, None);
@@ -1571,6 +1691,10 @@ impl Orchestrator {
       });
     }
 
+    // Recorded before the stop, so the poll that observes it knows this was intentional and does
+    // not raise a drop alert.
+    self.expect_tunnel_stop(&request.tunnel_id);
+
     // Unregister alone: it stops the service as part of removing it. Stopping separately first
     // only bought a second elevation prompt.
     wireguard
@@ -1619,6 +1743,8 @@ impl Orchestrator {
       })?;
 
     for tunnel in tunnels {
+      // Deliberate teardown, so none of these stops should read as a drop.
+      self.expect_tunnel_stop(&tunnel.id);
       // Unregister stops the service as part of removal, so one elevated call does both.
       let _ = wireguard.unregister_tunnel(&tunnel.name);
       let _ = db.update_tunnel_stats_snapshot(&tunnel.id, None, None, None);
@@ -1773,6 +1899,33 @@ impl Orchestrator {
       self.reconcile_tunnel_status(db, tunnel, status);
     }
 
+    // A tunnel that stopped on its own took WireGuard's WFP filters down with it, so traffic is
+    // flowing unprotected. Nothing used to notice; the row was rewritten and the badge flipped.
+    let unexpected_drop = selected_tunnel.as_ref().and_then(|tunnel| {
+      self.observe_tunnel_runtime(
+        &tunnel.id,
+        &node.id,
+        matches!(effective_status, Some(TunnelStatus::Connected)),
+      )
+    });
+
+    // Derived from the routes the running config carries, not the stored column: those differ for
+    // a locally-scoped endpoint, and the column would claim protection the tunnel does not have.
+    let kill_switch = {
+      let connected = matches!(effective_status, Some(TunnelStatus::Connected));
+      match selected_tunnel.as_ref() {
+        Some(tunnel) => {
+          let routes = scope_allowed_ips_for_endpoint(
+            parse_allowed_ips_csv(tunnel.allowed_ips.as_deref()),
+            node.public_ipv4.as_deref().unwrap_or_default(),
+            tunnel.client_address_cidr.as_deref().unwrap_or(DEFAULT_CLIENT_CIDR),
+          );
+          derive_kill_switch_state(&routes, connected)
+        }
+        None => derive_kill_switch_state(&[], false),
+      }
+    };
+
     // Measured in every state, so the card can show the address changing as the tunnel comes up.
     // Cached, because health polls far more often than an egress address changes.
     let connected = matches!(effective_status, Some(TunnelStatus::Connected));
@@ -1794,6 +1947,8 @@ impl Orchestrator {
       } else {
         None
       },
+      kill_switch,
+      unexpected_drop,
     })
   }
 
@@ -2123,13 +2278,16 @@ fn redact_text(value: &str) -> String {
 ///
 /// Used for `generated_at` and therefore for the exported diagnostics filename, so it must stay
 /// free of characters that are illegal in a Windows filename.
-fn epoch_millis_label() -> String {
+fn epoch_millis() -> u64 {
   use std::time::{SystemTime, UNIX_EPOCH};
-  let millis = SystemTime::now()
+  SystemTime::now()
     .duration_since(UNIX_EPOCH)
-    .map(|duration| duration.as_millis())
-    .unwrap_or_default();
-  format!("{millis}")
+    .map(|duration| duration.as_millis() as u64)
+    .unwrap_or_default()
+}
+
+fn epoch_millis_label() -> String {
+  format!("{}", epoch_millis())
 }
 
 fn persist_tunnel_stats_snapshot(
@@ -2205,6 +2363,39 @@ fn scope_allowed_ips_for_endpoint(
   );
 
   vec![subnet]
+}
+
+/// Whether WireGuard's built-in leak protection is in force for these routes.
+///
+/// Mirrors wireguard-windows' own rule: with a single peer and no `Table = off` — both always true
+/// of configs this app generates — a `/0` route in `AllowedIPs` makes it install WFP filters that
+/// block untunneled traffic. Anything narrower and it restricts nothing.
+///
+/// `routes` must be the routes the *running config* carries, which is not always what the tunnel
+/// row stores: `scope_allowed_ips_for_endpoint` rewrites them for locally-scoped endpoints, so a
+/// Docker dev tunnel is unprotected while its stored `allowed_ips` still reads `0.0.0.0/0`.
+fn derive_kill_switch_state(routes: &[String], connected: bool) -> KillSwitchState {
+  let blocks_ipv4 = routes.iter().any(|entry| entry.trim() == "0.0.0.0/0");
+  let blocks_ipv6 = routes.iter().any(|entry| entry.trim() == "::/0");
+  let carries_default_route = blocks_ipv4 || blocks_ipv6;
+
+  let reason = if !carries_default_route {
+    KillSwitchReason::RoutesScoped
+  } else if !connected {
+    KillSwitchReason::TunnelNotRunning
+  } else {
+    KillSwitchReason::Active
+  };
+
+  KillSwitchState {
+    active: matches!(reason, KillSwitchReason::Active),
+    // Reported for the routes themselves, so the UI can say which families would be covered even
+    // while the tunnel is down.
+    blocks_ipv4,
+    blocks_ipv6,
+    reason,
+    routes: routes.to_vec(),
+  }
 }
 
 /// `10.66.0.2/32` -> `10.66.0.0/24`: the subnet shared with the server.
@@ -3623,6 +3814,119 @@ mod tests {
     let geo = unknown.region_geo.as_ref().expect("an entry is still returned");
     assert_eq!(geo.slug, "mars1");
     assert_eq!(geo.city, None, "an unrecognised slug must not be given an invented city");
+  }
+
+  /// The production case: default routes on a public endpoint, so WireGuard installs its filters.
+  #[test]
+  fn kill_switch_is_active_for_default_routes_on_a_running_tunnel() {
+    let routes = vec!["0.0.0.0/0".to_string(), "::/0".to_string()];
+    let state = derive_kill_switch_state(&routes, true);
+
+    assert!(state.active);
+    assert_eq!(state.reason, KillSwitchReason::Active);
+    assert!(state.blocks_ipv4);
+    assert!(state.blocks_ipv6);
+  }
+
+  /// The filters live with the tunnel service, so a stopped tunnel protects nothing — the routes
+  /// still describe what *would* be covered, which is what the UI explains.
+  #[test]
+  fn kill_switch_is_inactive_while_the_tunnel_is_not_running() {
+    let routes = vec!["0.0.0.0/0".to_string(), "::/0".to_string()];
+    let state = derive_kill_switch_state(&routes, false);
+
+    assert!(!state.active);
+    assert_eq!(state.reason, KillSwitchReason::TunnelNotRunning);
+    assert!(state.blocks_ipv4, "the route set is still reported");
+  }
+
+  /// A Docker dev tunnel has its default routes stripped, so WireGuard restricts nothing. Reading
+  /// the stored `allowed_ips` column instead would claim protection that does not exist.
+  #[test]
+  fn kill_switch_is_inactive_when_routes_are_scoped_to_the_tunnel_subnet() {
+    let scoped = scope_allowed_ips_for_endpoint(
+      vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+      "127.0.0.1",
+      "10.66.0.2/32",
+    );
+    assert_eq!(scoped, vec!["10.66.0.0/24".to_string()], "precondition: routes are scoped");
+
+    let state = derive_kill_switch_state(&scoped, true);
+    assert!(!state.active, "a scoped tunnel must not claim leak protection");
+    assert_eq!(state.reason, KillSwitchReason::RoutesScoped);
+    assert!(!state.blocks_ipv4);
+    assert!(!state.blocks_ipv6);
+  }
+
+  #[test]
+  fn kill_switch_reports_partial_coverage_for_an_ipv4_only_default_route() {
+    let state = derive_kill_switch_state(&["0.0.0.0/0".to_string()], true);
+
+    assert!(state.active);
+    assert!(state.blocks_ipv4);
+    assert!(!state.blocks_ipv6);
+  }
+
+  /// The distinction the app could not previously make: a crash and a Disconnect click both land
+  /// on `Disconnected`, but only one leaves the user unprotected without asking.
+  #[test]
+  fn a_tunnel_stopping_on_its_own_is_reported_as_an_unexpected_drop() {
+    let orchestrator = Orchestrator::new();
+
+    assert_eq!(
+      orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", true),
+      None,
+      "a healthy observation is not a drop"
+    );
+
+    let drop = orchestrator
+      .observe_tunnel_runtime("tunnel-a", "node-a", false)
+      .expect("a stop with no matching intent is a drop");
+    assert_eq!(drop.tunnel_id, "tunnel-a");
+    assert_eq!(drop.node_id, "node-a");
+    assert!(drop.observed_at_epoch_ms > 0);
+  }
+
+  #[test]
+  fn a_disconnect_the_app_asked_for_is_not_reported_as_a_drop() {
+    let orchestrator = Orchestrator::new();
+    orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", true);
+
+    orchestrator.expect_tunnel_stop("tunnel-a");
+
+    assert_eq!(
+      orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", false),
+      None,
+      "an intentional stop must not raise a drop alert"
+    );
+  }
+
+  /// Polling continues after a drop; the alert must persist rather than clearing itself on the
+  /// next identical observation.
+  #[test]
+  fn a_drop_persists_across_polls_until_the_tunnel_is_connected_again() {
+    let orchestrator = Orchestrator::new();
+    orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", true);
+    orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", false);
+
+    assert!(
+      orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", false).is_some(),
+      "a repeat poll must keep reporting the drop"
+    );
+
+    assert_eq!(
+      orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", true),
+      None,
+      "reconnecting clears it"
+    );
+  }
+
+  /// A tunnel first seen stopped was not observed dropping, so warning about it would be a guess.
+  #[test]
+  fn a_tunnel_first_seen_stopped_is_not_a_drop() {
+    let orchestrator = Orchestrator::new();
+
+    assert_eq!(orchestrator.observe_tunnel_runtime("tunnel-a", "node-a", false), None);
   }
 
   /// Egress probe that answers from fixed values instead of the network.

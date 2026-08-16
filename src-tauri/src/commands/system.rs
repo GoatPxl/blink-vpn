@@ -12,7 +12,7 @@ use crate::backend::logging;
 use crate::backend::provider::{ProviderPlanPricing, ProviderRegion};
 use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
-  ForceCleanupResult,
+  ForceCleanupResult, KillSwitchState, UnexpectedDrop,
 };
 use crate::backend::db::{TunnelRecord, VpnNodeRecord};
 use crate::backend::secure_storage::SecureStorage;
@@ -45,6 +45,11 @@ pub struct HealthPanelData {
   pub metrics_source: Option<String>,
   /// Session start time, or `None` when not connected or the start time is unknown.
   pub connected_at: Option<String>,
+  /// Whether untunneled traffic is currently blocked, and why. Provided by WireGuard for Windows,
+  /// not by this app — see `KillSwitchState`.
+  pub kill_switch: KillSwitchState,
+  /// Set when the tunnel stopped without the app asking; traffic is unprotected until reconnect.
+  pub unexpected_drop: Option<UnexpectedDrop>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,7 +68,10 @@ pub struct WireGuardReadinessResponse {
   pub installed: bool,
   pub executable_found: bool,
   pub service_available: bool,
+  /// Installed WireGuard version from `wg --version`, or `None` when it could not be read.
   pub version: Option<String>,
+  /// This app's own version, so the health page reports a real build rather than a made-up one.
+  pub app_version: String,
   pub message: String,
   pub action_guidance: String,
 }
@@ -597,6 +605,8 @@ pub fn connect_tunnel(
       tunnel_status: summary.tunnel_status.map(|status| status.to_string()),
       metrics_source: summary.metrics_source.map(|source| source.as_str().to_string()),
       connected_at: summary.connected_at,
+      kill_switch: summary.kill_switch,
+      unexpected_drop: summary.unexpected_drop,
     })
   }
 
@@ -675,13 +685,17 @@ pub fn force_disconnect_node_service(
 }
 
 #[tauri::command]
-pub fn check_wireguard_readiness(backend: State<'_, Backend>) -> WireGuardReadinessResponse {
+pub fn check_wireguard_readiness(
+  app: tauri::AppHandle,
+  backend: State<'_, Backend>,
+) -> WireGuardReadinessResponse {
   let readiness: WireGuardReadiness = backend.wireguard.check_readiness();
   WireGuardReadinessResponse {
     installed: readiness.installed,
     executable_found: readiness.executable_found,
     service_available: readiness.service_available,
     version: readiness.version,
+    app_version: app.package_info().version.to_string(),
     message: readiness.message,
     action_guidance: readiness.action_guidance,
   }

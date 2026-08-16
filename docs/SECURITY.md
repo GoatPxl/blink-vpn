@@ -20,6 +20,37 @@
 - Backend to the WireGuard tunnel service: privileged local boundary (elevation on connect and disconnect only).
 - Backend to Docker runtime: local process boundary with validated command output.
 
+## Leak Protection (Kill Switch)
+
+**The kill switch is WireGuard for Windows', not this app's.** This app installs no firewall rules
+on Windows at all. When a config has exactly one peer, an `AllowedIPs` carrying a `/0` route, and
+no `Table = off`, wireguard-windows installs WFP filters that block traffic not going through the
+tunnel. Every config this app generates meets those conditions for a public endpoint.
+
+What that means when a tunnel drops:
+
+| How it drops | Filters | Exposed? |
+|---|---|---|
+| Peer unreachable, network blip, roaming, sleep/wake | Service still running, filters intact | **No — fails closed.** Offline, not leaking |
+| **Tunnel service stops or crashes** | Torn down with the service | **Yes.** Traffic resumes over the ISP |
+| User disconnects | Removed with the service | Intended |
+
+**Two limits to keep in mind:**
+
+- **Docker dev tunnels have no protection.** `scope_allowed_ips_for_endpoint` strips the `/0` routes
+  for loopback/RFC1918 endpoints, so the dev lane runs a split tunnel and WireGuard restricts
+  nothing. The Kill Switch page reports this explicitly rather than implying parity with production.
+- **A service crash is an exposure window the app detects but does not prevent.** The health poll
+  classifies an unexpected stop — distinguished from a user disconnect by an intent marker recorded
+  at disconnect time — and raises a visible alert with a Reconnect action. It does not block traffic
+  in the meantime.
+
+**No second firewall layer, by decision.** App-managed rules that outlive the tunnel service would
+close that window, but a failure to clean them up leaves the machine with no connectivity and no
+obvious remedy, and they would need elevation outside connect/disconnect (§4 of AGENTS.md). Two
+mechanisms would also be the parallel-implementation drift §5 forbids. Revisit as its own task if
+the residual window proves unacceptable.
+
 ## Tunnel Coverage
 
 **The tunnel carries IPv4 only.** The server bootstrap enables IPv4 forwarding and installs
