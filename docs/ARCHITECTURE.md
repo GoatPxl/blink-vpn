@@ -63,9 +63,14 @@ Rules:
 - Settings must be additive, versioned through migrations, and safe for existing installs.
 - Secret values must not be stored in app settings.
 
-The table currently holds no settings. It previously held `wireguard_connection_mode`, removed in
-migration 0014 along with the connection-mode toggle (see Connection Model above). The table is
-kept because the migration path and access pattern are useful for future settings.
+The table holds `current_node_id`: the node the app connects to by default. It is written on a
+successful connect and when the user picks a server, validated against the node list on read, and
+cleared when its node is destroyed. This is a fourth status axis, deliberately separate from the
+three below — "the server I mean" is not the same fact as "the VM is on", "the app finished
+provisioning it", or "a tunnel is up right now". See `docs/DB_SCHEMA.md` for the exact semantics.
+
+It previously also held `wireguard_connection_mode`, removed in migration 0014 along with the
+connection-mode toggle (see Connection Model above).
 
 ## Unified NodeProvider Contract
 
@@ -73,6 +78,13 @@ The orchestrator and command layer operate against a shared NodeProvider abstrac
 
 The contract covers:
 
+- `list_regions` / `describe_region`: report where a region physically is, normalized to
+  `ProviderRegion { slug, city, area, country, country_code, continent }`. Every geography field is
+  optional: a slug the adapter does not recognise carries no location rather than an invented one,
+  and callers render the slug. `describe_region` answers without a token or a network call, because
+  a node row stores only a slug and the fleet list must stay readable when a provider key goes bad.
+  Region slugs are provider namespaces, so the mapping lives inside each adapter — a shared table
+  keyed by slug alone would collide as soon as two providers use the same code.
 - `init`: provision a node, persist the bootstrapping context, and return a bootstrap contract preview.
 - `wait_for_bootstrap_ready`: wait until the provider reports the node usable and resolve the endpoint. Nothing is read back from the node itself; the server public key is already known locally.
 - `get_status`: report the provider-level node status in a normalized form.
@@ -150,3 +162,12 @@ from `sc query`, and a handshake is only observable once the peer actually respo
 - Idempotent cleanup semantics for partial failures.
 - Startup reconciliation for stale local/remote state.
 - Explicit recovery flows in the UI for provider and local WireGuard runtime failures.
+- **Errors are reported with their cause chain.** `thiserror`'s `Display` prints only the outermost
+  message, so a `#[source]` was invisible in logs, in `error_reason`, and in the UI. Anything that
+  logs or surfaces an error must flatten the chain through
+  `backend::logging::describe_error_chain`, which also redacts. A provisioning failure that reports
+  only "Node creation or bootstrap setup failed" is not diagnosable by the user or by whoever reads
+  the logs afterwards.
+- **Provider naming rules belong to the adapter.** A node name is free text chosen by the user;
+  DigitalOcean requires a droplet name that is a valid hostname. The adapter maps between them
+  rather than constraining what a node may be called, and the local record keeps the user's label.

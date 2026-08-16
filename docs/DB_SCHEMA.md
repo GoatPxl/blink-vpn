@@ -81,9 +81,19 @@ Columns:
 - `value` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
 
-Seeded keys:
+Keys:
 
-- `wireguard_connection_mode` with default value `admin`
+- `current_node_id` — the node the app connects to by default. Written on a successful connect and
+  when the user chooses a server explicitly; cleared when that node is destroyed. Reads validate the
+  id against the node list, so a dangling pointer resolves to "unset" rather than aiming connect at a
+  server that no longer exists. Absent when the user has several nodes and has not chosen between
+  them; a single node needs no key, since it is unambiguously the current one.
+
+The table is seeded empty. It previously held `wireguard_connection_mode`, deleted by migration 0014
+along with the connection-mode toggle.
+
+Accessed through `Database::get_setting` / `set_setting`, and reached from the frontend only via the
+`get_current_node_id` / `set_current_node_id` commands — never directly.
 
 ## Lifecycle Enums
 

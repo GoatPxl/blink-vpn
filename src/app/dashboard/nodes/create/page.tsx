@@ -8,6 +8,7 @@ import {
   type ProviderPlanPricing,
 } from "@/components/dashboard/shared";
 import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
+import type { ProviderRegion } from "@/lib/tauri";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -29,7 +30,7 @@ export default function DashboardNodesCreatePage() {
   const [nodeName, setNodeName] = useState("Primary Node");
   const [region, setRegion] = useState("");
   const [planKey, setPlanKey] = useState("");
-  const [availableRegions, setAvailableRegions] = useState<string[]>([]);
+  const [availableRegions, setAvailableRegions] = useState<ProviderRegion[]>([]);
   const [pricingByRegion, setPricingByRegion] = useState<Record<string, ProviderPlanPricing[]>>({});
   const [pricingBusy, setPricingBusy] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
@@ -88,7 +89,10 @@ export default function DashboardNodesCreatePage() {
         }
 
         const nextPricingByRegion = catalog.pricingByRegion;
-        const nextRegion = catalog.regions.includes(region) ? region : catalog.regions[0];
+        // State stays keyed by slug; the region records only supply display names.
+        const nextRegion = catalog.regions.some((entry) => entry.slug === region)
+          ? region
+          : catalog.regions[0].slug;
         const nextRegionPlans = nextPricingByRegion[nextRegion] ?? [];
         const hasCurrentPlan = nextRegionPlans.some((plan) => plan.plan_key === planKey);
         const nextPlanKey = hasCurrentPlan ? planKey : (nextRegionPlans[0]?.plan_key ?? "");

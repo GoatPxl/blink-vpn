@@ -16,7 +16,7 @@ const navItems: Array<{ id: AppView; label: string; icon: string; eyebrow: strin
 
 const titleMap: Record<AppView, string> = {
   dashboard: "Network Stats",
-  nodes: "Node Management",
+  nodes: "Server Locations",
   health: "Connection Health",
   diagnostics: "Diagnostics",
   settings: "Provider Integration",
@@ -24,7 +24,7 @@ const titleMap: Record<AppView, string> = {
 
 const subtitleMap: Record<AppView, string> = {
   dashboard: "Monitor the active tunnel, throughput, and local node state.",
-  nodes: "Provision and manage provider-backed nodes and client tunnels.",
+  nodes: "Choose where your traffic exits, and provision new servers.",
   health: "Inspect runtime handshake, endpoint, and tunnel health.",
   diagnostics: "Review redacted logs, recovery suggestions, and exportable bundles.",
   settings: "Register and validate provider tokens used for orchestration.",
@@ -61,11 +61,14 @@ function SidebarStatus({
   detail,
   tone,
   attention,
+  onDismiss,
 }: {
   heading: string;
   detail: string;
   tone: string;
   attention: boolean;
+  /** Present only for a recovery message, which otherwise stays until the next success. */
+  onDismiss?: () => void;
 }) {
   return (
     <div
@@ -75,7 +78,18 @@ function SidebarStatus({
     >
       <div className="flex items-center gap-2">
         <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone }} />
-        <span className="text-[10px] font-semibold uppercase tracking-[0.2em]" style={{ color: tone }}>{heading}</span>
+        <span className="flex-1 text-[10px] font-semibold uppercase tracking-[0.2em]" style={{ color: tone }}>{heading}</span>
+        {onDismiss ? (
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label="Dismiss"
+            title="Dismiss"
+            className="-mr-1 rounded p-0.5 text-[var(--on-surface-variant)] transition-colors hover:bg-[color:rgba(255,255,255,0.08)] hover:text-[var(--on-surface)]"
+          >
+            <svg viewBox="0 0 24 24" className="h-3 w-3" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" className="fill-none stroke-current stroke-[2.5]" /></svg>
+          </button>
+        ) : null}
       </div>
       <p className="mt-1.5 text-xs leading-5 text-[var(--on-surface-variant)]">{detail}</p>
     </div>
@@ -93,6 +107,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
     connectPrimary,
     connectTunnel,
     disconnectTunnel,
+    dismissRecovery,
     health,
     recovery,
     toasts,
@@ -162,7 +177,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             </button>
           </div>
 
-          <SidebarStatus heading={statusHeading} detail={statusDetail} tone={statusTone} attention={!!recovery} />
+          <SidebarStatus heading={statusHeading} detail={statusDetail} tone={statusTone} attention={!!recovery} onDismiss={recovery ? dismissRecovery : undefined} />
 
           <nav className="mt-6 space-y-2">
             {navItems.map((item) => {
@@ -198,7 +213,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             </div>
           </div>
 
-          <SidebarStatus heading={statusHeading} detail={statusDetail} tone={statusTone} attention={!!recovery} />
+          <SidebarStatus heading={statusHeading} detail={statusDetail} tone={statusTone} attention={!!recovery} onDismiss={recovery ? dismissRecovery : undefined} />
 
           <nav className="mt-6 space-y-2">
             {navItems.map((item) => {

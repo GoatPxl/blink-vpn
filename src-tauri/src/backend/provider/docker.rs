@@ -5,7 +5,7 @@ use crate::backend::bootstrap::{BootstrapOutputContract, READINESS_MARKER_PATH};
 
 use super::{
   Account, BootstrapWaitRequest, ProviderAdapterError, ProviderDropletStatus, ProviderPlanPricing,
-  ProvisionedDroplet,
+  ProviderRegion, ProvisionedDroplet,
 };
 
 const DOCKER_REGION: &str = "docker-local";
@@ -697,9 +697,15 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     })
   }
 
-  fn list_regions(&self, token: &str) -> Result<Vec<String>, ProviderAdapterError> {
+  fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
-    Ok(vec![DOCKER_REGION.to_string()])
+    Ok(vec![self.describe_region(DOCKER_REGION)])
+  }
+
+  /// The dev provider runs on this machine, so it has no geography to report. Leaving the fields
+  /// empty is the honest answer and renders as the slug.
+  fn describe_region(&self, slug: &str) -> ProviderRegion {
+    ProviderRegion::unknown(slug)
   }
 
   fn list_plan_pricing(
@@ -993,7 +999,11 @@ mod tests {
 
     let result = adapter.list_regions("docker_dev_token").expect("docker region catalog should be static");
 
-    assert_eq!(result, vec![DOCKER_REGION.to_string()]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].slug, DOCKER_REGION);
+    // The dev provider runs on this machine and has no geography to claim.
+    assert_eq!(result[0].city, None);
+    assert_eq!(result[0].country_code, None);
   }
 
   #[test]

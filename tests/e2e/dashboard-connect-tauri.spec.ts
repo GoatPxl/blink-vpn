@@ -31,16 +31,22 @@ test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
     await createDockerNode(tauriPage, nodeId, nodeName);
 
     await tauriPage.goto(`${APP_URL}/dashboard/nodes`);
-    await expect(tauriPage.getByRole("heading", { name: "Node Management" }).first()).toBeVisible({
+    await expect(tauriPage.getByRole("heading", { name: "Server Locations" }).first()).toBeVisible({
       timeout: 30_000,
     });
 
-    const nodeRow = tauriPage.getByRole("row").filter({ hasText: nodeName });
+    // By id, not by name: the row leads with location and only shows the node name to
+    // disambiguate servers sharing a region.
+    const nodeRow = tauriPage.locator(`tr[data-node-id="${nodeId}"]`);
     await expect(nodeRow).toBeVisible({ timeout: 30_000 });
 
     await settleToasts(tauriPage);
     await nodeRow.getByRole("button", { name: "Connect", exact: true }).click();
     await expectSuccess(tauriPage, "Tunnel connected", 120_000);
+
+    // The row must report the connection, not merely that the container is powered on — the badge
+    // used to render the provider's VM state, which reads "active" either way.
+    await expect(nodeRow.getByText("Connected", { exact: true })).toBeVisible({ timeout: 30_000 });
 
     const connected = await readDiagnostics(tauriPage);
     const tunnel = (connected.tunnels ?? []).find((candidate) => candidate.node_id === nodeId);

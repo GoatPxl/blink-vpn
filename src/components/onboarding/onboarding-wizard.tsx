@@ -10,10 +10,12 @@ import {
   registerProviderToken,
   validateProviderToken,
   type ProviderPlanPricing,
+  type ProviderRegion,
   type WireGuardInstallResult,
   type VpnNodeRecord,
   type WireGuardReadiness,
 } from "@/lib/tauri";
+import { describeLocation } from "@/lib/node-display";
 import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
 import {
   DEFAULT_ONBOARDING_STATE,
@@ -49,7 +51,7 @@ export function OnboardingWizard() {
 
   const [pricingBusy, setPricingBusy] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
-  const [availableRegions, setAvailableRegions] = useState<string[]>([]);
+  const [availableRegions, setAvailableRegions] = useState<ProviderRegion[]>([]);
   const [pricingByRegion, setPricingByRegion] = useState<Record<string, ProviderPlanPricing[]>>({});
 
   const [provisionBusy, setProvisionBusy] = useState(false);
@@ -184,7 +186,10 @@ export function OnboardingWizard() {
         return;
       }
 
-      const selectedRegion = catalog.regions.includes(state.region) ? state.region : catalog.regions[0];
+      // State stays keyed by slug; the region records only supply display names.
+      const selectedRegion = catalog.regions.some((entry) => entry.slug === state.region)
+        ? state.region
+        : catalog.regions[0].slug;
       const responsePlans = catalog.pricingByRegion[selectedRegion] ?? [];
       const hasSelectedPlan = responsePlans.some((entry) => entry.plan_key === state.plan);
       const nextPlan = hasSelectedPlan ? state.plan : (responsePlans[0]?.plan_key ?? "");
@@ -542,17 +547,29 @@ export function OnboardingWizard() {
               <div>
                 <h2 className="text-sm font-medium text-[var(--on-surface)]">Region</h2>
                 <div className="mt-3 grid gap-3 md:grid-cols-3">
-                  {availableRegions.map((regionValue) => (
-                    <button
-                      key={regionValue}
-                      type="button"
-                      onClick={() => setState((current) => ({ ...current, region: regionValue, plan: "" }))}
-                      className={`rounded-xl border px-4 py-3 text-left ${state.region === regionValue ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}
-                    >
-                      <div className="font-medium text-[var(--on-surface)]">{regionValue}</div>
-                      <div className="mt-1 text-xs text-[var(--on-surface-variant)]">Live region option from provider API.</div>
-                    </button>
-                  ))}
+                  {availableRegions.map((regionOption) => {
+                    const location = describeLocation(regionOption, regionOption.slug);
+                    // Several datacentres can share a city, so the slug distinguishes them.
+                    const sharesCity = availableRegions.some(
+                      (other) => other.slug !== regionOption.slug && other.city === regionOption.city && other.city !== null,
+                    );
+                    return (
+                      <button
+                        key={regionOption.slug}
+                        type="button"
+                        onClick={() => setState((current) => ({ ...current, region: regionOption.slug, plan: "" }))}
+                        className={`rounded-xl border px-4 py-3 text-left ${state.region === regionOption.slug ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}
+                      >
+                        <div className="flex items-center gap-2">
+                          {location.flag ? <span aria-hidden="true">{location.flag}</span> : null}
+                          <span className="font-medium text-[var(--on-surface)]">{location.primary}</span>
+                        </div>
+                        <div className="mt-1 text-xs text-[var(--on-surface-variant)]">
+                          {location.secondary ? (sharesCity ? `${location.secondary} · ${regionOption.slug}` : location.secondary) : regionOption.slug}
+                        </div>
+                      </button>
+                    );
+                  })}
                   {availableRegions.length === 0 ? <div className="rounded-xl border border-dashed border-[color:var(--outline-variant)] px-4 py-3 text-xs text-[var(--on-surface-variant)]">No regions available yet.</div> : null}
                 </div>
               </div>

@@ -1,4 +1,5 @@
 pub mod digitalocean;
+pub mod digitalocean_regions;
 pub mod docker;
 pub mod retry;
 
@@ -27,7 +28,13 @@ pub trait ProviderAdapter: Send + Sync {
   fn provider_name(&self) -> &'static str;
   fn default_regions(&self) -> &'static [&'static str];
   fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError>;
-  fn list_regions(&self, token: &str) -> Result<Vec<String>, ProviderAdapterError>;
+  fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError>;
+  /// Geography for a slug this adapter owns, without contacting the provider.
+  ///
+  /// Node records store only a slug, and the fleet list is meant to stay readable when a provider
+  /// key goes bad — so naming an existing node's location must not require a token or a network
+  /// call.
+  fn describe_region(&self, slug: &str) -> ProviderRegion;
   fn list_plan_pricing(
     &self,
     token: &str,
@@ -55,6 +62,38 @@ pub trait ProviderAdapter: Send + Sync {
   fn delete_droplet(&self, token: &str, droplet_id: u64) -> Result<(), ProviderAdapterError>;
 }
 
+/// Where a region physically is, in provider-neutral terms.
+///
+/// Only `slug` is guaranteed. Every geography field is optional because providers add regions
+/// faster than a curated table can follow, and rendering an invented city for an unrecognised
+/// slug would tell the user they are exiting somewhere they are not. Absent means "not known",
+/// and callers must display the slug rather than a guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderRegion {
+  pub slug: String,
+  pub city: Option<String>,
+  /// State or province, where it disambiguates for a reader.
+  pub area: Option<String>,
+  pub country: Option<String>,
+  /// ISO-3166 alpha-2, so the UI can render a flag without its own country table.
+  pub country_code: Option<String>,
+  pub continent: Option<String>,
+}
+
+impl ProviderRegion {
+  /// A slug whose geography this adapter cannot name.
+  pub fn unknown(slug: &str) -> Self {
+    Self {
+      slug: slug.trim().to_string(),
+      city: None,
+      area: None,
+      country: None,
+      country_code: None,
+      continent: None,
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderDropletStatus {
@@ -76,6 +115,44 @@ impl ProviderDropletStatus {
       Self::Deleted => "deleted",
       Self::Unknown => "unknown",
     }
+  }
+}
+
+/// Maps a user's node name onto a name DigitalOcean will accept.
+///
+/// DigitalOcean requires a droplet name that is a valid hostname — letters, digits, dots and
+/// hyphens only. A node name is free text, so the default "Primary Node" was rejected outright for
+/// its space, ~1.5s into provisioning, with the reason discarded on the way back up.
+///
+/// The rule is DigitalOcean's, so the mapping belongs in its adapter rather than being imposed on
+/// what the user may call a node (AGENTS.md §3). The label the user chose is untouched in the
+/// local record; only the remote resource is renamed.
+fn sanitize_droplet_name(raw: &str) -> String {
+  let mut sanitized = String::with_capacity(raw.len());
+  let mut last_was_separator = false;
+
+  for character in raw.trim().chars() {
+    if character.is_ascii_alphanumeric() || character == '.' {
+      sanitized.push(character);
+      last_was_separator = false;
+    } else if !last_was_separator {
+      // Collapse any run of unsupported characters into a single hyphen.
+      sanitized.push('-');
+      last_was_separator = true;
+    }
+  }
+
+  // A hostname label may not begin or end with a separator.
+  let trimmed = sanitized.trim_matches(|character| character == '-' || character == '.');
+  // 63 is the DNS label limit; DigitalOcean allows more, but staying inside it keeps the name
+  // usable everywhere it might be echoed.
+  let bounded: String = trimmed.chars().take(63).collect();
+  let bounded = bounded.trim_end_matches(|character| character == '-' || character == '.');
+
+  if bounded.is_empty() {
+    "goatstare-node".to_string()
+  } else {
+    bounded.to_string()
   }
 }
 
@@ -197,7 +274,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     Ok(pricing)
   }
 
-  fn list_regions(&self, token: &str) -> Result<Vec<String>, ProviderAdapterError> {
+  fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError> {
     let sizes = self
       .client
       .list_sizes(token)
@@ -206,6 +283,8 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
         source,
       })?;
 
+    // The available slug set still comes from the size catalog, so regions and pricing cannot
+    // disagree about what can actually be provisioned. Geography only enriches that set.
     let mut regions = BTreeSet::new();
     for size in sizes.into_iter().filter(|size| size.available) {
       for region in size.regions {
@@ -215,7 +294,11 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
       }
     }
 
-    Ok(regions.into_iter().collect())
+    Ok(regions.iter().map(|slug| self.describe_region(slug)).collect())
+  }
+
+  fn describe_region(&self, slug: &str) -> ProviderRegion {
+    digitalocean_regions::describe_region(slug)
   }
 
   fn create_droplet(
@@ -227,7 +310,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     init_payload: &str,
   ) -> Result<ProvisionedDroplet, ProviderAdapterError> {
     let request = CreateDropletRequest {
-      name: droplet_name.to_string(),
+      name: sanitize_droplet_name(droplet_name),
       region: if region.trim().is_empty() {
         self.config.region.to_string()
       } else {
@@ -822,7 +905,7 @@ impl ProviderRegistry {
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
-  ) -> Result<Vec<String>, ProviderFlowError> {
+  ) -> Result<Vec<ProviderRegion>, ProviderFlowError> {
     let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
     let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
     adapter
@@ -831,6 +914,20 @@ impl ProviderRegistry {
         detail: "Provider region lookup failed through adapter.".to_string(),
         source,
       })
+  }
+
+  /// Geography for a slug, without a token or a network call.
+  ///
+  /// Returns `None` only when the provider row itself cannot be resolved; an adapter that does not
+  /// recognise the slug still answers, with the geography fields empty.
+  pub fn describe_provider_region(
+    &self,
+    db: &Database,
+    provider_id: &str,
+    slug: &str,
+  ) -> Option<ProviderRegion> {
+    let (_, adapter) = self.load_provider_and_adapter(db, provider_id).ok()?;
+    Some(adapter.describe_region(slug))
   }
 
   pub fn wait_for_provider_bootstrap_ready(
@@ -1023,7 +1120,8 @@ mod tests {
 
   use super::{
     Account, BootstrapWaitRequest, NodeInitRequest, ProviderAdapter, ProviderAdapterError,
-    ProviderDropletStatus, ProviderPlanPricing, ProviderRegistry, ProvisionedDroplet,
+    ProviderDropletStatus, ProviderPlanPricing, ProviderRegion, ProviderRegistry, ProvisionedDroplet,
+    sanitize_droplet_name,
   };
 
   fn test_db_path(test_name: &str) -> PathBuf {
@@ -1043,6 +1141,41 @@ mod tests {
   /// provision therefore created a billable droplet, failed here, and rolled back. The server
   /// keypair is now generated locally and baked into cloud-init, so the public key is already
   /// known and readiness is just "the droplet is active with an IP".
+  /// The exact failure this fixes: the default node name contains a space, and DigitalOcean
+  /// rejects any droplet name that is not a valid hostname.
+  #[test]
+  fn droplet_names_with_spaces_are_made_valid_hostnames() {
+    assert_eq!(sanitize_droplet_name("Primary Node"), "Primary-Node");
+    assert_eq!(sanitize_droplet_name("  Amsterdam  Exit  "), "Amsterdam-Exit");
+  }
+
+  #[test]
+  fn droplet_names_keep_characters_digitalocean_accepts() {
+    assert_eq!(sanitize_droplet_name("DigitalOceanLive"), "DigitalOceanLive");
+    assert_eq!(sanitize_droplet_name("node-1.example"), "node-1.example");
+  }
+
+  #[test]
+  fn droplet_names_collapse_unsupported_runs_and_never_end_on_a_separator() {
+    assert_eq!(sanitize_droplet_name("my___node!!!"), "my-node");
+    assert_eq!(sanitize_droplet_name("--edge--"), "edge");
+    assert_eq!(sanitize_droplet_name("emoji 🚀 node"), "emoji-node");
+  }
+
+  #[test]
+  fn droplet_names_are_bounded_and_never_empty() {
+    let long = sanitize_droplet_name(&"a".repeat(200));
+    assert_eq!(long.len(), 63);
+
+    // A name of nothing but punctuation still has to produce something DigitalOcean accepts.
+    assert_eq!(sanitize_droplet_name("!!!"), "goatstare-node");
+    assert_eq!(sanitize_droplet_name(""), "goatstare-node");
+
+    // Truncation must not leave a trailing separator, which is itself invalid.
+    let truncated = sanitize_droplet_name(&format!("{}-tail", "b".repeat(62)));
+    assert!(!truncated.ends_with('-'), "truncated name must not end on a separator");
+  }
+
   #[test]
   fn digitalocean_bootstrap_ready_uses_locally_known_key_and_droplet_status() {
     let mut server = mockito::Server::new();
@@ -1128,8 +1261,13 @@ mod tests {
       })
     }
 
-    fn list_regions(&self, _token: &str) -> Result<Vec<String>, ProviderAdapterError> {
-      Ok(vec!["test-region".to_string()])
+    fn list_regions(&self, _token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError> {
+      Ok(vec![self.describe_region("test-region")])
+    }
+
+
+    fn describe_region(&self, slug: &str) -> ProviderRegion {
+      ProviderRegion::unknown(slug)
     }
 
     fn list_plan_pricing(

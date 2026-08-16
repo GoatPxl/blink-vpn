@@ -100,6 +100,24 @@ export interface ProviderRecord {
   updated_at: string;
 }
 
+/**
+ * Where a region physically is.
+ *
+ * Only `slug` is guaranteed — providers add regions faster than a curated table follows, and an
+ * unrecognised slug carries no geography rather than an invented city. Render the slug when `city`
+ * is null; never guess.
+ */
+export interface ProviderRegion {
+  slug: string;
+  city: string | null;
+  /** State or province, where it disambiguates. */
+  area: string | null;
+  country: string | null;
+  /** ISO-3166 alpha-2, for rendering a flag. */
+  country_code: string | null;
+  continent: string | null;
+}
+
 export interface VpnNodeRecord {
   id: string;
   provider_id: string;
@@ -112,6 +130,8 @@ export interface VpnNodeRecord {
   price_source_timestamp: string | null;
   lifecycle_status: NodeLifecycleStatus;
   provider_status?: string;
+  /** Geography for `region`, attached at list time by the owning adapter. */
+  region_geo?: ProviderRegion;
   external_ref: string | null;
   public_ipv4: string | null;
   server_public_key: string | null;
@@ -312,8 +332,17 @@ export async function listProviderPricing(providerId: string, region: string): P
   return invokeCommand<ProviderPricingResponse>("list_provider_pricing", { providerId, region });
 }
 
-export async function listProviderRegions(providerId: string): Promise<string[]> {
-  return invokeCommand<string[]>("list_provider_regions", { providerId });
+export async function listProviderRegions(providerId: string): Promise<ProviderRegion[]> {
+  return invokeCommand<ProviderRegion[]>("list_provider_regions", { providerId });
+}
+
+/** The node the app connects to by default, or null when the user has not chosen between several. */
+export async function getCurrentNodeId(): Promise<string | null> {
+  return invokeCommand<string | null>("get_current_node_id");
+}
+
+export async function setCurrentNodeId(nodeId: string | null): Promise<void> {
+  return invokeCommand<void>("set_current_node_id", { nodeId });
 }
 
 export async function createVpnNode(params: {

@@ -1,7 +1,9 @@
 "use client";
 
 import { Button, Card, Field, PageChrome, type DashboardBusyAction, type PlanDisplayModel, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord } from "./shared";
-import { formatCurrency, formatMemory, formatRegionLabel } from "./shared";
+import { formatCurrency, formatMemory } from "./shared";
+import { buildRegionOptions } from "@/lib/node-display";
+import type { ProviderRegion } from "@/lib/tauri";
 
 export function NodesCreateView({
   providerAccessState,
@@ -54,7 +56,7 @@ export function NodesCreateView({
   nodeName: string;
   nodeFeedback: string;
   nodesProvisioningDisabled: boolean;
-  availableRegions: string[];
+  availableRegions: ProviderRegion[];
   pricingCatalog: ProviderPlanPricing[];
   selectedCreatePlanDisplay: PlanDisplayModel | null;
   pricingBusy: boolean;
@@ -116,7 +118,8 @@ export function NodesCreateView({
             <Field label="Region" hint="Pricing can vary by region and provider updates.">
               <select value={region} onChange={(event) => setRegion(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0">
                 {availableRegions.length === 0 ? <option value="">No regions available</option> : null}
-                {availableRegions.map((option) => <option key={option} value={option}>{formatRegionLabel(option)}</option>)}
+                {buildRegionOptions(availableRegions.map((option) => ({ region: option, slug: option.slug })))
+                  .map((option) => <option key={option.slug} value={option.slug}>{option.label}</option>)}
               </select>
             </Field>
 

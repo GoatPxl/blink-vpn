@@ -1,10 +1,12 @@
 "use client";
 
-import { listProviderPricing, listProviderRegions, type ProviderPlanPricing } from "@/lib/tauri";
+import { listProviderPricing, listProviderRegions, type ProviderPlanPricing, type ProviderRegion } from "@/lib/tauri";
 
 export type ProviderPricingCatalog = {
   providerId: string;
-  regions: string[];
+  /** Full region records, so callers can name a location without a second lookup. */
+  regions: ProviderRegion[];
+  /** Keyed by region slug. */
   pricingByRegion: Record<string, ProviderPlanPricing[]>;
 };
 
@@ -20,8 +22,8 @@ export async function loadProviderPricingCatalog(providerId: string): Promise<Pr
     const regions = await listProviderRegions(providerId);
     const pricingEntries = await Promise.all(
       regions.map(async (region) => {
-        const response = await listProviderPricing(providerId, region);
-        return [region, response.plans] as const;
+        const response = await listProviderPricing(providerId, region.slug);
+        return [region.slug, response.plans] as const;
       }),
     );
 

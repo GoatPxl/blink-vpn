@@ -1,3 +1,30 @@
+/// Flattens an error and everything that caused it into one redacted line.
+///
+/// `thiserror`'s `Display` prints only the outermost message, so a `#[source]` chain is invisible
+/// in logs and in `error_reason`. That cost a real diagnosis: a droplet create rejected by
+/// DigitalOcean recorded only "Node creation or bootstrap setup failed in create-node flow.",
+/// with the provider's actual complaint attached to the error but never printed — leaving the
+/// user, and anyone reading the logs afterwards, with no way to tell what was wrong.
+pub fn describe_error_chain(error: &dyn std::error::Error) -> String {
+  let mut parts = vec![error.to_string()];
+  let mut current = error.source();
+
+  // Bounded: a cycle in a source chain would otherwise hang the logger.
+  while let Some(source) = current {
+    let text = source.to_string();
+    // Wrappers often restate their child verbatim; repeating it adds noise, not information.
+    if !parts.last().is_some_and(|last| last == &text) {
+      parts.push(text);
+    }
+    if parts.len() >= 8 {
+      break;
+    }
+    current = source.source();
+  }
+
+  redact_sensitive_text(&parts.join(" <- "))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogVerbosity {
   Dev,

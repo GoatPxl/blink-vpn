@@ -58,13 +58,22 @@ test.describe("Docker provisioning (real backend)", () => {
     );
     expect(bootstrapReady, "bootstrap.wait should have succeeded").toBe(true);
 
-    // The node the backend reports must actually reach the fleet list.
+    // The node the backend reports must actually reach the fleet list. Located by id rather than
+    // by name: the row leads with location and only shows the name to disambiguate same-region
+    // servers, so a name match would pass or fail depending on what else is provisioned.
     await tauriPage.goto(`${APP_URL}/dashboard/nodes`);
-    await expect(tauriPage.getByRole("heading", { name: "Node Management" }).first()).toBeVisible({
+    await expect(tauriPage.getByRole("heading", { name: "Server Locations" }).first()).toBeVisible({
       timeout: 30_000,
     });
-    await expect(tauriPage.getByText(nodeName, { exact: false }).first()).toBeVisible({
-      timeout: 30_000,
-    });
+
+    const nodeRow = tauriPage.locator(`tr[data-node-id="${nodeId}"]`);
+    await expect(nodeRow).toBeVisible({ timeout: 30_000 });
+    // A freshly provisioned node is usable and not connected. "Ready" is the only correct badge;
+    // accepting any status would let a broken provision pass.
+    await expect(nodeRow.getByText("Ready", { exact: true })).toBeVisible({ timeout: 30_000 });
+
+    // The name still has to be reachable, just from the details drawer rather than the row.
+    await nodeRow.click();
+    await expect(tauriPage.getByRole("heading", { name: nodeName })).toBeVisible({ timeout: 15_000 });
   });
 });

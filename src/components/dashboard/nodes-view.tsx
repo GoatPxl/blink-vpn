@@ -2,90 +2,103 @@
 
 import { useMemo, useState } from "react";
 
-import { Button, Card, Field, MetricCard, PageChrome, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type RecoveryState, type TunnelRecord, type VpnNodeRecord, type NodeSort, type PlanDisplayModel, type HealthPanelData } from "./shared";
-import { formatCreatedTime, formatCurrency, formatMemory, formatRegionLabel, getNodePricingDisplay, statusBadge } from "./shared";
+import { Button, Card, Field, PageChrome, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type TunnelRecord, type VpnNodeRecord, type PlanDisplayModel, type HealthPanelData } from "./shared";
+import { formatCreatedTime, formatCurrency, formatMemory, getNodePricingDisplay } from "./shared";
+import {
+  NODE_STATUS_LABEL,
+  isConnectable,
+  type NodeRow,
+  type NodeSortOrder,
+  type NodeStatus,
+} from "@/lib/node-display";
+
+/** One treatment per state, so a powered-on server no longer looks identical to a connected one. */
+const NODE_STATUS_CLASSES: Record<NodeStatus, string> = {
+  connected: "border-[color:rgba(78,222,163,0.35)] bg-[color:rgba(78,222,163,0.12)] text-[var(--secondary)]",
+  current: "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)] text-[var(--primary)]",
+  ready: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.04)] text-[var(--on-surface-variant)]",
+  provisioning: "border-[color:rgba(171,199,255,0.25)] bg-[color:rgba(171,199,255,0.07)] text-[var(--on-surface-variant)]",
+  unavailable: "border-[color:rgba(255,185,95,0.3)] bg-[color:rgba(255,185,95,0.1)] text-[var(--tertiary)]",
+  error: "border-[color:rgba(255,155,155,0.35)] bg-[color:rgba(255,155,155,0.1)] text-[#ff9b9b]",
+};
+
+function StatusPill({ status }: { status: NodeStatus }) {
+  return (
+    <span className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${NODE_STATUS_CLASSES[status]}`}>
+      {NODE_STATUS_LABEL[status]}
+    </span>
+  );
+}
 
 export function NodesView({
   providerAccessState,
-  providerBadge,
-  providerId,
-  providerName,
-  configuredProvider,
   providers,
-  onSelectProvider,
   nodes,
+  rows,
   diagnostics,
   pricingByRegion,
-  pricingBusy,
-  pricingError,
-  nodeStatusFilter,
-  setNodeStatusFilter,
-  nodeRegionFilter,
-  setNodeRegionFilter,
-  nodeSort,
-  setNodeSort,
+  statusFilter,
+  setStatusFilter,
+  regionFilter,
+  setRegionFilter,
+  sort,
+  setSort,
+  statusOptions,
+  regionOptions,
+  duplicatedRegionSlugs,
+  currentNodeId,
   selectedNodeId,
-  setSelectedNodeId,
   selectedNode,
   health,
   selectedNodePricing,
   selectedNodeActionMessage,
   selectedNodeTunnel,
   busyAction,
-  onCreateNode,
   onNavigateToCreate,
   onInstallHost,
-  onUninstallHost,
+  onDestroyNode,
+  onSetCurrentNode,
   onConnectNode,
   onConnectTunnel,
   onDisconnectTunnel,
   onForceDisconnectNodeService,
   onForceCleanupSelectedNode,
-  nodeFeedback,
-  nodeRegions,
-  nodeStatuses,
   isDetailsModalOpen,
   onOpenNodeDetails,
   onCloseNodeDetails,
 }: {
   providerAccessState: ProviderAccessState;
-  providerBadge: { label: string; classes: string };
-  providerId: string;
-  providerName: string;
-  configuredProvider: ProviderRecord | null;
   providers: ProviderRecord[];
-  onSelectProvider: (providerId: string) => void;
   nodes: VpnNodeRecord[];
+  rows: NodeRow[];
   diagnostics: { tunnels?: TunnelRecord[] } | null;
   pricingByRegion: Record<string, ProviderPlanPricing[]>;
-  pricingBusy: boolean;
-  pricingError: string | null;
-  nodeStatusFilter: string;
-  setNodeStatusFilter: (value: string) => void;
-  nodeRegionFilter: string;
-  setNodeRegionFilter: (value: string) => void;
-  nodeSort: NodeSort;
-  setNodeSort: (value: NodeSort) => void;
+  statusFilter: NodeStatus | "all";
+  setStatusFilter: (value: NodeStatus | "all") => void;
+  regionFilter: string;
+  setRegionFilter: (value: string) => void;
+  sort: NodeSortOrder;
+  setSort: (value: NodeSortOrder) => void;
+  statusOptions: NodeStatus[];
+  regionOptions: Array<{ slug: string; label: string }>;
+  duplicatedRegionSlugs: Set<string>;
+  currentNodeId: string | null;
   selectedNodeId: string;
-  setSelectedNodeId: (value: string) => void;
   selectedNode: VpnNodeRecord | null;
   health: HealthPanelData | null;
   selectedNodePricing: PlanDisplayModel | null;
   selectedNodeActionMessage: string;
   selectedNodeTunnel: TunnelRecord | null;
   busyAction: DashboardBusyAction;
-  onCreateNode: () => Promise<void>;
   onNavigateToCreate: () => void;
   onInstallHost: (node: VpnNodeRecord) => Promise<void>;
-  onUninstallHost: (node: VpnNodeRecord) => Promise<void>;
+  onDestroyNode: (node: VpnNodeRecord) => Promise<void>;
+  onSetCurrentNode: (nodeId: string) => Promise<void>;
   onConnectNode: (node: VpnNodeRecord) => Promise<void>;
   onConnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onDisconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onForceDisconnectNodeService: (node: VpnNodeRecord) => Promise<void>;
   onForceCleanupSelectedNode: () => Promise<void>;
-  nodeFeedback: string;
-  nodeRegions: string[];
-  nodeStatuses: string[];
   isDetailsModalOpen: boolean;
   onOpenNodeDetails: (nodeId: string) => void;
   onCloseNodeDetails: () => void;
@@ -99,32 +112,29 @@ export function NodesView({
   return (
     <PageChrome>
       <div className="space-y-4">
-        <div className="flex flex-col gap-4 rounded-[24px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-5 shadow-[var(--shadow-elevated)] lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <h2 className="text-[28px] font-semibold tracking-tight text-[var(--on-surface)]">Node Management</h2>
-            <p className="mt-1 max-w-3xl text-sm text-[var(--on-surface-variant)]">Provision provider-backed nodes, review lifecycle state, and inspect the pricing snapshot captured when each node was created.</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button tone="primary" onClick={onNavigateToCreate} disabled={busyAction !== null}><span className="text-lg leading-none">+</span> Create Node</Button>
-          </div>
-        </div>
-
-        <Card title="Fleet" description="Existing node records stay visible even if the provider key becomes invalid.">
+        {/* The page header above already names this screen; a second identical title was the
+            "Node Management" repeated twice in the original layout. */}
+        <Card
+          title="Fleet"
+          description="Existing node records stay visible even if the provider key becomes invalid."
+          action={<Button tone="primary" onClick={onNavigateToCreate} disabled={busyAction !== null}><span className="text-lg leading-none">+</span> Create Node</Button>}
+        >
           <div className="flex flex-col gap-3 border-b border-[color:var(--outline-variant)] pb-4 md:flex-row md:items-end">
             <Field label="Status">
-              <select value={nodeStatusFilter} onChange={(event) => setNodeStatusFilter(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 md:min-w-[170px]">
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as NodeStatus | "all")} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 md:min-w-[170px]">
                 <option value="all">All statuses</option>
-                {nodeStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+                {statusOptions.map((status) => <option key={status} value={status}>{NODE_STATUS_LABEL[status]}</option>)}
               </select>
             </Field>
-            <Field label="Region">
-              <select value={nodeRegionFilter} onChange={(event) => setNodeRegionFilter(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 md:min-w-[190px]">
-                <option value="all">All regions</option>
-                {nodeRegions.map((regionValue) => <option key={regionValue} value={regionValue}>{formatRegionLabel(regionValue)}</option>)}
+            <Field label="Location">
+              <select value={regionFilter} onChange={(event) => setRegionFilter(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 md:min-w-[200px]">
+                <option value="all">All locations</option>
+                {regionOptions.map((region) => <option key={region.slug} value={region.slug}>{region.label}</option>)}
               </select>
             </Field>
             <Field label="Sort">
-              <select value={nodeSort} onChange={(event) => setNodeSort(event.target.value as NodeSort)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 md:min-w-[170px]">
+              <select value={sort} onChange={(event) => setSort(event.target.value as NodeSortOrder)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 md:min-w-[170px]">
+                <option value="location">Location A–Z</option>
                 <option value="newest">Newest first</option>
                 <option value="oldest">Oldest first</option>
               </select>
@@ -137,131 +147,118 @@ export function NodesView({
                 ? "No nodes have been provisioned yet. Use Create Node to launch your first WireGuard server."
                 : "No nodes yet. Save and validate the selected provider token in Settings before creating your first node."}
             </div>
+          ) : rows.length === 0 ? (
+            <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-6 text-sm text-[var(--on-surface-variant)]">
+              No servers match these filters.
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full text-left text-sm">
                 <thead className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">
                   <tr>
-                    <th className="px-4 py-3">Node</th>
-                    <th className="px-4 py-3">Provider</th>
-                    <th className="px-4 py-3">Region</th>
-                    <th className="px-4 py-3">Plan</th>
-                    <th className="px-4 py-3">vCPU / RAM / Disk</th>
-                    <th className="px-4 py-3">Public IP</th>
+                    <th className="px-4 py-3">Location</th>
                     <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3">Created</th>
+                    <th className="px-4 py-3">Price</th>
                     <th className="px-4 py-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {nodes.map((node) => {
-                    const nodeLifecycle = node.lifecycle_status.toLowerCase();
-                    const liveProviderStatus = (node.provider_status ?? "").toLowerCase();
-                    const rowStatus = (node.provider_status ?? node.lifecycle_status).toLowerCase();
+                  {rows.map(({ node, status, location }) => {
                     const diagnosticsTunnelForNode = (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === node.id) ?? null;
                     const liveSelectedTunnelForNode = node.id === selectedNodeId ? selectedNodeTunnel : null;
                     const tunnelForNode = liveSelectedTunnelForNode ?? diagnosticsTunnelForNode;
-                    const healthIndicatesConnected = node.id === selectedNodeId
-                      && health?.tunnel_status?.toLowerCase() === "connected";
-                    const tunnelConnected = tunnelForNode?.status.toLowerCase() === "connected" || healthIndicatesConnected;
-                    const connectedByRuntime = !!tunnelForNode && (tunnelConnected || nodeLifecycle === "connected");
-                    const optimisticConnected = optimisticConnectedByNodeId[node.id] ?? connectedByRuntime;
-                    const nodeCanConnect = !!tunnelForNode && !optimisticConnected;
-                    const runtimeConnectable =
-                      liveProviderStatus === ""
-                      || liveProviderStatus === "active"
-                      || liveProviderStatus === "new";
-                    const nodeHostReady = (nodeLifecycle === "ready" || nodeLifecycle === "connected") && runtimeConnectable;
-                    const canInstallHost = nodeLifecycle === "new";
-                    const hostInstallInProgress = nodeLifecycle === "provisioning" || nodeLifecycle === "bootstrapping";
-                    const canUninstallHost = nodeLifecycle === "ready" || nodeLifecycle === "connected" || nodeLifecycle === "error";
-                    const canConnectNode = nodeHostReady && !tunnelForNode && !optimisticConnected;
-                    const canToggleTunnel = nodeHostReady || !!tunnelForNode || optimisticConnected;
+                    const optimisticConnected = optimisticConnectedByNodeId[node.id] ?? (status === "connected");
+                    const canInstallHost = node.lifecycle_status.toLowerCase() === "new";
+                    const canToggleTunnel = isConnectable(status) || optimisticConnected || !!tunnelForNode;
                     const nodePricing = getNodePricingDisplay(node, pricingByRegion);
+                    const monthly = node.price_monthly_usd ?? nodePricing?.monthlyUsd;
+
                     return (
-                      <tr key={node.id} className={`border-t border-[color:var(--outline-variant)] ${selectedNodeId === node.id ? "bg-[color:rgba(171,199,255,0.08)]" : "bg-transparent"}`}>
-                        <td className="px-4 py-4 align-top">
-                          <div className="font-medium text-[var(--on-surface)]">{node.name}</div>
-                          <div className="mt-1 font-mono text-[12px] text-[var(--on-surface-variant)]">{node.id}</div>
+                      <tr
+                        key={node.id}
+                        // Stable hook for the E2E suite: the row no longer always renders the node
+                        // name, so text matching is not a reliable way to find a specific server.
+                        data-node-id={node.id}
+                        onClick={() => onOpenNodeDetails(node.id)}
+                        className={`cursor-pointer border-t border-[color:var(--outline-variant)] transition-colors hover:bg-[color:rgba(255,255,255,0.03)] ${selectedNodeId === node.id && isDetailsModalOpen ? "bg-[color:rgba(171,199,255,0.08)]" : "bg-transparent"}`}
+                      >
+                        <td className="px-4 py-4 align-middle">
+                          <div className="flex items-center gap-3">
+                            {location.flag ? <span className="text-[20px] leading-none" aria-hidden="true">{location.flag}</span> : null}
+                            <div>
+                              <div className={`font-medium ${location.unresolved ? "font-mono text-[13px] text-[var(--on-surface-variant)]" : "text-[var(--on-surface)]"}`}>{location.primary}</div>
+                              {location.secondary ? <div className="mt-0.5 text-xs text-[var(--on-surface-variant)]">{location.secondary}</div> : null}
+                              {/* Location leads the row, so same-city servers would otherwise be indistinguishable. */}
+                              {duplicatedRegionSlugs.has(node.region) ? <div className="mt-0.5 text-xs text-[var(--on-surface-variant)]">{node.name}</div> : null}
+                            </div>
+                          </div>
                         </td>
-                        <td className="px-4 py-4 align-top text-[var(--on-surface)]">{providerNameById.get(node.provider_id) ?? node.provider_id}</td>
-                        <td className="px-4 py-4 align-top text-[var(--on-surface)]">{formatRegionLabel(node.region)}</td>
-                        <td className="px-4 py-4 align-top">
-                          <div className="text-[var(--on-surface)]">{nodePricing?.planLabel ?? node.plan_key ?? "n/a"}</div>
-                          <div className="mt-1 font-mono text-[12px] text-[var(--on-surface-variant)]">{node.size_slug ?? nodePricing?.sizeSlug ?? "n/a"}</div>
-                          <div className="mt-1 text-xs text-[var(--on-surface-variant)]">{formatCurrency(node.price_hourly_usd ?? nodePricing?.hourlyUsd, 5)}/hr · {formatCurrency(node.price_monthly_usd ?? nodePricing?.monthlyUsd)}/mo</div>
+                        <td className="px-4 py-4 align-middle"><StatusPill status={status} /></td>
+                        <td className="px-4 py-4 align-middle text-[var(--on-surface)]">
+                          {monthly === null || monthly === undefined ? "n/a" : <>{formatCurrency(monthly)}<span className="text-[var(--on-surface-variant)]">/mo</span></>}
                         </td>
-                        <td className="px-4 py-4 align-top text-[var(--on-surface)]">{nodePricing ? `${nodePricing.vcpus ?? "?"} vCPU · ${formatMemory(nodePricing.memoryMb)} · ${nodePricing.diskGb ?? "?"} GB` : "n/a"}</td>
-                        <td className="px-4 py-4 align-top font-mono text-[12px] text-[var(--on-surface)]">{node.public_ipv4 ?? "n/a"}</td>
-                        <td className="px-4 py-4 align-top"><span className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.24em] ${statusBadge(rowStatus)}`}>{rowStatus}</span></td>
-                        <td className="px-4 py-4 align-top text-[var(--on-surface-variant)]">{formatCreatedTime(node.created_at)}</td>
-                        <td className="px-4 py-4 align-top">
-                          <div className="flex flex-wrap justify-end gap-2">
-                            {canInstallHost ? (
+                        <td className="px-4 py-4 align-middle" onClick={(event) => event.stopPropagation()}>
+                          <div className="flex items-center justify-end gap-2">
+                            {status === "error" ? (
+                              // A node in Error cannot be connected or re-created under the same
+                              // id until it is cleaned up, so cleanup is the only useful action —
+                              // offering a dead Connect button here just strands the user.
+                              <Button tone="secondary" onClick={() => onOpenNodeDetails(node.id)} disabled={busyAction !== null} className="px-3 py-2 text-xs">
+                                Resolve
+                              </Button>
+                            ) : canInstallHost ? (
                               <Button tone="primary" onClick={() => void onInstallHost(node)} disabled={busyAction !== null} className="px-3 py-2 text-xs">
-                                {busyAction === "create-node" ? "Installing Host" : "Install Host"}
+                                {busyAction === "create-node" ? "Installing" : "Install Host"}
                               </Button>
                             ) : (
                               <Button
-                                tone={canUninstallHost ? "danger" : "secondary"}
-                                onClick={() => (canUninstallHost ? void onUninstallHost(node) : undefined)}
-                                disabled={busyAction !== null || hostInstallInProgress || !canUninstallHost}
-                                className="px-3 py-2 text-xs"
-                              >
-                                {hostInstallInProgress
-                                  ? "Installing Host"
-                                  : busyAction === "destroy-node"
-                                    ? "Uninstalling Host"
-                                    : canUninstallHost
-                                      ? "Uninstall Host"
-                                      : "Host Pending"}
-                              </Button>
-                            )}
-                            <Button
-                              tone={optimisticConnected ? "danger" : (nodeCanConnect || canConnectNode ? "primary" : "secondary")}
-                              onClick={() => {
-                                const previous = optimisticConnected;
-                                if (previous) {
-                                  setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: false }));
+                                tone={optimisticConnected ? "danger" : "primary"}
+                                onClick={() => {
+                                  const previous = optimisticConnected;
+                                  if (previous) {
+                                    setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: false }));
+                                    void (async () => {
+                                      try {
+                                        if (tunnelForNode) {
+                                          await onDisconnectTunnel(tunnelForNode);
+                                        } else {
+                                          await onForceDisconnectNodeService(node);
+                                        }
+                                      } catch {
+                                        setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: true }));
+                                      }
+                                    })();
+                                    return;
+                                  }
+
+                                  setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: true }));
                                   void (async () => {
                                     try {
                                       if (tunnelForNode) {
-                                        await onDisconnectTunnel(tunnelForNode);
-                                      } else {
-                                        await onForceDisconnectNodeService(node);
+                                        await onConnectTunnel(tunnelForNode);
+                                        return;
                                       }
+                                      await onConnectNode(node);
                                     } catch {
-                                      setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: true }));
+                                      setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: false }));
                                     }
                                   })();
-                                  return;
-                                }
-
-                                setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: true }));
-                                void (async () => {
-                                  try {
-                                    if (tunnelForNode) {
-                                      await onConnectTunnel(tunnelForNode);
-                                      return;
-                                    }
-
-                                    if (canConnectNode) {
-                                      await onConnectNode(node);
-                                      return;
-                                    }
-
-                                    setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: previous }));
-                                  } catch {
-                                    setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: false }));
-                                  }
-                                })();
-                              }}
-                              disabled={busyAction !== null || !canToggleTunnel}
-                              className="px-3 py-2 text-xs"
+                                }}
+                                disabled={busyAction !== null || !canToggleTunnel}
+                                className="min-w-[104px] px-3 py-2 text-xs"
+                              >
+                                {optimisticConnected ? "Disconnect" : "Connect"}
+                              </Button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => onOpenNodeDetails(node.id)}
+                              aria-label={`Details for ${node.name}`}
+                              title="Details"
+                              className="rounded-lg px-2 py-2 text-[var(--on-surface-variant)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)] hover:text-[var(--on-surface)]"
                             >
-                              {optimisticConnected ? "Disconnect" : (nodeCanConnect || canConnectNode ? "Connect" : "Host Pending")}
-                            </Button>
-                            <Button tone="secondary" onClick={() => onOpenNodeDetails(node.id)} disabled={busyAction !== null} className="px-3 py-2 text-xs">View Details</Button>
+                              <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true"><path d="M6 12h.01M12 12h.01M18 12h.01" className="fill-none stroke-current stroke-[2.5]" strokeLinecap="round" /></svg>
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -275,54 +272,160 @@ export function NodesView({
       </div>
 
       {isDetailsModalOpen && selectedNode ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]" onClick={onCloseNodeDetails} aria-hidden="true">
-          <div className="w-full max-w-5xl rounded-[28px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(24,28,36,0.99),rgba(13,16,23,0.99))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.45)]" onClick={(event) => event.stopPropagation()}>
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-xs uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Node Details</p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-[var(--on-surface)]">{selectedNode.name}</h2>
-                <p className="mt-1 text-sm text-[var(--on-surface-variant)]">Provision metadata, pricing snapshot, health, and recovery actions.</p>
-              </div>
-              <Button tone="secondary" onClick={onCloseNodeDetails} disabled={busyAction !== null}>Close</Button>
-            </div>
-
-            <div className="mt-6 space-y-4">
-              <div className="grid gap-3 md:grid-cols-2">
-                <MetricCard title="Endpoint" value={selectedNode.public_ipv4 ?? "pending"} detail={`External ref ${selectedNode.external_ref ?? "n/a"}`} tone="primary" />
-                <MetricCard title="Health" value={health?.tunnel_status ?? selectedNode.lifecycle_status} detail={`Handshake ${health ? "live" : "pending"}`} tone="secondary" />
-              </div>
-              <div className="grid gap-4 lg:grid-cols-2">
-                <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Provision Metadata</div>
-                  <dl className="mt-3 space-y-2 text-sm">
-                    <div className="flex items-center justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Provider</dt><dd className="text-[var(--on-surface)]">{providerNameById.get(selectedNode.provider_id) ?? selectedNode.provider_id}</dd></div>
-                    <div className="flex items-center justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Region</dt><dd className="text-[var(--on-surface)]">{formatRegionLabel(selectedNode.region)}</dd></div>
-                    <div className="flex items-center justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Created</dt><dd className="text-[var(--on-surface)]">{formatCreatedTime(selectedNode.created_at)}</dd></div>
-                    <div className="flex items-center justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Server key</dt><dd className="max-w-[220px] truncate font-mono text-[var(--on-surface)]">{selectedNode.server_public_key ?? "pending"}</dd></div>
-                    <div className="flex items-center justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Latest tunnel</dt><dd className="text-[var(--on-surface)]">{selectedNodeTunnel?.name ?? "None created yet"}</dd></div>
-                  </dl>
-                </div>
-                <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Pricing Snapshot</div>
-                  <dl className="mt-3 space-y-2 text-sm">
-                    <div className="flex items-center justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Plan</dt><dd className="text-[var(--on-surface)]">{selectedNodePricing?.planLabel ?? selectedNode.plan_key ?? "n/a"}</dd></div>
-                    <div className="flex items-center justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Size</dt><dd className="font-mono text-[var(--on-surface)]">{selectedNode.size_slug ?? selectedNodePricing?.sizeSlug ?? "n/a"}</dd></div>
-                    <div className="flex items-center justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Hourly</dt><dd className="text-[var(--on-surface)]">{formatCurrency(selectedNode.price_hourly_usd ?? selectedNodePricing?.hourlyUsd, 5)}</dd></div>
-                    <div className="flex items-center justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Monthly</dt><dd className="text-[var(--on-surface)]">{formatCurrency(selectedNode.price_monthly_usd ?? selectedNodePricing?.monthlyUsd)}</dd></div>
-                    <div className="flex items-start justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Transfer</dt><dd className="max-w-[220px] text-right text-[var(--on-surface)]">{selectedNodePricing?.transferNote ?? "Estimate unavailable for this node."}</dd></div>
-                    <div className="flex items-center justify-between gap-3"><dt className="text-[var(--on-surface-variant)]">Source</dt><dd className="text-[var(--on-surface)]">{selectedNodePricing?.estimated ? "Estimated" : "Provider live catalog"}</dd></div>
-                  </dl>
-                </div>
-              </div>
-              <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">
-                <div className="font-medium text-[var(--on-surface)]">Next step</div>
-                <div className="mt-1">{selectedNodeActionMessage}</div>
-                {selectedNode.lifecycle_status === "error" ? <div className="mt-3"><Button tone="danger" onClick={() => void onForceCleanupSelectedNode()} disabled={busyAction !== null}>Force Cleanup</Button></div> : null}
-              </div>
-            </div>
-          </div>
-        </div>
+        <NodeDetailsDrawer
+          node={selectedNode}
+          providerName={providerNameById.get(selectedNode.provider_id) ?? selectedNode.provider_id}
+          isCurrent={currentNodeId === selectedNode.id}
+          health={health}
+          pricing={selectedNodePricing}
+          tunnel={selectedNodeTunnel}
+          actionMessage={selectedNodeActionMessage}
+          busyAction={busyAction}
+          onClose={onCloseNodeDetails}
+          onSetCurrentNode={onSetCurrentNode}
+          onDestroyNode={onDestroyNode}
+          onForceCleanup={onForceCleanupSelectedNode}
+        />
       ) : null}
     </PageChrome>
+  );
+}
+
+function DetailRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <dt className="text-[var(--on-surface-variant)]">{label}</dt>
+      <dd className={`max-w-[220px] truncate text-right text-[var(--on-surface)] ${mono ? "font-mono text-[12px]" : ""}`} title={value}>{value}</dd>
+    </div>
+  );
+}
+
+/**
+ * Everything the table no longer shows, plus the actions that should never be one stray click away.
+ *
+ * A slide-over rather than a centred modal so the fleet stays visible behind it — the panel is a
+ * detail of the row you came from, not a separate place.
+ */
+function NodeDetailsDrawer({
+  node,
+  providerName,
+  isCurrent,
+  health,
+  pricing,
+  tunnel,
+  actionMessage,
+  busyAction,
+  onClose,
+  onSetCurrentNode,
+  onDestroyNode,
+  onForceCleanup,
+}: {
+  node: VpnNodeRecord;
+  providerName: string;
+  isCurrent: boolean;
+  health: HealthPanelData | null;
+  pricing: PlanDisplayModel | null;
+  tunnel: TunnelRecord | null;
+  actionMessage: string;
+  busyAction: DashboardBusyAction;
+  onClose: () => void;
+  onSetCurrentNode: (nodeId: string) => Promise<void>;
+  onDestroyNode: (node: VpnNodeRecord) => Promise<void>;
+  onForceCleanup: () => Promise<void>;
+}) {
+  const specs = pricing
+    ? `${pricing.vcpus ?? "?"} vCPU · ${formatMemory(pricing.memoryMb)} · ${pricing.diskGb ?? "?"} GB`
+    : "n/a";
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-[2px]" onClick={onClose} aria-hidden="true">
+      <aside
+        className="flex h-full w-full max-w-[460px] flex-col overflow-y-auto border-l border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(24,28,36,0.99),rgba(13,16,23,0.99))] p-6 shadow-[-30px_0_90px_rgba(0,0,0,0.45)]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Server</p>
+            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-[var(--on-surface)]">{node.name}</h2>
+          </div>
+          <Button tone="secondary" onClick={onClose} className="px-3 py-2 text-xs">Close</Button>
+        </div>
+
+        {!isCurrent ? (
+          <div className="mt-5">
+            <Button tone="secondary" onClick={() => void onSetCurrentNode(node.id)} disabled={busyAction !== null} className="w-full justify-center">
+              Make this my current server
+            </Button>
+          </div>
+        ) : (
+          <p className="mt-5 rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[color:rgba(171,199,255,0.08)] px-3 py-2 text-xs text-[var(--primary)]">
+            This is your current server.
+          </p>
+        )}
+
+        <div className="mt-6 space-y-4">
+          <section className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
+            <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Connection</div>
+            <dl className="mt-3 space-y-2 text-sm">
+              <DetailRow label="Status" value={health?.tunnel_status ?? node.lifecycle_status} />
+              <DetailRow label="Public IP" value={node.public_ipv4 ?? "pending"} mono />
+              <DetailRow label="Port" value={node.endpoint_port ? String(node.endpoint_port) : "n/a"} mono />
+              <DetailRow label="Tunnel" value={tunnel?.name ?? "None created yet"} />
+            </dl>
+          </section>
+
+          <section className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
+            <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Server</div>
+            <dl className="mt-3 space-y-2 text-sm">
+              <DetailRow label="Provider" value={providerName} />
+              <DetailRow label="Region" value={node.region} mono />
+              <DetailRow label="Plan" value={pricing?.planLabel ?? node.plan_key ?? "n/a"} />
+              <DetailRow label="Size" value={node.size_slug ?? pricing?.sizeSlug ?? "n/a"} mono />
+              <DetailRow label="Specs" value={specs} />
+              <DetailRow label="Droplet ID" value={node.external_ref ?? "n/a"} mono />
+              <DetailRow label="Node ID" value={node.id} mono />
+              <DetailRow label="Created" value={formatCreatedTime(node.created_at)} />
+              <DetailRow label="Server key" value={node.server_public_key ?? "pending"} mono />
+            </dl>
+          </section>
+
+          <section className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
+            <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Cost</div>
+            <dl className="mt-3 space-y-2 text-sm">
+              <DetailRow label="Monthly" value={formatCurrency(node.price_monthly_usd ?? pricing?.monthlyUsd)} />
+              <DetailRow label="Hourly" value={formatCurrency(node.price_hourly_usd ?? pricing?.hourlyUsd, 5)} />
+              <DetailRow label="Transfer" value={pricing?.transferNote ?? "Estimate unavailable for this node."} />
+              <DetailRow label="Source" value={pricing?.estimated ? "Estimated" : "Provider live catalog"} />
+            </dl>
+          </section>
+
+          <section className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">
+            <div className="font-medium text-[var(--on-surface)]">Next step</div>
+            <div className="mt-1">{actionMessage}</div>
+          </section>
+
+          {/* Separated because both actions delete a paid server. "Uninstall Host" used to sit in
+              every row, coloured red, one click from destroying a droplet the user is billed for. */}
+          <section className="rounded-[18px] border border-[color:rgba(255,155,155,0.25)] bg-[color:rgba(255,155,155,0.05)] p-4">
+            <div className="text-[11px] uppercase tracking-[0.24em] text-[#ff9b9b]">Danger zone</div>
+            <p className="mt-2 text-xs text-[var(--on-surface-variant)]">
+              Destroying deletes the server at {providerName} and stops its billing. This cannot be undone.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {/* For a failed node this is the recovery path, not a destructive extra: the record
+                  blocks its own node ID until removed. Shown first so it reads as the way out. */}
+              {node.lifecycle_status === "error" ? (
+                <Button tone="primary" onClick={() => void onForceCleanup()} disabled={busyAction !== null} className="px-3 py-2 text-xs">
+                  {busyAction === "force-cleanup" ? "Cleaning up" : "Force cleanup"}
+                </Button>
+              ) : null}
+              <Button tone="danger" onClick={() => void onDestroyNode(node)} disabled={busyAction !== null} className="px-3 py-2 text-xs">
+                {busyAction === "destroy-node" ? "Destroying" : "Destroy server"}
+              </Button>
+            </div>
+          </section>
+        </div>
+      </aside>
+    </div>
   );
 }

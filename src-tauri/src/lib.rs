@@ -98,6 +98,8 @@ pub fn run() {
       commands::system::resume_provider,
       commands::system::delete_provider,
       commands::system::list_vpn_nodes,
+      commands::system::get_current_node_id,
+      commands::system::set_current_node_id,
       commands::system::list_tunnels_for_node,
       commands::system::destroy_vpn_node,
       commands::system::force_cleanup_vpn_node,

@@ -228,6 +228,10 @@ pub struct VpnNodeRecord {
   pub lifecycle_status: NodeLifecycleStatus,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub provider_status: Option<String>,
+  /// Geography for `region`, attached at list time by the owning adapter. Not a column — the row
+  /// stores only the slug, and only the adapter knows what its own slugs mean.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub region_geo: Option<crate::backend::provider::ProviderRegion>,
   pub external_ref: Option<String>,
   pub public_ipv4: Option<String>,
   pub server_public_key: Option<String>,
@@ -1080,6 +1084,49 @@ impl Database {
     Ok(())
   }
 
+  /// Reads a global app setting, or `None` when it was never set.
+  pub fn get_setting(&self, key: &str) -> Result<Option<String>, DbError> {
+    let connection = self.open_connection()?;
+    connection
+      .query_row(
+        "SELECT value FROM app_settings WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+      )
+      .optional()
+      .map_err(|source| DbError::Query {
+        action: "get_setting",
+        detail: "Failed reading app setting.".to_string(),
+        source,
+      })
+  }
+
+  /// Writes a global app setting. `None` removes the key, so "unset" and "empty string" stay
+  /// distinguishable.
+  pub fn set_setting(&self, key: &str, value: Option<&str>) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+
+    let result = match value {
+      Some(value) => connection.execute(
+        "INSERT INTO app_settings(key, value, updated_at)
+         VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET
+           value = excluded.value,
+           updated_at = excluded.updated_at",
+        params![key, value],
+      ),
+      None => connection.execute("DELETE FROM app_settings WHERE key = ?1", params![key]),
+    };
+
+    result.map_err(|source| DbError::Query {
+      action: "set_setting",
+      detail: "Failed writing app setting.".to_string(),
+      source,
+    })?;
+
+    Ok(())
+  }
+
   /// Stamps or clears the session start time.
   ///
   /// Stamping preserves an existing value, so an idempotent re-connect of an already-connected
@@ -1288,6 +1335,7 @@ fn map_vpn_node_row(row: &Row<'_>) -> rusqlite::Result<VpnNodeRecord> {
     price_source_timestamp: row.get(8)?,
     lifecycle_status,
     provider_status: None,
+    region_geo: None,
     external_ref: row.get(10)?,
     public_ipv4: row.get(11)?,
     server_public_key: row.get(12)?,
@@ -1490,6 +1538,24 @@ mod tests {
       None,
       "disconnecting ends the session",
     );
+  }
+
+  #[test]
+  fn app_settings_round_trip_and_clear() {
+    let db = setup_db("app_settings");
+
+    assert_eq!(db.get_setting("current_node_id").expect("read"), None);
+
+    db.set_setting("current_node_id", Some("node-a")).expect("write");
+    assert_eq!(db.get_setting("current_node_id").expect("read").as_deref(), Some("node-a"));
+
+    // Overwrites rather than inserting a duplicate key.
+    db.set_setting("current_node_id", Some("node-b")).expect("overwrite");
+    assert_eq!(db.get_setting("current_node_id").expect("read").as_deref(), Some("node-b"));
+
+    // `None` removes the key, keeping "unset" distinct from "set to empty".
+    db.set_setting("current_node_id", None).expect("clear");
+    assert_eq!(db.get_setting("current_node_id").expect("read"), None);
   }
 
   #[test]

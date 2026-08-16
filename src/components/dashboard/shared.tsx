@@ -87,12 +87,6 @@ export const VIEW_ROUTE: Record<AppView, string> = {
 
 export const NODE_CREATE_ROUTE = "/dashboard/nodes/create";
 
-export const REGION_LABELS: Record<string, string> = {
-  nyc1: "New York",
-  sfo3: "San Francisco",
-  fra1: "Frankfurt",
-};
-
 export function statusBadge(status: string) {
   const normalized = status.toLowerCase();
   if (normalized === "ready" || normalized === "connected" || normalized === "active") {
@@ -217,11 +211,6 @@ export function formatCreatedTime(value: string | null | undefined): string {
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) return value;
   return new Date(timestamp).toLocaleString();
-}
-
-export function formatRegionLabel(region: string | null | undefined): string {
-  if (!region) return "n/a";
-  return REGION_LABELS[region] ? `${REGION_LABELS[region]} (${region})` : region;
 }
 
 export function planDisplayFromPricing(plan: ProviderPlanPricing): PlanDisplayModel {

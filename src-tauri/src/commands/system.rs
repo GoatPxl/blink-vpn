@@ -9,7 +9,7 @@ use crate::backend::Backend;
 use crate::commands::error::{CommandError, CommandErrorKind};
 use crate::backend::db::{Database, ProviderRecord, ProviderStatus};
 use crate::backend::logging;
-use crate::backend::provider::ProviderPlanPricing;
+use crate::backend::provider::{ProviderPlanPricing, ProviderRegion};
 use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
   ForceCleanupResult,
@@ -307,10 +307,31 @@ pub fn list_provider_pricing(
 pub fn list_provider_regions(
   provider_id: String,
   backend: State<'_, Backend>,
-) -> Result<Vec<String>, CommandError> {
+) -> Result<Vec<ProviderRegion>, CommandError> {
   backend
     .provider
     .list_provider_regions(&backend.db, &backend.secure_storage, &provider_id)
+    .map_err(CommandError::from)
+}
+
+/// The node the app connects to by default, or `null` when the user has more than one node and
+/// has not chosen between them.
+#[tauri::command]
+pub fn get_current_node_id(backend: State<'_, Backend>) -> Result<Option<String>, CommandError> {
+  backend
+    .orchestrator
+    .get_current_node_id(&backend.db)
+    .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn set_current_node_id(
+  node_id: Option<String>,
+  backend: State<'_, Backend>,
+) -> Result<(), CommandError> {
+  backend
+    .orchestrator
+    .set_current_node_id(&backend.db, node_id.as_deref())
     .map_err(CommandError::from)
 }
 

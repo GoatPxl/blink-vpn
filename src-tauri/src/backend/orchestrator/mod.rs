@@ -1,6 +1,7 @@
 use thiserror::Error;
 use uuid::Uuid;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,7 +16,7 @@ use crate::backend::db::{DbError, NodeLifecycleStatus, TunnelRecord, TunnelStatu
 use crate::backend::logging;
 use crate::backend::provider::{
   BootstrapWaitRequest, NodeInitRequest, ProvisionedDroplet, ProviderDropletStatus, ProviderFlowError,
-  ProviderPlanPricing, ProviderRegistry, DEFAULT_REGION, DEFAULT_SIZE,
+  ProviderPlanPricing, ProviderRegion, ProviderRegistry, DEFAULT_REGION, DEFAULT_SIZE,
 };
 use crate::backend::secure_storage::SecureStorage;
 use crate::backend::secure_storage::SecretStoreError;
@@ -43,6 +44,8 @@ struct ExternalIpSnapshot {
 }
 
 const DEFAULT_TUNNEL_BASENAME: &str = "primary";
+/// `app_settings` key holding the node the app connects to by default.
+const CURRENT_NODE_SETTING_KEY: &str = "current_node_id";
 const EXTERNAL_IP_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Health polls every few seconds; probing that often would hammer a third-party service for a
 /// value that rarely changes. A connection state change bypasses this entirely.
@@ -291,7 +294,30 @@ impl Orchestrator {
     })?;
 
     self.attach_live_provider_status(providers, db, secure_storage, &mut nodes);
+    self.attach_region_geography(providers, db, &mut nodes);
     Ok(nodes)
+  }
+
+  /// Name each node's location from its own adapter's table.
+  ///
+  /// No token and no network call, unlike the provider-status pass above: a node row stores only a
+  /// region slug, and the fleet list is meant to stay readable when a provider key goes bad.
+  fn attach_region_geography(
+    &self,
+    providers: &ProviderRegistry,
+    db: &Database,
+    nodes: &mut [crate::backend::db::VpnNodeRecord],
+  ) {
+    let mut resolved: HashMap<(String, String), Option<ProviderRegion>> = HashMap::new();
+
+    for node in nodes {
+      let key = (node.provider_id.clone(), node.region.clone());
+      let region = resolved
+        .entry(key)
+        .or_insert_with(|| providers.describe_provider_region(db, &node.provider_id, &node.region));
+
+      node.region_geo = region.clone();
+    }
   }
 
   fn attach_live_provider_status(
@@ -330,6 +356,73 @@ impl Orchestrator {
 
       node.provider_status = Some(live_status.as_str().to_string());
     }
+  }
+
+  /// The node the app connects to by default.
+  ///
+  /// Validated against the node list on every read: destroying a node leaves the stored id
+  /// dangling, and returning it would point the connect button at a server that no longer exists.
+  /// With nothing set, a lone node is unambiguously the current one; two or more is a real choice
+  /// the user has not made yet, so the answer is `None` rather than a guess.
+  pub fn get_current_node_id(&self, db: &Database) -> Result<Option<String>, OrchestratorError> {
+    let nodes = db.list_vpn_nodes().map_err(|source| OrchestratorError::Database {
+      detail: "Failed listing vpn nodes while resolving the current node.".to_string(),
+      source,
+    })?;
+
+    let stored = db
+      .get_setting(CURRENT_NODE_SETTING_KEY)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed reading the current node setting.".to_string(),
+        source,
+      })?;
+
+    if let Some(node_id) = stored {
+      if nodes.iter().any(|node| node.id == node_id) {
+        return Ok(Some(node_id));
+      }
+
+      // Stale pointer to a destroyed node. Clear it so the fallback below can apply.
+      let _ = db.set_setting(CURRENT_NODE_SETTING_KEY, None);
+    }
+
+    if nodes.len() == 1 {
+      return Ok(nodes.into_iter().next().map(|node| node.id));
+    }
+
+    Ok(None)
+  }
+
+  /// Sets, or with `None` clears, the default node. Setting rejects an unknown id rather than
+  /// storing a pointer to nothing.
+  pub fn set_current_node_id(
+    &self,
+    db: &Database,
+    node_id: Option<&str>,
+  ) -> Result<(), OrchestratorError> {
+    if let Some(node_id) = node_id {
+      let exists = db
+        .get_vpn_node(node_id)
+        .map_err(|source| OrchestratorError::Database {
+          detail: "Failed loading vpn node while setting the current node.".to_string(),
+          source,
+        })?
+        .is_some();
+
+      if !exists {
+        return Err(OrchestratorError::InvalidState {
+          node_id: node_id.to_string(),
+          detail: "Cannot make an unknown node current. Refresh the node list and try again."
+            .to_string(),
+        });
+      }
+    }
+
+    db.set_setting(CURRENT_NODE_SETTING_KEY, node_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed persisting the current node setting.".to_string(),
+        source,
+      })
   }
 
   pub fn list_tunnels_for_node(&self, db: &Database, node_id: &str) -> Result<Vec<crate::backend::db::TunnelRecord>, OrchestratorError> {
@@ -494,6 +587,16 @@ impl Orchestrator {
       .as_ref()
       .map(|record| db.delete_vpn_node(&record.id).is_ok())
       .unwrap_or(true);
+
+    // A destroyed node cannot stay the default. Leaving the pointer would aim the connect button
+    // at a server that no longer exists.
+    if node_record_removed {
+      if let Ok(Some(current)) = db.get_setting(CURRENT_NODE_SETTING_KEY) {
+        if current == node_id {
+          let _ = db.set_setting(CURRENT_NODE_SETTING_KEY, None);
+        }
+      }
+    }
 
     log::warn!(
       "event=vpn_node.force_cleanup.completed correlation_id={} node_id={} local_tunnels_removed={} remote_droplet_delete_attempted={} remote_droplet_delete_succeeded={} node_record_removed={}",
@@ -897,7 +1000,12 @@ impl Orchestrator {
     })();
 
     if let Err(error) = flow_result {
-      let mut final_reason = format!("create_vpn_node_to_ready failed: {error}");
+      // The whole chain, so the provider's actual complaint survives into `error_reason` and the
+      // log instead of being flattened to the orchestrator's own wrapper message.
+      let mut final_reason = format!(
+        "create_vpn_node_to_ready failed: {}",
+        logging::describe_error_chain(&error)
+      );
 
       if let Some(droplet) = created_droplet {
         let cleanup_result = providers.delete_provider_droplet(
@@ -1396,6 +1504,8 @@ impl Orchestrator {
       // Stamps the session start so the dashboard can show a real elapsed timer. Best-effort:
       // an uptime display is not worth failing an otherwise successful connect over.
       let _ = db.set_tunnel_connected_at(&request.tunnel_id, true);
+      // Connecting to a node is the clearest possible statement that it is the one you want.
+      let _ = self.set_current_node_id(db, Some(&request.node_id));
       let _ = db.transition_vpn_node_status(&request.node_id, NodeLifecycleStatus::Connected, None);
       return Ok(());
     }
@@ -2276,8 +2386,12 @@ mod tests {
       })
     }
 
-    fn list_regions(&self, _token: &str) -> Result<Vec<String>, ProviderAdapterError> {
-      Ok(vec!["nyc1".to_string(), "sfo3".to_string()])
+    fn list_regions(&self, _token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError> {
+      Ok(vec![self.describe_region("nyc1"), self.describe_region("sfo3")])
+    }
+
+    fn describe_region(&self, slug: &str) -> ProviderRegion {
+      crate::backend::provider::digitalocean_regions::describe_region(slug)
     }
 
     fn list_plan_pricing(
@@ -3007,6 +3121,7 @@ mod tests {
       price_source_timestamp: None,
       lifecycle_status: NodeLifecycleStatus::Ready,
       provider_status: None,
+      region_geo: None,
       external_ref: Some("42".to_string()),
       public_ipv4: Some("127.0.0.1".to_string()),
       server_public_key: Some("server-public-key".to_string()),
@@ -3110,6 +3225,7 @@ mod tests {
       price_source_timestamp: None,
       lifecycle_status: NodeLifecycleStatus::Ready,
       provider_status: None,
+      region_geo: None,
       external_ref: Some("77".to_string()),
       public_ipv4: None,
       server_public_key: Some("server-public-key".to_string()),
@@ -3381,6 +3497,132 @@ mod tests {
 
     assert_eq!(summary.tunnel_status, Some(TunnelStatus::Disconnected));
     assert_eq!(summary.handshake_age_seconds, None);
+  }
+
+  /// A single node is unambiguously the one you mean, so it needs no explicit choice.
+  #[test]
+  fn a_lone_node_is_current_without_being_chosen() {
+    let db = Database::new(test_db_path("current_single"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    db.create_vpn_node("node-only", TEST_PROVIDER_ID, "Only", "nyc1").expect("node inserts");
+
+    let current = Orchestrator::new().get_current_node_id(&db).expect("read should succeed");
+    assert_eq!(current.as_deref(), Some("node-only"));
+  }
+
+  /// With two nodes and no choice made, guessing would aim the connect button at an arbitrary
+  /// server. The honest answer is that there is no current node yet.
+  #[test]
+  fn two_nodes_with_no_choice_have_no_current_node() {
+    let db = Database::new(test_db_path("current_ambiguous"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    db.create_vpn_node("node-a", TEST_PROVIDER_ID, "A", "nyc1").expect("node inserts");
+    db.create_vpn_node("node-b", TEST_PROVIDER_ID, "B", "sfo3").expect("node inserts");
+
+    let orchestrator = Orchestrator::new();
+    assert_eq!(orchestrator.get_current_node_id(&db).expect("read"), None);
+
+    orchestrator.set_current_node_id(&db, Some("node-b")).expect("set should succeed");
+    assert_eq!(
+      orchestrator.get_current_node_id(&db).expect("read").as_deref(),
+      Some("node-b")
+    );
+  }
+
+  /// A pointer to a destroyed node would send connect at a server that no longer exists. Three
+  /// nodes, so the survivors stay ambiguous and the stale id cannot be masked by the lone-node
+  /// fallback.
+  #[test]
+  fn a_current_node_pointing_at_a_deleted_node_is_discarded() {
+    let db = Database::new(test_db_path("current_stale"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    for (id, region) in [("node-a", "nyc1"), ("node-b", "sfo3"), ("node-c", "fra1")] {
+      db.create_vpn_node(id, TEST_PROVIDER_ID, id, region).expect("node inserts");
+    }
+
+    let orchestrator = Orchestrator::new();
+    orchestrator.set_current_node_id(&db, Some("node-a")).expect("set should succeed");
+    db.delete_vpn_node("node-a").expect("node deletes");
+
+    assert_eq!(
+      orchestrator.get_current_node_id(&db).expect("read"),
+      None,
+      "a stale pointer must not resolve, and must not silently fall through to another node"
+    );
+    assert_eq!(
+      db.get_setting("current_node_id").expect("read"),
+      None,
+      "the stale key should also be cleared, not just ignored on read"
+    );
+  }
+
+  /// Destroying the last-but-one node leaves a single unambiguous survivor, which becomes current
+  /// on its own — the user has exactly one server, so there is nothing to choose between.
+  #[test]
+  fn the_last_remaining_node_becomes_current_after_the_other_is_destroyed() {
+    let db = Database::new(test_db_path("current_survivor"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    db.create_vpn_node("node-a", TEST_PROVIDER_ID, "A", "nyc1").expect("node inserts");
+    db.create_vpn_node("node-b", TEST_PROVIDER_ID, "B", "sfo3").expect("node inserts");
+
+    let orchestrator = Orchestrator::new();
+    orchestrator.set_current_node_id(&db, Some("node-a")).expect("set should succeed");
+    db.delete_vpn_node("node-a").expect("node deletes");
+
+    assert_eq!(
+      orchestrator.get_current_node_id(&db).expect("read").as_deref(),
+      Some("node-b"),
+    );
+  }
+
+  #[test]
+  fn setting_an_unknown_node_as_current_is_rejected() {
+    let db = Database::new(test_db_path("current_unknown"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+
+    let error = Orchestrator::new()
+      .set_current_node_id(&db, Some("node-ghost"))
+      .expect_err("an unknown node must not become current");
+
+    assert!(matches!(error, OrchestratorError::InvalidState { .. }));
+  }
+
+  /// Node rows carry only a slug; naming the location must work with no token and no network,
+  /// because the fleet list stays visible when a provider key goes bad.
+  #[test]
+  fn listing_nodes_attaches_region_geography_without_a_provider_call() {
+    let db = Database::new(test_db_path("region_enrich"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    db.create_vpn_node("node-sfo", TEST_PROVIDER_ID, "West", "sfo3").expect("node inserts");
+    db.create_vpn_node("node-huh", TEST_PROVIDER_ID, "Mystery", "mars1").expect("node inserts");
+
+    // Registry with no reachable API: enrichment must not depend on one.
+    let providers = ProviderRegistry::from_adapter(Arc::new(MockProviderAdapter::new(false)));
+    let nodes = Orchestrator::new()
+      .list_nodes(&providers, &db, &secure_storage)
+      .expect("listing should succeed");
+
+    let sfo = nodes.iter().find(|node| node.id == "node-sfo").expect("node present");
+    let geo = sfo.region_geo.as_ref().expect("a known slug should carry geography");
+    assert_eq!(geo.city.as_deref(), Some("San Francisco"));
+    assert_eq!(geo.country_code.as_deref(), Some("US"));
+
+    let unknown = nodes.iter().find(|node| node.id == "node-huh").expect("node present");
+    let geo = unknown.region_geo.as_ref().expect("an entry is still returned");
+    assert_eq!(geo.slug, "mars1");
+    assert_eq!(geo.city, None, "an unrecognised slug must not be given an invented city");
   }
 
   /// Egress probe that answers from fixed values instead of the network.
@@ -4163,11 +4405,14 @@ impl OrchestratorError {
             "Refresh the dashboard; if the local state still looks stale, use Force Cleanup.".to_string(),
         }
       }
-      Self::Provider { detail, .. } => UserFacingError {
+      // The provider's own complaint is the only part a user can act on — "invalid size for
+      // region", "name must be a valid hostname". Showing just the wrapper left them with a
+      // failure and no cause.
+      Self::Provider { detail, source } => UserFacingError {
         kind: UserFacingErrorKind::Provider,
-        message: detail.clone(),
+        message: format!("{detail} {}", logging::describe_error_chain(source)),
         next_action:
-          "Validate the provider token, then retry or use Force Cleanup if provisioning was interrupted."
+          "Check the reported cause above. If provisioning was interrupted, use Force Cleanup on the node, then retry."
             .to_string(),
       },
       Self::WireGuard { detail, source } => UserFacingError {

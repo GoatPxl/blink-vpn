@@ -11,6 +11,8 @@ import {
   forceDisconnectNodeService as forceDisconnectNodeServiceCommand,
   exportDiagnosticsBundle,
   forceCleanupVpnNode,
+  getCurrentNodeId,
+  setCurrentNodeId,
   getDiagnosticsBundle,
   getHealthPanelData,
   listProviders,
@@ -106,6 +108,11 @@ type DashboardContextValue = {
   noServerConfigured: boolean;
   /** Live service state, not the stored row. The one value every connection widget keys off. */
   tunnelConnected: boolean;
+  /** The node the app connects to by default, or null when several exist and none was chosen. */
+  currentNodeId: string | null;
+  setCurrentNode: (nodeId: string) => Promise<void>;
+  /** Clears the recovery banner. It otherwise persists until the next successful operation. */
+  dismissRecovery: () => void;
   throughputSamples: ThroughputSample[];
   loadDashboard: (preferredSelectedNodeId?: string) => Promise<void>;
   refreshHealth: () => Promise<void>;
@@ -118,7 +125,6 @@ type DashboardContextValue = {
   validateDockerReadiness: (options?: { silent?: boolean }) => Promise<void>;
   createNode: (input: CreateNodeInput) => Promise<void>;
   installHostForNode: (node: VpnNodeRecord) => Promise<void>;
-  uninstallHostForNode: (node: VpnNodeRecord) => Promise<void>;
   connectPrimary: () => Promise<void>;
   connectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   disconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
@@ -145,6 +151,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [selectedTunnelId, setSelectedTunnelId] = useState("");
   const [health, setHealth] = useState<HealthPanelData | null>(null);
+  // Named to keep the React setter distinct from the `setCurrentNodeId` Tauri command.
+  const [currentNodeId, setCurrentNodeIdState] = useState<string | null>(null);
   const [throughputSamples, setThroughputSamples] = useState<ThroughputSample[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsBundle | null>(null);
   const [diagnosticsExportPath, setDiagnosticsExportPath] = useState("No export yet.");
@@ -189,7 +197,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   } | null>(null);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
-  const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? selectedNode ?? nodes[0] ?? null;
+  // Precedence: the node carrying a tunnel, then the user's persisted choice, then a lone node,
+  // and only then whatever row is selected in the UI. The persisted choice is the addition — it
+  // used to jump straight from "any lifecycle-connected node" to the current selection, so a
+  // deliberate default could not outrank an incidental one.
+  const activeNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected")
+    ?? nodes.find((node) => node.id === currentNodeId)
+    ?? (nodes.length === 1 ? nodes[0] : null)
+    ?? selectedNode;
   const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
   const noServerConfigured = nodes.length === 0;
 
@@ -356,18 +371,34 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const dismissRecovery = useCallback(() => {
+    setRecovery(null);
+  }, []);
+
+  const setCurrentNode = useCallback(async (nodeId: string) => {
+    try {
+      await setCurrentNodeId(nodeId);
+      setCurrentNodeIdState(nodeId);
+      pushToast("success", "Current server updated", "New connections will use this server by default.");
+    } catch (error) {
+      handleError(error);
+    }
+  }, [handleError, pushToast]);
+
   const loadDashboard = useCallback(async (preferredSelectedNodeId?: string) => {
     setBusyAction("refresh");
     try {
-      const [loadedNodes, loadedDiagnostics, loadedProviders] = await Promise.all([
+      const [loadedNodes, loadedDiagnostics, loadedProviders, loadedCurrentNodeId] = await Promise.all([
         listVpnNodes(),
         getDiagnosticsBundle(),
         listProviders(),
+        getCurrentNodeId(),
       ]);
 
       setNodes(loadedNodes);
       setDiagnostics(loadedDiagnostics);
       setProviders(loadedProviders);
+      setCurrentNodeIdState(loadedCurrentNodeId);
 
       const configuredProvider = loadedProviders.find((provider) => provider.id === providerIdRef.current)
         ?? loadedProviders[0]
@@ -827,7 +858,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [handleError, loadDashboard, pushToast, refreshHealthSnapshot]);
 
   const destroyNode = useCallback(async (node: VpnNodeRecord) => {
-    const confirmed = window.confirm(`Destroy node ${node.name} (${node.id})? This removes local state and attempts droplet cleanup.`);
+    // Names the location as well as the node: with the fleet keyed by city, "which one is this?"
+    // is the question a user needs answered before deleting a server they pay for.
+    const where = node.region_geo?.city ?? node.region;
+    const confirmed = window.confirm(
+      `Destroy ${node.name} in ${where}?\n\nThis deletes the server at your provider and stops its billing. It cannot be undone.`,
+    );
     if (!confirmed) {
       return;
     }
@@ -845,9 +881,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, loadDashboard, pushToast]);
 
-  const uninstallHostForNode = useCallback(async (node: VpnNodeRecord) => {
-    await destroyNode(node);
-  }, [destroyNode]);
 
   const forceCleanupSelectedNode = useCallback(async () => {
     if (!selectedNode) {
@@ -1058,6 +1091,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     connectedTunnel,
     noServerConfigured,
     tunnelConnected,
+    currentNodeId,
+    setCurrentNode,
+    dismissRecovery,
     throughputSamples,
     loadDashboard,
     refreshHealth,
@@ -1070,7 +1106,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     validateDockerReadiness,
     createNode,
     installHostForNode,
-    uninstallHostForNode,
     connectNode,
     connectPrimary,
     connectTunnel,

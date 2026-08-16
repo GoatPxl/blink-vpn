@@ -35,7 +35,7 @@ Provider adapters currently included:
 | `hello` | `name?: string` | `string` | Connectivity sanity check |
 | `register_provider_token` | `provider_id`, `provider_name`, `api_token` | `string` | Stores the credential in secure storage and persists its reference. Provider-neutral: the adapter is resolved from the stored provider record, so there is no per-provider command. |
 | `validate_provider_token` | `provider_id` | `string` | Adapter-level token validation |
-| `list_provider_regions` | `provider_id` | `string[]` | Region catalog |
+| `list_provider_regions` | `provider_id` | `ProviderRegion[]` | Region catalog with normalized geography — see below |
 | `list_provider_pricing` | `provider_id`, `region` | `ProviderPricingResponse` | Plan and pricing catalog |
 | `create_vpn_node_to_ready` | `node_id`, `provider_id`, `node_name`, `region`, `plan_key` | `string` | Provision and bootstrap workflow |
 | `create_and_activate_client_tunnel` | `tunnel_id`, `node_id`, `tunnel_name`, `client_address_cidr`, `dns_server?`, `allowed_ips` | `string` | Reuses the client keypair generated at provision time and marks the tunnel ready |
@@ -48,7 +48,9 @@ Provider adapters currently included:
 | `delete_provider` | `provider_id` | `void` | Deletes provider when dependencies are clear |
 | `destroy_vpn_node` | `node_id` | `void` | Standard destroy path |
 | `force_cleanup_vpn_node` | `node_id` | `ForceCleanupResult` | Recovery cleanup path |
-| `list_vpn_nodes` | none | `VpnNodeRecord[]` | Local node records |
+| `list_vpn_nodes` | none | `VpnNodeRecord[]` | Local node records, enriched with live `provider_status` and adapter-supplied `region_geo` |
+| `get_current_node_id` | none | `string \| null` | The default node; `null` when several exist and none was chosen |
+| `set_current_node_id` | `node_id` (nullable) | `void` | Sets or clears the default node; rejects an unknown id |
 | `list_providers` | none | `ProviderRecord[]` | Local provider records |
 | `list_tunnels_for_node` | `node_id` | `TunnelRecord[]` | Local tunnels for node |
 | `read_client_tunnel_status` | `tunnel_id` | `string` | Runtime status summary |
@@ -98,6 +100,28 @@ Response:
 ```text
 Create node complete: node_id=node-1, droplet_id=42, endpoint_ip=203.0.113.10, listen_port=51820, correlation_id=..., idempotent_reuse=false
 ```
+
+### Region catalog
+
+```json
+[
+  {
+    "slug": "sfo3",
+    "city": "San Francisco",
+    "area": "California",
+    "country": "United States",
+    "country_code": "US",
+    "continent": "North America"
+  },
+  { "slug": "mars1", "city": null, "area": null, "country": null, "country_code": null, "continent": null }
+]
+```
+
+Only `slug` is guaranteed. Providers add regions faster than a curated table follows, so an
+unrecognised slug carries no geography rather than a guessed city — **render the slug in that case,
+never a fallback place name.** The same shape is attached to each node as `region_geo` by
+`list_vpn_nodes`, resolved from the adapter's own table with no token and no network call, so the
+fleet stays readable when a provider key goes bad.
 
 ### Health panel payload
 
