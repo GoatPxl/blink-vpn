@@ -68,7 +68,12 @@ Rules:
 - Settings must be additive, versioned through migrations, and safe for existing installs.
 - Secret values must not be stored in app settings.
 
-The table holds `current_node_id`: the node the app connects to by default. It is written on a
+The table holds `wireguard_dns_server` and `wireguard_keepalive_seconds` — client tunnel parameters
+resolved at connect time, so a change applies the next time a tunnel starts and a running tunnel
+keeps what it was started with. They are the single source of truth for what a generated `.conf`
+carries; the matching tunnel columns record what the last connect used.
+
+It also holds `current_node_id`: the node the app connects to by default. It is written on a
 successful connect and when the user picks a server, validated against the node list on read, and
 cleared when its node is destroyed. This is a fourth status axis, deliberately separate from the
 three below — "the server I mean" is not the same fact as "the VM is on", "the app finished

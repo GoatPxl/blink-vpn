@@ -51,6 +51,8 @@ Provider adapters currently included:
 | `list_vpn_nodes` | none | `VpnNodeRecord[]` | Local node records, enriched with live `provider_status` and adapter-supplied `region_geo` |
 | `get_current_node_id` | none | `string \| null` | The default node; `null` when several exist and none was chosen |
 | `set_current_node_id` | `node_id` (nullable) | `void` | Sets or clears the default node; rejects an unknown id |
+| `get_tunnel_settings` | none | `TunnelSettings` | DNS server and keepalive used when a tunnel next starts |
+| `set_tunnel_settings` | `dns_server` (nullable), `keepalive_seconds` | `void` | Validates before storing; a non-IP DNS value is rejected with `invalid-input` |
 | `list_providers` | none | `ProviderRecord[]` | Local provider records |
 | `list_tunnels_for_node` | `node_id` | `TunnelRecord[]` | Local tunnels for node |
 | `read_client_tunnel_status` | `tunnel_id` | `string` | Runtime status summary |

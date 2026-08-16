@@ -10,7 +10,7 @@ const navItems: Array<{ id: AppView; label: string; icon: string; eyebrow: strin
   { id: "dashboard", label: "Dashboard", icon: "grid", eyebrow: "Overview" },
   { id: "nodes", label: "Server Locations", icon: "server", eyebrow: "Provision" },
   { id: "health", label: "Kill Switch", icon: "shield", eyebrow: "Connection" },
-  { id: "settings", label: "Settings", icon: "lock", eyebrow: "Provider" },
+  { id: "settings", label: "Settings", icon: "lock", eyebrow: "Preferences" },
   { id: "diagnostics", label: "Support", icon: "support", eyebrow: "Logs" },
 ];
 
@@ -19,7 +19,7 @@ const titleMap: Record<AppView, string> = {
   nodes: "Server Locations",
   health: "Kill Switch",
   diagnostics: "Diagnostics",
-  settings: "Provider Integration",
+  settings: "Settings",
 };
 
 const subtitleMap: Record<AppView, string> = {
@@ -27,7 +27,7 @@ const subtitleMap: Record<AppView, string> = {
   nodes: "Choose where your traffic exits, and provision new servers.",
   health: "Verify leak protection, watch for dropped tunnels, and inspect connection health.",
   diagnostics: "Review redacted logs, recovery suggestions, and exportable bundles.",
-  settings: "Register and validate provider tokens used for orchestration.",
+  settings: "Provider keys, WireGuard tunnel options, and version information.",
 };
 
 function getActiveView(pathname: string | null): AppView {

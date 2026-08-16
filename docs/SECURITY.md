@@ -7,6 +7,22 @@
 - Keep diagnostics export safe for sharing.
 - Keep lifecycle operations recoverable under failure.
 
+## Where Credentials Live
+
+Provider API keys are stored in **Windows Credential Manager**, under the service name
+`com.goatstare.vpn.phase1`, written as a generic credential. SQLite holds only a non-secret
+`token_ref` handle pointing at that entry — never the key.
+
+Two qualifications worth stating rather than glossing:
+
+- The app performs **no encryption of its own**. Protection at rest is Credential Manager's, which
+  means the credential is readable by anything running as the same Windows user.
+- On non-Windows builds the store is `MockSecretStore`, an in-process `HashMap` that is neither
+  encrypted nor persistent. It exists for tests and must not be treated as a secure store.
+
+The UI names Credential Manager rather than claiming the keys are "encrypted at rest", because
+knowing *where* the credential is, is what lets a user go and revoke it.
+
 ## Secret Handling
 
 - Provider tokens are stored in Windows Credential Manager through secure storage abstraction.

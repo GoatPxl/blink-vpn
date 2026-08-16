@@ -1,340 +1,473 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AppIcon,
   Button,
   Card,
   Field,
   PageChrome,
-  type AppView,
   type DashboardBusyAction,
   type ProviderRecord,
   type VpnNodeRecord,
 } from "./shared";
-import { maskTokenReference } from "./shared";
+import {
+  PROVIDER_KEY_STATUS_LABEL,
+  buildRowActions,
+  countAttachedNodes,
+  deriveProviderKeyStatus,
+  describeKeepalive,
+  validateDnsServer,
+  validateKeepalive,
+  type ProviderAccess,
+  type ProviderKeyStatus,
+} from "@/lib/settings-display";
+import type { TunnelSettings, WireGuardReadiness } from "@/lib/tauri";
+
+const STATUS_CLASSES: Record<ProviderKeyStatus, string> = {
+  verified: "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]",
+  unverified: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.04)] text-[var(--on-surface-variant)]",
+  missing: "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]",
+  suspended: "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]",
+  invalid: "border-[color:rgba(255,155,155,0.35)] bg-[color:rgba(255,155,155,0.08)] text-[#ff9b9b]",
+};
 
 export function SettingsView({
   dockerDevEnabled,
-  dockerFauxToken,
-  setDockerFauxToken,
-  dockerFauxTokenConfigured,
-  configuredProvider,
   providerId,
   providers,
   nodes,
-  onSelectProvider,
-  apiToken,
-  setApiToken,
-  onSaveToken,
-  onSaveDockerFauxToken,
-  onValidateToken,
-  onValidateDockerReadiness,
+  providerAccessState,
+  onSaveKey,
+  onRevalidate,
   onSuspendProvider,
   onResumeProvider,
   onDeleteProvider,
+  tunnelSettings,
+  onSaveTunnelSettings,
+  tunnelConnected,
+  onReconnect,
+  readiness,
   busyAction,
-  onNavigateToView,
 }: {
   dockerDevEnabled: boolean;
-  dockerFauxToken: string;
-  setDockerFauxToken: (value: string) => void;
-  dockerFauxTokenConfigured: boolean;
-  configuredProvider: ProviderRecord | null;
   providerId: string;
   providers: ProviderRecord[];
   nodes: VpnNodeRecord[];
-  onSelectProvider: (providerId: string) => void;
-  apiToken: string;
-  setApiToken: (value: string) => void;
-  onSaveToken: () => Promise<void>;
-  onSaveDockerFauxToken: () => Promise<void>;
-  onValidateToken: () => Promise<void>;
-  onValidateDockerReadiness: () => Promise<void>;
+  providerAccessState: ProviderAccess;
+  onSaveKey: (providerId: string, key: string) => Promise<boolean>;
+  onRevalidate: (provider: ProviderRecord) => Promise<void>;
   onSuspendProvider: (provider: ProviderRecord) => Promise<void>;
   onResumeProvider: (provider: ProviderRecord) => Promise<void>;
   onDeleteProvider: (provider: ProviderRecord) => Promise<void>;
+  tunnelSettings: TunnelSettings | null;
+  onSaveTunnelSettings: (settings: TunnelSettings) => Promise<boolean>;
+  tunnelConnected: boolean;
+  onReconnect: (() => Promise<void>) | null;
+  readiness: WireGuardReadiness | null;
   busyAction: DashboardBusyAction;
-  onNavigateToView: (view: AppView) => void;
 }) {
-  const [tokenModalProviderId, setTokenModalProviderId] = useState<string>(providerId);
-  const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
+  const [keyModalProviderId, setKeyModalProviderId] = useState<string | null>(null);
+  const [openMenuProviderId, setOpenMenuProviderId] = useState<string | null>(null);
 
-  const selectedProvider = useMemo(() => {
-    return providers.find((provider) => provider.id === tokenModalProviderId)
-      ?? providers.find((provider) => provider.id === providerId)
-      ?? configuredProvider
-      ?? providers[0]
-      ?? null;
-  }, [configuredProvider, providerId, providers, tokenModalProviderId]);
+  // Docker's credential is a local dev stand-in; without the flag there is nothing to configure,
+  // and offering the row led to a Save button that silently did nothing.
+  const visibleProviders = useMemo(
+    () => providers.filter((provider) => provider.slug !== "docker" || dockerDevEnabled),
+    [dockerDevEnabled, providers],
+  );
 
-  const isDockerProviderModal = selectedProvider?.slug === "docker";
-  const modalPlaceholder = isDockerProviderModal ? "dev-docker-token" : "dop_v1_...";
-  const modalHint = isDockerProviderModal
-    ? "Local-only token used for Docker development emulation."
-    : "Token is encrypted at rest and stored as a write-only reference.";
-  const modalTokenValue = isDockerProviderModal ? dockerFauxToken : apiToken;
-
-  function providerStatusBadge(provider: ProviderRecord, tokenConfigured: boolean): { label: string; classes: string } {
-    if (!tokenConfigured) {
-      return {
-        label: "Missing key",
-        classes: "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]",
-      };
-    }
-
-    if (provider.status === "suspended") {
-      return {
-        label: "Suspended",
-        classes: "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]",
-      };
-    }
-
-    return {
-      label: "Active",
-      classes: "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]",
-    };
-  }
-
-  function openTokenModal() {
-    setTokenModalProviderId(providerId);
-    setIsTokenModalOpen(true);
-  }
-
-  function closeTokenModal() {
-    setIsTokenModalOpen(false);
-  }
-
-  function changeModalProvider(nextProviderId: string) {
-    setTokenModalProviderId(nextProviderId);
-    onSelectProvider(nextProviderId);
-  }
-
-  async function handleSaveFromModal() {
-    if (isDockerProviderModal) {
-      await onSaveDockerFauxToken();
-      return;
-    }
-    await onSaveToken();
-  }
-
-  async function handleValidateFromModal() {
-    if (isDockerProviderModal) {
-      await onValidateDockerReadiness();
-      return;
-    }
-    await onValidateToken();
-  }
-
-  const providerRows = useMemo(() => {
-    return providers.map((provider) => {
-      const attachedNodeCount = nodes.filter((node) => node.provider_id === provider.id).length;
-      const tokenConfigured = provider.slug === "docker"
-        ? (dockerFauxTokenConfigured || !!provider.token_ref)
-        : !!provider.token_ref;
-
-      const deleteDisabledReason = attachedNodeCount > 0
-        ? `Delete is blocked until ${attachedNodeCount} attached node${attachedNodeCount === 1 ? " is" : "s are"} destroyed.`
-        : null;
-
-      return {
-        provider,
-        attachedNodeCount,
-        tokenConfigured,
-        deleteDisabledReason,
-        tokenReference: provider.slug === "docker"
-          ? (provider.token_ref ?? (dockerFauxTokenConfigured ? "dev-token-configured" : null))
-          : provider.token_ref,
-      };
-    });
-  }, [providers, dockerFauxTokenConfigured, nodes]);
+  const modalProvider = providers.find((provider) => provider.id === keyModalProviderId) ?? null;
 
   return (
     <PageChrome>
-      <div className="mx-auto w-full max-w-6xl space-y-5">
-        <div className="text-xs text-[var(--on-surface-variant)]">
-          <span className="inline-flex items-center gap-2"><AppIcon name="settings" className="h-4 w-4" />Settings</span>
-          <span className="mx-2">›</span>
-          <span>Provider Integration</span>
-        </div>
-        <Card
-          title="Provider API Keys"
-          description="This page exists to collect API keys. Choose provider, paste key, save, then validate."
-          action={<Button onClick={openTokenModal} disabled={busyAction !== null || providers.length === 0}>Open Key Entry Modal</Button>}
-        >
-          <div className="space-y-4">
-            <div className="rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-              <div className="mb-3 text-sm font-medium text-[var(--on-surface)]">Installed API keys by provider</div>
-              <div className="overflow-hidden rounded-xl border border-[color:var(--outline-variant)]">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]">
-                      <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Provider</th>
-                      <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">API Key</th>
-                      <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Status</th>
-                      <th className="px-4 py-3 text-left font-medium text-[var(--on-surface-variant)]">Attached Nodes</th>
-                      <th className="px-4 py-3 text-right font-medium text-[var(--on-surface-variant)]">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {providerRows.map(({ provider, attachedNodeCount, tokenConfigured, deleteDisabledReason, tokenReference }) => {
-                      const statusBadge = providerStatusBadge(provider, tokenConfigured);
-                      return (
-                        <tr key={provider.id} className="border-b border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.01)] last:border-b-0">
-                          <td className="px-4 py-3">
-                            <div className="font-medium text-[var(--on-surface)]">{provider.name}</div>
-                            <div className="mt-1 font-mono text-[12px] text-[var(--on-surface-variant)]">{provider.slug}</div>
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${tokenConfigured ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>{tokenConfigured ? "Installed" : "Missing"}</span>
-                            <div className="mt-1 text-xs text-[var(--on-surface-variant)]">{maskTokenReference(tokenReference)}</div>
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${statusBadge.classes}`}>{statusBadge.label}</span>
-                          </td>
-                          <td className="px-4 py-3 text-[var(--on-surface)]">
-                            <span className={`inline-flex min-w-9 items-center justify-center rounded-full border px-2.5 py-1 text-xs ${attachedNodeCount > 0 ? "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface-variant)]"}`}>{attachedNodeCount}</span>
-                            <div className="mt-1 text-xs text-[var(--on-surface-variant)]">{attachedNodeCount > 0 ? "Destroy nodes first" : "No dependencies"}</div>
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            <div className="inline-flex flex-wrap items-center justify-end gap-2">
-                              <Button
-                                tone="secondary"
-                                onClick={() => {
-                                  setTokenModalProviderId(provider.id);
-                                  onSelectProvider(provider.id);
-                                  setIsTokenModalOpen(true);
-                                }}
-                                disabled={busyAction !== null}
-                              >
-                                {tokenConfigured ? "Edit Key" : "Add Key"}
-                              </Button>
-                              <Button
-                                tone="secondary"
-                                onClick={() => {
-                                  if (provider.status === "suspended") {
-                                    if (window.confirm(`Resume ${provider.name}? Provisioning operations for this provider will be allowed again.`)) {
-                                      void onResumeProvider(provider);
-                                    }
-                                    return;
-                                  }
+      <Card
+        title="Providers"
+        description="Cloud accounts this app can provision servers on. Keys stay on this device."
+        action={
+          <Button
+            onClick={() => setKeyModalProviderId(visibleProviders[0]?.id ?? null)}
+            disabled={busyAction !== null || visibleProviders.length === 0}
+          >
+            Add API key
+          </Button>
+        }
+      >
+        <div className="overflow-visible">
+          <table className="min-w-full text-left text-sm">
+            <thead className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">
+              <tr>
+                <th className="px-4 py-3">Provider</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Servers</th>
+                <th className="px-4 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleProviders.map((provider) => {
+                const hasKey = !!provider.token_ref;
+                const attachedNodeCount = countAttachedNodes(nodes, provider.id);
+                const status = deriveProviderKeyStatus({
+                  provider,
+                  hasKey,
+                  isSelected: provider.id === providerId,
+                  providerAccess: providerAccessState,
+                });
+                const busy = busyAction !== null;
+                const actions = buildRowActions({ provider, hasKey, attachedNodeCount, busy });
 
-                                  if (window.confirm(`Suspend ${provider.name}? Provisioning operations for this provider will be blocked until resumed.`)) {
-                                    void onSuspendProvider(provider);
-                                  }
-                                }}
-                                disabled={busyAction !== null}
-                              >
-                                {busyAction === "suspend-provider"
-                                  ? "Suspending"
-                                  : busyAction === "resume-provider"
-                                    ? "Resuming"
-                                    : provider.status === "suspended"
-                                      ? "Resume"
-                                      : "Suspend"}
-                              </Button>
-                              <Button
-                                tone="danger"
-                                onClick={() => {
-                                  if (window.confirm(`Delete ${provider.name} key? This removes its local credential and resets provider access on this device.`)) {
-                                    void onDeleteProvider(provider);
-                                  }
-                                }}
-                                disabled={busyAction !== null || !!deleteDisabledReason}
-                              >
-                                {busyAction === "delete-provider" ? "Deleting" : "Delete"}
-                              </Button>
-                            </div>
-                            <div className="mt-2 text-xs text-[var(--on-surface-variant)]">{deleteDisabledReason ?? "Delete removes the local credential but keeps this provider available."}</div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <p className="mt-3 text-xs text-[var(--on-surface-variant)]">
-                Suspending blocks provider operations. Deleting removes the stored credential for that provider while keeping the integration row available.
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center justify-end">
-            <Button tone="secondary" onClick={() => onNavigateToView("dashboard")}>Back to Dashboard</Button>
-          </div>
+                return (
+                  <tr key={provider.id} className="border-t border-[color:var(--outline-variant)]">
+                    <td className="px-4 py-4 align-middle">
+                      <div className="font-medium text-[var(--on-surface)]">{provider.name}</div>
+                      {/* Says a key exists without printing a masked reference that looks like part
+                          of the secret but is only an opaque handle. */}
+                      <div className="mt-0.5 text-xs text-[var(--on-surface-variant)]">
+                        {hasKey ? "Key stored on this device" : "No key stored"}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 align-middle">
+                      <span className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${STATUS_CLASSES[status]}`}>
+                        {PROVIDER_KEY_STATUS_LABEL[status]}
+                      </span>
+                    </td>
+                    <td className="px-4 py-4 align-middle text-[var(--on-surface)]">{attachedNodeCount}</td>
+                    <td className="px-4 py-4 align-middle">
+                      <div className="flex items-center justify-end gap-2">
+                        <Button
+                          tone="secondary"
+                          onClick={() => void onRevalidate(provider)}
+                          disabled={busy || !hasKey}
+                          className="px-3 py-2 text-xs"
+                        >
+                          {busyAction === "validate-token" ? "Checking" : "Re-check"}
+                        </Button>
+                        <RowMenu
+                          open={openMenuProviderId === provider.id}
+                          onToggle={() => setOpenMenuProviderId((current) => (current === provider.id ? null : provider.id))}
+                          onClose={() => setOpenMenuProviderId(null)}
+                          label={`Actions for ${provider.name}`}
+                          actions={actions}
+                          onSelect={(id) => {
+                            setOpenMenuProviderId(null);
+                            if (id === "edit") setKeyModalProviderId(provider.id);
+                            if (id === "suspend") {
+                              void (provider.status === "suspended" ? onResumeProvider(provider) : onSuspendProvider(provider));
+                            }
+                            if (id === "delete") void onDeleteProvider(provider);
+                          }}
+                        />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {tunnelSettings ? (
+        <WireGuardSettingsCard
+          settings={tunnelSettings}
+          onSave={onSaveTunnelSettings}
+          tunnelConnected={tunnelConnected}
+          onReconnect={onReconnect}
+          busyAction={busyAction}
+        />
+      ) : (
+        <Card title="WireGuard" description="Loading tunnel settings…">
+          <div className="h-16" />
         </Card>
+      )}
 
-        <div className="text-center text-xs text-[var(--on-surface-variant)]">Tokens are encrypted at rest, used only for provider API calls from this device, and never transmitted to GoatStare services.</div>
-      </div>
-
-      {isTokenModalOpen && selectedProvider ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px]">
-          <div className="w-full max-w-4xl rounded-3xl border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(22,25,34,0.98),rgba(11,14,22,0.98))] p-7 shadow-2xl">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-xs uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">API Key Entry</p>
-                <h2 className="mt-2 text-3xl font-semibold tracking-tight text-[var(--on-surface)]">Provider Credential</h2>
-                <p className="mt-2 text-sm text-[var(--on-surface-variant)]">Pick a provider, paste key, save, and validate.</p>
-              </div>
-              <Button tone="secondary" onClick={closeTokenModal} disabled={busyAction !== null}>Close</Button>
-            </div>
-
-            <div className="mt-7 space-y-6">
-              <Field label="Provider">
-                <select
-                  value={selectedProvider.id}
-                  onChange={(event) => changeModalProvider(event.target.value)}
-                  className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.95)] px-3 py-3 text-[var(--on-surface)] outline-none ring-0 focus:border-[color:rgba(171,199,255,0.45)]"
-                >
-                  {providers.map((provider) => (
-                    <option key={provider.id} value={provider.id}>
-                      {provider.name} ({provider.slug})
-                    </option>
-                  ))}
-                </select>
-              </Field>
-
-              <Field label={isDockerProviderModal ? "Docker Key" : "API Key"} hint={modalHint}>
-                <textarea
-                  value={modalTokenValue}
-                  onChange={(event) => {
-                    if (isDockerProviderModal) {
-                      setDockerFauxToken(event.target.value);
-                    } else {
-                      setApiToken(event.target.value);
-                    }
-                  }}
-                  placeholder={modalPlaceholder}
-                  rows={8}
-                  className="w-full resize-y rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.95)] px-4 py-4 font-mono text-base text-[var(--on-surface)] outline-none ring-0 placeholder:text-[var(--on-surface-variant)]/50 focus:border-[color:rgba(171,199,255,0.55)]"
-                />
-              </Field>
-
-              <div className="flex flex-wrap items-center justify-end gap-2">
-                <Button tone="secondary" onClick={closeTokenModal} disabled={busyAction !== null}>Cancel</Button>
-                <Button
-                  tone="secondary"
-                  onClick={() => void handleSaveFromModal()}
-                  disabled={busyAction !== null || !modalTokenValue.trim()}
-                >
-                  {busyAction === "save-token" || busyAction === "save-docker-token" ? "Saving" : "Save Token"}
-                </Button>
-                <Button
-                  onClick={() => void handleValidateFromModal()}
-                  disabled={busyAction !== null || (isDockerProviderModal ? !dockerFauxTokenConfigured : !(selectedProvider.token_ref || modalTokenValue.trim()))}
-                >
-                  {busyAction === "validate-token" || busyAction === "validate-docker" ? "Validating" : "Validate Key"} <span aria-hidden="true">→</span>
-                </Button>
-              </div>
-
-              {dockerDevEnabled && isDockerProviderModal ? (
-                <p className="text-xs text-[var(--on-surface-variant)]">
-                  Docker provider uses a local development key path and can be validated with the same modal flow.
-                </p>
-              ) : null}
-            </div>
+      <Card title="About" description="Versions of the app and the WireGuard runtime it drives.">
+        <dl className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3">
+            <dt className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">GoatStare VPN</dt>
+            <dd className="mt-1 font-mono text-sm text-[var(--on-surface)]">{readiness?.app_version ?? "unknown"}</dd>
           </div>
-        </div>
+          <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3">
+            <dt className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">WireGuard</dt>
+            <dd className="mt-1 font-mono text-sm text-[var(--on-surface)]">{readiness?.version ?? "not detected"}</dd>
+          </div>
+        </dl>
+        {/* Names where the credential actually lives, which is the fact that lets someone go and
+            revoke it. "Encrypted at rest" was true only by delegation and only on Windows. */}
+        <p className="mt-4 text-xs leading-5 text-[var(--on-surface-variant)]">
+          API keys are held in Windows Credential Manager under <span className="font-mono">com.goatstare.vpn.phase1</span>,
+          never in this app&apos;s database. They are used only for calls to your provider from this
+          device, and are stripped from diagnostics exports.
+        </p>
+      </Card>
+
+      {modalProvider ? (
+        <KeyModal
+          provider={modalProvider}
+          providers={visibleProviders}
+          onChangeProvider={setKeyModalProviderId}
+          onClose={() => setKeyModalProviderId(null)}
+          onSave={onSaveKey}
+          busyAction={busyAction}
+        />
       ) : null}
     </PageChrome>
+  );
+}
+
+function RowMenu({
+  open,
+  onToggle,
+  onClose,
+  label,
+  actions,
+  onSelect,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  label: string;
+  actions: ReturnType<typeof buildRowActions>;
+  onSelect: (id: "edit" | "suspend" | "delete") => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const closeOnOutside = (event: MouseEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) {
+        onClose();
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+
+    document.addEventListener("mousedown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [onClose, open]);
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        type="button"
+        aria-label={label}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        onClick={onToggle}
+        className="rounded-lg px-2 py-2 text-[var(--on-surface-variant)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)] hover:text-[var(--on-surface)]"
+      >
+        <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true"><path d="M6 12h.01M12 12h.01M18 12h.01" className="fill-none stroke-current stroke-[2.5]" strokeLinecap="round" /></svg>
+      </button>
+      {open ? (
+        <div role="menu" className="absolute right-0 top-full z-20 mt-1 w-[260px] overflow-hidden rounded-xl border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(26,30,38,0.99),rgba(16,19,27,0.99))] py-1 shadow-[0_20px_60px_rgba(0,0,0,0.45)]">
+          {actions.map((action) => (
+            <button
+              key={action.id}
+              type="button"
+              role="menuitem"
+              disabled={action.disabled}
+              // The reason lives here rather than as a permanent line of prose in every row.
+              title={action.disabledReason ?? undefined}
+              onClick={() => onSelect(action.id)}
+              className={`block w-full px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${action.danger ? "text-[#ff9b9b] hover:bg-[color:rgba(255,155,155,0.08)]" : "text-[var(--on-surface)] hover:bg-[color:rgba(255,255,255,0.06)]"}`}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function WireGuardSettingsCard({
+  settings,
+  onSave,
+  tunnelConnected,
+  onReconnect,
+  busyAction,
+}: {
+  settings: TunnelSettings;
+  onSave: (settings: TunnelSettings) => Promise<boolean>;
+  tunnelConnected: boolean;
+  onReconnect: (() => Promise<void>) | null;
+  busyAction: DashboardBusyAction;
+}) {
+  // Initialised from the loaded settings on mount. The card is only rendered once they exist, so
+  // there is no empty-then-populate step to synchronise, and a later refresh cannot overwrite
+  // whatever the user is midway through typing.
+  const [dns, setDns] = useState(settings.dns_server ?? "");
+  const [keepalive, setKeepalive] = useState(String(settings.keepalive_seconds));
+  const [dirty, setDirty] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const dnsValidation = validateDnsServer(dns);
+  const keepaliveValidation = validateKeepalive(keepalive);
+  const canSave = dnsValidation.valid && keepaliveValidation.valid && dirty && busyAction === null;
+
+  return (
+    <Card
+      title="WireGuard"
+      description="Applied the next time a tunnel starts. A running tunnel keeps the settings it started with."
+    >
+      <div className="grid gap-4 md:grid-cols-2">
+        <Field label="DNS server">
+          <input
+            value={dns}
+            onChange={(event) => { setDns(event.target.value); setDirty(true); setSaved(false); }}
+            placeholder="1.1.1.1"
+            spellCheck={false}
+            className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 font-mono text-[var(--on-surface)] outline-none"
+          />
+          <p className={`mt-1 text-xs ${dnsValidation.valid ? "text-[var(--on-surface-variant)]" : "text-[#ff9b9b]"}`}>
+            {dnsValidation.valid
+              ? (dns.trim() === "" ? "Empty uses your system DNS, which can leak lookups outside the tunnel." : "Resolver used while connected.")
+              : dnsValidation.message}
+          </p>
+        </Field>
+
+        <Field label="Persistent keepalive (seconds)">
+          <input
+            value={keepalive}
+            onChange={(event) => { setKeepalive(event.target.value); setDirty(true); setSaved(false); }}
+            inputMode="numeric"
+            placeholder="25"
+            className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 font-mono text-[var(--on-surface)] outline-none"
+          />
+          <p className={`mt-1 text-xs ${keepaliveValidation.valid ? "text-[var(--on-surface-variant)]" : "text-[#ff9b9b]"}`}>
+            {keepaliveValidation.valid ? describeKeepalive(Number(keepalive || 0)) : keepaliveValidation.message}
+          </p>
+        </Field>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+        {saved && tunnelConnected && onReconnect ? (
+          <>
+            <span className="mr-auto text-xs text-[var(--tertiary)]">Reconnect for these to take effect.</span>
+            <Button tone="secondary" onClick={() => void onReconnect()} disabled={busyAction !== null}>
+              {busyAction === "connect-tunnel" ? "Reconnecting" : "Reconnect now"}
+            </Button>
+          </>
+        ) : null}
+        <Button
+          onClick={() => {
+            void (async () => {
+              const stored = await onSave({
+                dns_server: dns.trim() === "" ? null : dns.trim(),
+                keepalive_seconds: Number(keepalive),
+              });
+              if (stored) {
+                setDirty(false);
+                setSaved(true);
+              }
+            })();
+          }}
+          disabled={!canSave}
+        >
+          {busyAction === "save-tunnel-settings" ? "Saving" : "Save changes"}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+function KeyModal({
+  provider,
+  providers,
+  onChangeProvider,
+  onClose,
+  onSave,
+  busyAction,
+}: {
+  provider: ProviderRecord;
+  providers: ProviderRecord[];
+  onChangeProvider: (providerId: string) => void;
+  onClose: () => void;
+  onSave: (providerId: string, key: string) => Promise<boolean>;
+  busyAction: DashboardBusyAction;
+}) {
+  const [key, setKey] = useState("");
+  const [reveal, setReveal] = useState(false);
+  const isDocker = provider.slug === "docker";
+  const busy = busyAction !== null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]" onClick={onClose} aria-hidden="true">
+      <div
+        className="w-full max-w-[520px] rounded-[24px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(24,28,36,0.99),rgba(13,16,23,0.99))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.45)]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h2 className="text-xl font-semibold tracking-tight text-[var(--on-surface)]">
+          {provider.token_ref ? `Replace ${provider.name} key` : `Add ${provider.name} key`}
+        </h2>
+        <p className="mt-1 text-sm text-[var(--on-surface-variant)]">
+          Saved to Windows Credential Manager and checked against the provider straight away.
+        </p>
+
+        <div className="mt-5 space-y-4">
+          {providers.length > 1 ? (
+            <Field label="Provider">
+              {/* Changing this must not touch the app-wide selected provider: browsing the list
+                  used to reassign it, and Cancel did not put it back. */}
+              <select
+                value={provider.id}
+                onChange={(event) => onChangeProvider(event.target.value)}
+                disabled={busy}
+                className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none"
+              >
+                {providers.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
+              </select>
+            </Field>
+          ) : null}
+
+          <Field label="API key">
+            <div className="flex gap-2">
+              <input
+                // A key is one line and should not sit on screen in plaintext; this was a
+                // full-height textarea.
+                type={reveal ? "text" : "password"}
+                value={key}
+                onChange={(event) => setKey(event.target.value)}
+                placeholder={isDocker ? "dkr_v1_..." : "dop_v1_..."}
+                autoComplete="off"
+                spellCheck={false}
+                disabled={busy}
+                className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 font-mono text-[var(--on-surface)] outline-none"
+              />
+              <Button tone="secondary" onClick={() => setReveal((current) => !current)} className="px-3 py-2 text-xs">
+                {reveal ? "Hide" : "Show"}
+              </Button>
+            </div>
+            <p className="mt-1 text-xs text-[var(--on-surface-variant)]">
+              {isDocker
+                ? "Local-only placeholder for the Docker development provider."
+                : "Needs read and write access to Droplets."}
+            </p>
+          </Field>
+        </div>
+
+        <div className="mt-6 flex items-center justify-end gap-2">
+          <Button tone="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button
+            onClick={() => {
+              void (async () => {
+                const stored = await onSave(provider.id, key.trim());
+                // Only clear on a save that actually stored something — a failed save used to wipe
+                // what was typed.
+                if (stored) onClose();
+              })();
+            }}
+            disabled={busy || !key.trim()}
+          >
+            {busyAction === "save-token" ? "Saving" : busyAction === "validate-token" ? "Checking" : "Save & validate"}
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }

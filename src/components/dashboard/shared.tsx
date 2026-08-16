@@ -16,7 +16,9 @@ export type ToastKind = "info" | "success" | "warning" | "error";
 export type AppView = "dashboard" | "nodes" | "health" | "diagnostics" | "settings";
 export type DashboardBusyAction =
   | "refresh"
-  | "save-wireguard-mode"
+  // Replaces "save-wireguard-mode", left behind when the admin/user connection-mode toggle was
+  // removed in migration 0014 and referenced by nothing since.
+  | "save-tunnel-settings"
   | "save-token"
   | "save-docker-token"
   | "validate-token"
@@ -243,12 +245,6 @@ export function providerAccessBadge(state: ProviderAccessState): { label: string
     return { label: "Missing", classes: "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]" };
   }
   return { label: "Unknown", classes: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface-variant)]" };
-}
-
-export function maskTokenReference(value: string | null | undefined): string {
-  if (!value) return "Not configured";
-  if (value.length <= 12) return value;
-  return `${value.slice(0, 8)}...${value.slice(-4)}`;
 }
 
 export function AppIcon({ name, className = "h-4 w-4" }: { name: string; className?: string }) {

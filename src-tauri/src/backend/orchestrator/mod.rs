@@ -65,6 +65,12 @@ struct ExternalIpSnapshot {
 const DEFAULT_TUNNEL_BASENAME: &str = "primary";
 /// `app_settings` key holding the node the app connects to by default.
 const CURRENT_NODE_SETTING_KEY: &str = "current_node_id";
+/// `app_settings` key holding the DNS server written into generated tunnel configs.
+const DNS_SERVER_SETTING_KEY: &str = "wireguard_dns_server";
+/// `app_settings` key holding the `PersistentKeepalive` interval, in seconds.
+const KEEPALIVE_SETTING_KEY: &str = "wireguard_keepalive_seconds";
+/// Cloudflare's resolver: what every tunnel used when this was hardcoded in the frontend.
+const DEFAULT_DNS_SERVER: &str = "1.1.1.1";
 const EXTERNAL_IP_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Health polls every few seconds; probing that often would hammer a third-party service for a
 /// value that rarely changes. A connection state change bypasses this entirely.
@@ -157,6 +163,7 @@ pub struct ReconcileReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum UserFacingErrorKind {
   InvalidState,
+  InvalidInput,
   MissingResource,
   Provider,
   WireGuard,
@@ -228,6 +235,27 @@ pub struct KillSwitchState {
   pub routes: Vec<String>,
 }
 
+/// Client tunnel parameters the user can change, resolved from `app_settings`.
+///
+/// These are rendered into the `.conf` on every connect, so a change takes effect the next time a
+/// tunnel starts — a running tunnel keeps whatever it was started with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TunnelSettings {
+  /// `None` means no `DNS` line at all, which leaves the system resolver in place.
+  pub dns_server: Option<String>,
+  /// `0` disables keepalive.
+  pub keepalive_seconds: u16,
+}
+
+impl Default for TunnelSettings {
+  fn default() -> Self {
+    Self {
+      dns_server: Some(DEFAULT_DNS_SERVER.to_string()),
+      keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+    }
+  }
+}
+
 /// A tunnel that stopped without the app asking it to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UnexpectedDrop {
@@ -271,6 +299,10 @@ pub enum OrchestratorError {
   },
   #[error("Node create flow cannot proceed for node '{node_id}': {detail}")]
   InvalidState { node_id: String, detail: String },
+  /// A value the user supplied cannot be used. Distinct from `InvalidState`, which is about the
+  /// app's own state rather than something the user typed.
+  #[error("{detail}")]
+  InvalidInput { detail: String },
   #[error("WireGuard operation failed: {detail}")]
   WireGuard {
     detail: String,
@@ -538,6 +570,61 @@ impl Orchestrator {
     db.set_setting(CURRENT_NODE_SETTING_KEY, node_id)
       .map_err(|source| OrchestratorError::Database {
         detail: "Failed persisting the current node setting.".to_string(),
+        source,
+      })
+  }
+
+  /// The tunnel parameters the user has chosen, falling back to the shipped defaults.
+  ///
+  /// A stored value that no longer parses is treated as unset rather than propagated: it would
+  /// otherwise render an invalid `.conf` and fail every connect with no way back through the UI.
+  pub fn get_tunnel_settings(&self, db: &Database) -> Result<TunnelSettings, OrchestratorError> {
+    let defaults = TunnelSettings::default();
+
+    let dns_server = match db.get_setting(DNS_SERVER_SETTING_KEY) {
+      // An explicitly stored empty string means "no DNS line", which is distinct from unset.
+      Ok(Some(value)) if value.trim().is_empty() => None,
+      Ok(Some(value)) if value.trim().parse::<IpAddr>().is_ok() => Some(value.trim().to_string()),
+      Ok(Some(_)) | Err(_) => defaults.dns_server.clone(),
+      Ok(None) => defaults.dns_server.clone(),
+    };
+
+    let keepalive_seconds = match db.get_setting(KEEPALIVE_SETTING_KEY) {
+      Ok(Some(value)) => value.trim().parse::<u16>().unwrap_or(defaults.keepalive_seconds),
+      _ => defaults.keepalive_seconds,
+    };
+
+    Ok(TunnelSettings { dns_server, keepalive_seconds })
+  }
+
+  /// Validates before storing, so an unusable value can never reach config generation.
+  pub fn set_tunnel_settings(
+    &self,
+    db: &Database,
+    settings: &TunnelSettings,
+  ) -> Result<(), OrchestratorError> {
+    let dns_value = match settings.dns_server.as_ref().map(|value| value.trim().to_string()) {
+      Some(value) if value.is_empty() => String::new(),
+      Some(value) => {
+        if value.parse::<IpAddr>().is_err() {
+          return Err(OrchestratorError::InvalidInput {
+            detail: format!("'{value}' is not a valid IP address for a DNS server."),
+          });
+        }
+        value
+      }
+      None => String::new(),
+    };
+
+    db.set_setting(DNS_SERVER_SETTING_KEY, Some(&dns_value))
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed persisting the DNS server setting.".to_string(),
+        source,
+      })?;
+
+    db.set_setting(KEEPALIVE_SETTING_KEY, Some(&settings.keepalive_seconds.to_string()))
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed persisting the keepalive setting.".to_string(),
         source,
       })
   }
@@ -1505,8 +1592,9 @@ impl Orchestrator {
         detail: "Connect flow requires an existing provider for the VPN node.".to_string(),
       })?;
 
+    let tunnel_settings = self.get_tunnel_settings(db)?;
     let connect_config =
-      load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, &tunnel)?;
+      load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, &tunnel, &tunnel_settings)?;
 
     // Always capture the latest connect config in diagnostics, even when connect is idempotent.
     wireguard.record_connect_trace_snapshot(&canonical_tunnel_name, &connect_config);
@@ -1845,7 +1933,8 @@ impl Orchestrator {
 
     if let Some(tunnel) = selected_tunnel.as_ref() {      if let Ok(provider) = db.get_provider(&node.provider_id) {
         if let Some(provider) = provider {
-          if let Ok(config) = load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, tunnel) {
+          let tunnel_settings = self.get_tunnel_settings(db).unwrap_or_default();
+          if let Ok(config) = load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, tunnel, &tunnel_settings) {
             // Populate diagnostics trace even when only health polling occurs.
             wireguard.record_connect_trace_snapshot(&tunnel.name, &config);
           } else {
@@ -2435,6 +2524,7 @@ fn load_connect_config_for_tunnel(
   _provider_slug: &str,
   node: &crate::backend::db::VpnNodeRecord,
   tunnel: &crate::backend::db::TunnelRecord,
+  settings: &TunnelSettings,
 ) -> Result<String, OrchestratorError> {
   let server_public_key = node
     .server_public_key
@@ -2482,14 +2572,16 @@ fn load_connect_config_for_tunnel(
   let config = ClientConfigParams {
     private_key,
     client_address_cidr,
-    dns_server: tunnel.dns_server.clone(),
+    // From settings, not the tunnel row. The row records what the last connect used, which keeps
+    // diagnostics accurate, but a single source of truth decides what the next one will use.
+    dns_server: settings.dns_server.clone(),
     server_public_key,
     server_endpoint_ip: endpoint_ip,
     // Reported by the provider adapter at provision time. Falls back to the default only for
     // nodes created before per-node ports existed.
     server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
     allowed_ips,
-    persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+    persistent_keepalive_seconds: settings.keepalive_seconds,
   };
 
   crate::backend::wireguard::build_client_config(&config)
@@ -3816,6 +3908,101 @@ mod tests {
     assert_eq!(geo.city, None, "an unrecognised slug must not be given an invented city");
   }
 
+  fn settings_db(label: &str) -> Database {
+    let db = Database::new(test_db_path(label));
+    db.run_migrations().expect("migrations should succeed");
+    db
+  }
+
+  #[test]
+  fn tunnel_settings_fall_back_to_the_shipped_defaults_when_unset() {
+    let db = settings_db("settings_defaults");
+
+    let settings = Orchestrator::new().get_tunnel_settings(&db).expect("read should succeed");
+    assert_eq!(settings.dns_server.as_deref(), Some("1.1.1.1"));
+    assert_eq!(settings.keepalive_seconds, 25);
+  }
+
+  #[test]
+  fn tunnel_settings_round_trip() {
+    let db = settings_db("settings_roundtrip");
+    let orchestrator = Orchestrator::new();
+
+    orchestrator
+      .set_tunnel_settings(&db, &TunnelSettings {
+        dns_server: Some("9.9.9.9".to_string()),
+        keepalive_seconds: 15,
+      })
+      .expect("write should succeed");
+
+    let settings = orchestrator.get_tunnel_settings(&db).expect("read should succeed");
+    assert_eq!(settings.dns_server.as_deref(), Some("9.9.9.9"));
+    assert_eq!(settings.keepalive_seconds, 15);
+  }
+
+  /// An invalid DNS value would render a `.conf` WireGuard rejects, failing every subsequent
+  /// connect — so it is refused at the boundary rather than stored.
+  #[test]
+  fn setting_a_dns_server_that_is_not_an_ip_is_rejected() {
+    let db = settings_db("settings_bad_dns");
+    let orchestrator = Orchestrator::new();
+
+    let error = orchestrator
+      .set_tunnel_settings(&db, &TunnelSettings {
+        dns_server: Some("not-an-ip".to_string()),
+        keepalive_seconds: 25,
+      })
+      .expect_err("a non-IP DNS server must be rejected");
+
+    assert!(matches!(error, OrchestratorError::InvalidInput { .. }));
+    assert_eq!(
+      db.get_setting("wireguard_dns_server").expect("read"),
+      None,
+      "a rejected value must not be persisted"
+    );
+  }
+
+  /// Clearing DNS is meaningful — it leaves the system resolver in place — so an empty value is
+  /// stored as "no DNS line" rather than falling back to the default.
+  #[test]
+  fn an_empty_dns_setting_means_no_dns_line_rather_than_the_default() {
+    let db = settings_db("settings_empty_dns");
+    let orchestrator = Orchestrator::new();
+
+    orchestrator
+      .set_tunnel_settings(&db, &TunnelSettings { dns_server: None, keepalive_seconds: 25 })
+      .expect("write should succeed");
+
+    assert_eq!(orchestrator.get_tunnel_settings(&db).expect("read").dns_server, None);
+  }
+
+  /// A value that no longer parses must not brick connect: it is treated as unset.
+  #[test]
+  fn a_corrupt_stored_setting_falls_back_instead_of_breaking_connect() {
+    let db = settings_db("settings_corrupt");
+    db.set_setting("wireguard_dns_server", Some("garbage")).expect("write");
+    db.set_setting("wireguard_keepalive_seconds", Some("not-a-number")).expect("write");
+
+    let settings = Orchestrator::new().get_tunnel_settings(&db).expect("read should succeed");
+    assert_eq!(settings.dns_server.as_deref(), Some("1.1.1.1"));
+    assert_eq!(settings.keepalive_seconds, 25);
+  }
+
+  #[test]
+  fn keepalive_of_zero_is_stored_and_returned() {
+    let db = settings_db("settings_keepalive_zero");
+    let orchestrator = Orchestrator::new();
+
+    orchestrator
+      .set_tunnel_settings(&db, &TunnelSettings {
+        dns_server: Some("1.1.1.1".to_string()),
+        keepalive_seconds: 0,
+      })
+      .expect("write should succeed");
+
+    assert_eq!(orchestrator.get_tunnel_settings(&db).expect("read").keepalive_seconds, 0);
+  }
+
   /// The production case: default routes on a public endpoint, so WireGuard installs its filters.
   #[test]
   fn kill_switch_is_active_for_default_routes_on_a_running_tunnel() {
@@ -4656,7 +4843,7 @@ mod tests {
         return Err("tunnel key must match the peer baked into the server".to_string());
       }
 
-      load_connect_config_for_tunnel(&secure_storage, "docker", &node, &tunnel)
+      load_connect_config_for_tunnel(&secure_storage, "docker", &node, &tunnel, &TunnelSettings::default())
         .map_err(|error| format!("connect config should render: {error:?}"))
     })();
 
@@ -4694,6 +4881,11 @@ impl OrchestratorError {
         message: detail.clone(),
         next_action:
           "Use Force Cleanup on the affected node, refresh the dashboard, then retry.".to_string(),
+      },
+      Self::InvalidInput { detail } => UserFacingError {
+        kind: UserFacingErrorKind::InvalidInput,
+        message: detail.clone(),
+        next_action: "Correct the value and try again.".to_string(),
       },
       Self::Database { detail, source } => {
         let kind = if matches!(source, DbError::NotFound { .. }) {

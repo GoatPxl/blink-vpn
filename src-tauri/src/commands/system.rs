@@ -12,7 +12,7 @@ use crate::backend::logging;
 use crate::backend::provider::{ProviderPlanPricing, ProviderRegion};
 use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
-  ForceCleanupResult, KillSwitchState, UnexpectedDrop,
+  ForceCleanupResult, KillSwitchState, TunnelSettings, UnexpectedDrop,
 };
 use crate::backend::db::{TunnelRecord, VpnNodeRecord};
 use crate::backend::secure_storage::SecureStorage;
@@ -329,6 +329,28 @@ pub fn get_current_node_id(backend: State<'_, Backend>) -> Result<Option<String>
   backend
     .orchestrator
     .get_current_node_id(&backend.db)
+    .map_err(CommandError::from)
+}
+
+/// Client tunnel parameters. Applied when a tunnel next starts; a running tunnel keeps the config
+/// it was started with.
+#[tauri::command]
+pub fn get_tunnel_settings(backend: State<'_, Backend>) -> Result<TunnelSettings, CommandError> {
+  backend
+    .orchestrator
+    .get_tunnel_settings(&backend.db)
+    .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn set_tunnel_settings(
+  dns_server: Option<String>,
+  keepalive_seconds: u16,
+  backend: State<'_, Backend>,
+) -> Result<(), CommandError> {
+  backend
+    .orchestrator
+    .set_tunnel_settings(&backend.db, &TunnelSettings { dns_server, keepalive_seconds })
     .map_err(CommandError::from)
 }
 

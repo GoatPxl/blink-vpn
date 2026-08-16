@@ -53,6 +53,10 @@ Columns:
 - `status` TEXT NOT NULL
 - `interface_name` TEXT NULL
 - `assigned_ipv4` TEXT NULL
+- `client_private_key_ref` TEXT NULL
+- `client_address_cidr` TEXT NULL
+- `dns_server` TEXT NULL
+- `allowed_ips` TEXT NULL
 - `last_error` TEXT NULL
 - `last_handshake_age_seconds` INTEGER NULL
 - `rx_bytes` INTEGER NULL
@@ -61,6 +65,11 @@ Columns:
 - `connected_at` TEXT NULL
 - `created_at` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
+
+The four columns from migration 0010 (`client_private_key_ref`, `client_address_cidr`, `dns_server`,
+`allowed_ips`) record what the last connect used. `dns_server` in particular is a **record, not an
+input**: the value written into a new config comes from `app_settings`, so there is one source of
+truth for what the next connect will do.
 
 `connected_at` is the start of the current session, stamped on a successful connect and cleared on
 every disconnect path. NULL therefore means either "not connected" or "connected, but the start is
@@ -83,6 +92,11 @@ Columns:
 
 Keys:
 
+- `wireguard_dns_server` — DNS server written into generated tunnel configs. Defaults to `1.1.1.1`
+  when unset. An explicitly stored empty string means "emit no `DNS` line", which leaves the system
+  resolver in place — distinct from unset. A stored value that no longer parses as an IP is treated
+  as unset rather than propagated, so a bad value cannot render a config that fails every connect.
+- `wireguard_keepalive_seconds` — `PersistentKeepalive` interval. Defaults to `25`; `0` disables.
 - `current_node_id` — the node the app connects to by default. Written on a successful connect and
   when the user chooses a server explicitly; cleared when that node is destroyed. Reads validate the
   id against the node list, so a dangling pointer resolves to "unset" rather than aiming connect at a
@@ -92,8 +106,10 @@ Keys:
 The table is seeded empty. It previously held `wireguard_connection_mode`, deleted by migration 0014
 along with the connection-mode toggle.
 
-Accessed through `Database::get_setting` / `set_setting`, and reached from the frontend only via the
-`get_current_node_id` / `set_current_node_id` commands — never directly.
+Accessed through `Database::get_setting` / `set_setting`, and reached from the frontend only via
+typed command pairs — `get_current_node_id` / `set_current_node_id` and `get_tunnel_settings` /
+`set_tunnel_settings` — never directly. Each setting validates in the orchestrator before it is
+stored, so an unusable value cannot reach config generation.
 
 ## Lifecycle Enums
 

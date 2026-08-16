@@ -100,6 +100,8 @@ pub fn run() {
       commands::system::list_vpn_nodes,
       commands::system::get_current_node_id,
       commands::system::set_current_node_id,
+      commands::system::get_tunnel_settings,
+      commands::system::set_tunnel_settings,
       commands::system::list_tunnels_for_node,
       commands::system::destroy_vpn_node,
       commands::system::force_cleanup_vpn_node,

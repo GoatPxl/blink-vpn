@@ -152,25 +152,24 @@ export async function readDiagnostics(page: Page): Promise<DiagnosticsBundle> {
 /** Save the dev Docker credential. Provisioning is blocked until provider access is healthy. */
 export async function saveDockerCredential(page: Page): Promise<void> {
   await page.goto(`${APP_URL}/dashboard/settings`);
-  await expect(page.getByRole("heading", { name: "Provider API Keys" })).toBeVisible({
+  await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible({
     timeout: 30_000,
   });
 
-  await page.getByRole("button", { name: "Open Key Entry Modal" }).click();
-  await expect(page.getByRole("heading", { name: "Provider Credential" })).toBeVisible({
-    timeout: 10_000,
-  });
+  await page.getByRole("button", { name: "Add API key" }).click();
 
+  // One step now: the modal saves the key and validates it against the provider, so there is no
+  // separate Validate click and no window where a key is stored but unchecked.
   await page.locator("select").first().selectOption(DOCKER_PROVIDER_ID);
-  await page.getByLabel("Docker Key").fill(DOCKER_TOKEN);
+  await page.getByLabel("API key").fill(DOCKER_TOKEN);
 
   await settleToasts(page);
-  await page.getByRole("button", { name: "Save Token" }).click();
-  await expectSuccess(page, "Docker faux token saved");
+  await page.getByRole("button", { name: "Save & validate" }).click();
+  await expectSuccess(page, "Key saved and verified");
 
-  await settleToasts(page);
-  await page.getByRole("button", { name: "Validate Key" }).click();
-  await expectSuccess(page, "Docker readiness checked");
+  // The row must report the verified key — the status column previously could not express this.
+  const dockerRow = page.getByRole("row").filter({ hasText: "Docker" });
+  await expect(dockerRow.getByText("Verified", { exact: true })).toBeVisible({ timeout: 30_000 });
 }
 
 /** Provision a node through the UI and wait for it to reach ready. */

@@ -45,6 +45,7 @@ impl From<UserFacingErrorKind> for CommandErrorKind {
   fn from(kind: UserFacingErrorKind) -> Self {
     match kind {
       UserFacingErrorKind::InvalidState => Self::InvalidState,
+      UserFacingErrorKind::InvalidInput => Self::InvalidInput,
       UserFacingErrorKind::MissingResource => Self::MissingResource,
       UserFacingErrorKind::Provider => Self::Provider,
       UserFacingErrorKind::WireGuard => Self::WireGuard,

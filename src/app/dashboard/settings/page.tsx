@@ -2,64 +2,69 @@
 
 import { SettingsView } from "@/components/dashboard/settings-view";
 import { useDashboard } from "@/components/dashboard/dashboard-provider";
-import { VIEW_ROUTE } from "@/components/dashboard/shared";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import type { ProviderAccess } from "@/lib/settings-display";
+import type { ProviderRecord } from "@/lib/tauri";
+import { useCallback } from "react";
 
 export default function DashboardSettingsPage() {
-  const router = useRouter();
-  const [apiToken, setApiToken] = useState("");
-  const [dockerFauxToken, setDockerFauxToken] = useState("");
   const {
     busyAction,
-    configuredProvider,
+    connectedTunnel,
+    connectTunnel,
     deleteProvider,
     dockerDevEnabled,
-    dockerFauxTokenConfigured,
     nodes,
+    providerAccessState,
     providerId,
     providers,
-    selectProviderId,
-    saveDockerFauxToken,
-    saveToken,
-    suspendProvider,
     resumeProvider,
-    validateDockerReadiness,
+    saveToken,
+    saveTunnelSettings,
+    selectProviderId,
+    suspendProvider,
+    tunnelConnected,
+    tunnelSettings,
     validateToken,
+    wireguardReadiness,
   } = useDashboard();
 
-  async function handleSaveToken() {
-    await saveToken(apiToken);
-    setApiToken("");
-  }
+  // The key is never held in this component: it goes straight from the modal to the backend, so
+  // there is no plaintext copy sitting in page state.
+  const handleSaveKey = useCallback(async (targetProviderId: string, key: string) => {
+    return saveToken(key, targetProviderId);
+  }, [saveToken]);
 
-  async function handleSaveDockerFauxToken() {
-    await saveDockerFauxToken(dockerFauxToken);
-    setDockerFauxToken("");
-  }
+  const handleRevalidate = useCallback(async (provider: ProviderRecord) => {
+    // Validation reads the stored credential for the selected provider, so point it at this row
+    // first — otherwise it would re-check whichever provider happened to be selected.
+    selectProviderId(provider.id);
+    await validateToken();
+  }, [selectProviderId, validateToken]);
+
+  const handleReconnect = useCallback(async () => {
+    if (connectedTunnel) {
+      await connectTunnel(connectedTunnel);
+    }
+  }, [connectTunnel, connectedTunnel]);
 
   return (
     <SettingsView
       dockerDevEnabled={dockerDevEnabled}
-      dockerFauxToken={dockerFauxToken}
-      setDockerFauxToken={setDockerFauxToken}
-      dockerFauxTokenConfigured={dockerFauxTokenConfigured}
-      configuredProvider={configuredProvider}
       providerId={providerId}
       providers={providers}
       nodes={nodes}
-      onSelectProvider={selectProviderId}
-      apiToken={apiToken}
-      setApiToken={setApiToken}
-      onSaveToken={handleSaveToken}
-      onSaveDockerFauxToken={handleSaveDockerFauxToken}
-      onValidateToken={validateToken}
-      onValidateDockerReadiness={validateDockerReadiness}
+      providerAccessState={providerAccessState as ProviderAccess}
+      onSaveKey={handleSaveKey}
+      onRevalidate={handleRevalidate}
       onSuspendProvider={suspendProvider}
       onResumeProvider={resumeProvider}
       onDeleteProvider={deleteProvider}
+      tunnelSettings={tunnelSettings}
+      onSaveTunnelSettings={saveTunnelSettings}
+      tunnelConnected={tunnelConnected}
+      onReconnect={connectedTunnel ? handleReconnect : null}
+      readiness={wireguardReadiness}
       busyAction={busyAction}
-      onNavigateToView={(view) => router.push(VIEW_ROUTE[view])}
     />
   );
 }

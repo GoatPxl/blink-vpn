@@ -376,6 +376,30 @@ export async function setCurrentNodeId(nodeId: string | null): Promise<void> {
   return invokeCommand<void>("set_current_node_id", { nodeId });
 }
 
+/**
+ * Client tunnel parameters.
+ *
+ * Rendered into the `.conf` when a tunnel next starts — a running tunnel keeps the config it was
+ * started with, so a change needs a reconnect to take effect.
+ */
+export interface TunnelSettings {
+  /** `null` means no `DNS` line at all, leaving the system resolver in place. */
+  dns_server: string | null;
+  /** `0` disables keepalive. */
+  keepalive_seconds: number;
+}
+
+export async function getTunnelSettings(): Promise<TunnelSettings> {
+  return invokeCommand<TunnelSettings>("get_tunnel_settings");
+}
+
+export async function setTunnelSettings(settings: TunnelSettings): Promise<void> {
+  return invokeCommand<void>("set_tunnel_settings", {
+    dnsServer: settings.dns_server,
+    keepaliveSeconds: settings.keepalive_seconds,
+  });
+}
+
 export async function createVpnNode(params: {
   nodeId: string;
   providerId: string;

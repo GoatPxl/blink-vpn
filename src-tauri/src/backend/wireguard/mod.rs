@@ -1670,6 +1670,43 @@ mod tests {
     }
   }
 
+  /// The settings must reach the emitted config, not just the database.
+  #[test]
+  fn client_config_carries_the_configured_dns_and_keepalive() {
+    let config = build_client_config(&ClientConfigParams {
+      private_key: "client-private".to_string(),
+      client_address_cidr: "10.66.0.2/32".to_string(),
+      dns_server: Some("9.9.9.9".to_string()),
+      server_public_key: "server-public".to_string(),
+      server_endpoint_ip: "203.0.113.10".to_string(),
+      server_listen_port: 51820,
+      allowed_ips: vec!["0.0.0.0/0".to_string()],
+      persistent_keepalive_seconds: 15,
+    })
+    .expect("config should render");
+
+    assert!(config.contains("DNS = 9.9.9.9"), "config was: {config}");
+    assert!(config.contains("PersistentKeepalive = 15"), "config was: {config}");
+  }
+
+  /// Clearing DNS must omit the line entirely — an empty `DNS = ` is not valid config.
+  #[test]
+  fn client_config_omits_the_dns_line_when_no_server_is_configured() {
+    let config = build_client_config(&ClientConfigParams {
+      private_key: "client-private".to_string(),
+      client_address_cidr: "10.66.0.2/32".to_string(),
+      dns_server: None,
+      server_public_key: "server-public".to_string(),
+      server_endpoint_ip: "203.0.113.10".to_string(),
+      server_listen_port: 51820,
+      allowed_ips: vec!["0.0.0.0/0".to_string()],
+      persistent_keepalive_seconds: 25,
+    })
+    .expect("config should render");
+
+    assert!(!config.contains("DNS"), "config was: {config}");
+  }
+
   #[test]
   fn parse_sc_state_detects_running_and_stopped() {
     let running = "STATE              : 4  RUNNING";
