@@ -48,6 +48,7 @@ export function SettingsView({
   onReconnect,
   readiness,
   busyAction,
+  reconnecting,
 }: {
   dockerDevEnabled: boolean;
   providers: ProviderRecord[];
@@ -64,6 +65,8 @@ export function SettingsView({
   onReconnect: (() => Promise<void>) | null;
   readiness: WireGuardReadiness | null;
   busyAction: DashboardBusyAction;
+  /** A reconnect started from this page is still in flight. */
+  reconnecting: boolean;
 }) {
   const [keyModalProviderId, setKeyModalProviderId] = useState<string | null>(null);
   const [openMenuProviderId, setOpenMenuProviderId] = useState<string | null>(null);
@@ -170,6 +173,7 @@ export function SettingsView({
           tunnelConnected={tunnelConnected}
           onReconnect={onReconnect}
           busyAction={busyAction}
+          reconnecting={reconnecting}
         />
       ) : (
         <Card title="WireGuard" description="Loading tunnel settings…">
@@ -294,12 +298,15 @@ function WireGuardSettingsCard({
   tunnelConnected,
   onReconnect,
   busyAction,
+  reconnecting,
 }: {
   settings: TunnelSettings;
   onSave: (settings: TunnelSettings) => Promise<boolean>;
   tunnelConnected: boolean;
   onReconnect: (() => Promise<void>) | null;
   busyAction: DashboardBusyAction;
+  /** A reconnect started here is still in flight. */
+  reconnecting: boolean;
 }) {
   // Initialised from the loaded settings on mount. The card is only rendered once they exist, so
   // there is no empty-then-populate step to synchronise, and a later refresh cannot overwrite
@@ -352,8 +359,12 @@ function WireGuardSettingsCard({
         {saved && tunnelConnected && onReconnect ? (
           <>
             <span className="mr-auto text-xs text-[var(--tertiary)]">Reconnect for these to take effect.</span>
-            <Button tone="secondary" onClick={() => void onReconnect()} disabled={busyAction !== null}>
-              {busyAction === "connect-tunnel" ? "Reconnecting" : "Reconnect now"}
+            <Button
+              tone="secondary"
+              onClick={() => void onReconnect()}
+              disabled={busyAction !== null || reconnecting}
+            >
+              {reconnecting ? "Reconnecting" : "Reconnect now"}
             </Button>
           </>
         ) : null}

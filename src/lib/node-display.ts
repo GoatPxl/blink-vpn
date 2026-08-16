@@ -16,6 +16,7 @@ import type { ProviderRegion, VpnNodeRecord } from "./tauri";
  */
 export type NodeStatus =
   | "connected"
+  | "connecting"
   | "current"
   | "ready"
   | "provisioning"
@@ -24,6 +25,7 @@ export type NodeStatus =
 
 export const NODE_STATUS_LABEL: Record<NodeStatus, string> = {
   connected: "Connected",
+  connecting: "Connecting",
   current: "Current",
   ready: "Ready",
   provisioning: "Setting up",
@@ -34,6 +36,7 @@ export const NODE_STATUS_LABEL: Record<NodeStatus, string> = {
 /** Ordering for the filter dropdown and for status-first sorting: most relevant first. */
 export const NODE_STATUS_ORDER: NodeStatus[] = [
   "connected",
+  "connecting",
   "current",
   "ready",
   "provisioning",
@@ -46,6 +49,9 @@ export const NODE_STATUS_ORDER: NodeStatus[] = [
  *
  * Precedence matters:
  * - A live tunnel wins outright — it is the only fact the user can feel.
+ * - A connect in flight comes next, and outranks `error`: it is the most recent thing the user did,
+ *   and during it their internet is down, so it is what they need explained. A stale error from a
+ *   previous attempt must not mask the attempt now running.
  * - `error` outranks the rest, because it needs action.
  * - A provider-side problem (`off`/`archive`/`deleted`) surfaces as `unavailable` even for a node
  *   the app considers ready: you cannot connect to a powered-off server, and hiding that in a
@@ -56,10 +62,13 @@ export function deriveNodeStatus(input: {
   node: VpnNodeRecord;
   isCurrent: boolean;
   isLiveConnected: boolean;
+  /** A connect this app started is still in flight for this node. */
+  isConnecting: boolean;
 }): NodeStatus {
-  const { node, isCurrent, isLiveConnected } = input;
+  const { node, isCurrent, isLiveConnected, isConnecting } = input;
 
   if (isLiveConnected) return "connected";
+  if (isConnecting) return "connecting";
 
   const lifecycle = node.lifecycle_status.toLowerCase();
   if (lifecycle === "error") return "error";
@@ -76,7 +85,12 @@ export function deriveNodeStatus(input: {
   return isCurrent ? "current" : "ready";
 }
 
-/** Whether a node in this state can be connected to at all. */
+/**
+ * Whether a node in this state can be connected to at all.
+ *
+ * `connecting` is excluded: a second connect for a tunnel already coming up raises a second UAC
+ * prompt and races the same service, which the backend now rejects outright.
+ */
 export function isConnectable(status: NodeStatus): boolean {
   return status === "current" || status === "ready";
 }

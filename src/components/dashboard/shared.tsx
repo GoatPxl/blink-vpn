@@ -23,8 +23,10 @@ export type DashboardBusyAction =
   | "resume-provider"
   | "delete-provider"
   | "create-node"
-  | "create-tunnel"
-  | "connect-tunnel"
+  // "create-tunnel" and "connect-tunnel" are deliberately absent. A connect runs for tens of
+  // seconds and leaves the user without internet, and every control in the app is disabled while
+  // this slot is set — so using it for a connect froze the whole window during the one operation
+  // the user most needs to understand. Connects are tracked by `ConnectAttempt` instead.
   | "disconnect-tunnel"
   | "destroy-node"
   | "force-cleanup"
@@ -150,14 +152,28 @@ export function formatHandshakeAge(
  * Mount it only where a clock is actually shown: the initial value is read on mount, so a
  * component rendered fresh when a session starts needs no resynchronisation, and nothing ticks
  * while there is nothing to count.
+ *
+ * @param enabled set false to hold the clock still. For a long-lived component — the app shell —
+ * that shows a counter only some of the time, unmounting is not an option, so this is how it avoids
+ * re-rendering every page once a second for a counter nobody is looking at.
  */
-export function useNow(): number {
+export function useNow(enabled = true): number {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
+    if (!enabled) return;
+
+    // Resynchronise on enable: while paused the value went stale, and an elapsed counter starting
+    // from a stale reading shows a wrong number until the first tick. Scheduled rather than set in
+    // the effect body, which would cascade a render.
+    const resync = window.setTimeout(() => setNow(Date.now()), 0);
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
+
+    return () => {
+      window.clearTimeout(resync);
+      window.clearInterval(timer);
+    };
+  }, [enabled]);
 
   return now;
 }

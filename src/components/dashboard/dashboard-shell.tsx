@@ -4,7 +4,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { useDashboard } from "./dashboard-provider";
-import { AppIcon, type AppView, type DashboardBusyAction, VIEW_ROUTE } from "./shared";
+import { AppIcon, useNow, type AppView, type DashboardBusyAction, VIEW_ROUTE } from "./shared";
+import { ConnectProgress } from "./connect-progress";
 
 const navItems: Array<{ id: AppView; label: string; icon: string; eyebrow: string }> = [
   { id: "dashboard", label: "Dashboard", icon: "grid", eyebrow: "Overview" },
@@ -108,6 +109,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
     connectedTunnel,
     connectPrimary,
     connectTunnel,
+    connectAttempt,
     disconnectTunnel,
     dismissRecovery,
     health,
@@ -116,31 +118,49 @@ export function DashboardShell({ children }: { children: ReactNode }) {
     tunnelConnected,
   } = useDashboard();
 
+  // Drives the elapsed counter in the sidebar. Only ticks while a connect is in flight, so an idle
+  // dashboard does not re-render every second.
+  const now = useNow(connectAttempt !== null);
+
   // Live connection state, shown in the sidebar under the brand. Replaces a developer note about
   // a routing refactor that had been left rendering as the header banner's idle text.
-  const statusHeading = recovery
-    ? recovery.title
-    : busyAction
-      ? "Working"
-      : tunnelConnected
-        ? "Connected"
-        : "Idle";
-  const statusDetail = recovery
-    ? recovery.nextAction
-    : busyAction
-      ? `${describeBusyAction(busyAction)}…`
-      : tunnelConnected
-        ? [activeNode?.name, health?.external_ipv4 ? `via ${health.external_ipv4}` : null]
-          .filter(Boolean)
-          .join(" · ") || "Tunnel is up."
-        : activeNode
-          ? `${activeNode.name} is provisioned and not connected.`
-          : "No server is configured yet.";
-  const statusTone = recovery
+  //
+  // A connect in flight takes precedence over everything: this readout is visible on every page,
+  // so it is the one place guaranteed to be on screen while the user's internet is down.
+  const connecting = connectAttempt !== null;
+  const connectingElapsed = connecting
+    ? Math.max(0, Math.floor((now - connectAttempt.startedAt) / 1000))
+    : 0;
+
+  const statusHeading = connecting
+    ? "Connecting"
+    : recovery
+      ? recovery.title
+      : busyAction
+        ? "Working"
+        : tunnelConnected
+          ? "Connected"
+          : "Idle";
+  const statusDetail = connecting
+    ? `${connectAttempt.tunnelName} · ${connectingElapsed}s · internet is down until the handshake completes`
+    : recovery
+      ? recovery.nextAction
+      : busyAction
+        ? `${describeBusyAction(busyAction)}…`
+        : tunnelConnected
+          ? [activeNode?.name, health?.external_ipv4 ? `via ${health.external_ipv4}` : null]
+            .filter(Boolean)
+            .join(" · ") || "Tunnel is up."
+          : activeNode
+            ? `${activeNode.name} is provisioned and not connected.`
+            : "No server is configured yet.";
+  const statusTone = connecting
     ? "var(--tertiary)"
-    : tunnelConnected
-      ? "var(--secondary)"
-      : "var(--on-surface-variant)";
+    : recovery
+      ? "var(--tertiary)"
+      : tunnelConnected
+        ? "var(--secondary)"
+        : "var(--on-surface-variant)";
 
   useEffect(() => {
     const closeOnDesktop = () => {
@@ -255,7 +275,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
                 the page the user was already on. */}
             <button
               type="button"
-              disabled={busyAction !== null || !activeNode}
+              disabled={busyAction !== null || connecting || !activeNode}
               onClick={() => {
                 if (!activeNode) return;
                 if (connectedTunnel) {
@@ -271,9 +291,11 @@ export function DashboardShell({ children }: { children: ReactNode }) {
               className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2.5 text-sm font-medium text-[var(--on-surface)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-50"
             >
               <AppIcon name="power" className="h-4 w-4" />
-              {tunnelConnected
-                ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect")
-                : (busyAction === "connect-tunnel" || busyAction === "create-tunnel" ? "Connecting" : "Connect")}
+              {connecting
+                ? "Connecting"
+                : tunnelConnected
+                  ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect")
+                  : "Connect"}
             </button>
           </div>
         </aside>
@@ -310,6 +332,10 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             </div>
           ))}
         </div>
+
+        {/* Mounted at the shell so a connect started on one page keeps explaining itself after the
+            user navigates away from it. */}
+        <ConnectProgress />
       </div>
     </div>
   );

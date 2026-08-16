@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo } from "react";
 export default function DashboardHealthPage() {
   const {
     busyAction,
+    connectAttempt,
     connectedTunnel,
     connectTunnel,
     copyText,
@@ -82,6 +83,7 @@ export default function DashboardHealthPage() {
       selectedNode={selectedNode}
       selectedTunnelId={selectedTunnelId}
       busyAction={busyAction}
+      reconnecting={connectAttempt !== null}
       onRunChecks={handleRunChecks}
       onReconnect={connectedTunnel ? handleReconnect : null}
     />

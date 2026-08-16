@@ -49,8 +49,8 @@ describe("deriveNodeStatus", () => {
   // The original bug: STATUS rendered provider_status, so two powered-on droplets both read
   // "ACTIVE" and neither said whether the VPN was up.
   it("does not report two provider-active nodes as connected", () => {
-    const a = deriveNodeStatus({ node: node({ provider_status: "active" }), isCurrent: true, isLiveConnected: false });
-    const b = deriveNodeStatus({ node: node({ provider_status: "active" }), isCurrent: false, isLiveConnected: false });
+    const a = deriveNodeStatus({ node: node({ provider_status: "active" }), isCurrent: true, isLiveConnected: false, isConnecting: false });
+    const b = deriveNodeStatus({ node: node({ provider_status: "active" }), isCurrent: false, isLiveConnected: false, isConnecting: false });
 
     assert.equal(a, "current");
     assert.equal(b, "ready");
@@ -63,6 +63,7 @@ describe("deriveNodeStatus", () => {
       node: node({ lifecycle_status: "ready", provider_status: "active" }),
       isCurrent: false,
       isLiveConnected: true,
+      isConnecting: false,
     });
     assert.equal(status, "connected");
   });
@@ -75,6 +76,7 @@ describe("deriveNodeStatus", () => {
         node: node({ lifecycle_status: "ready", provider_status: providerStatus }),
         isCurrent: true,
         isLiveConnected: false,
+        isConnecting: false,
       });
       assert.equal(status, "unavailable", `provider_status=${providerStatus}`);
     }
@@ -83,7 +85,7 @@ describe("deriveNodeStatus", () => {
   it("treats in-progress lifecycles as provisioning", () => {
     for (const lifecycle of ["new", "provisioning", "bootstrapping"] as const) {
       assert.equal(
-        deriveNodeStatus({ node: node({ lifecycle_status: lifecycle }), isCurrent: false, isLiveConnected: false }),
+        deriveNodeStatus({ node: node({ lifecycle_status: lifecycle }), isCurrent: false, isLiveConnected: false, isConnecting: false }),
         "provisioning",
       );
     }
@@ -94,8 +96,41 @@ describe("deriveNodeStatus", () => {
       node: node({ lifecycle_status: "error" }),
       isCurrent: true,
       isLiveConnected: false,
+      isConnecting: false,
     });
     assert.equal(status, "error");
+  });
+
+  it("reports a connect in flight as connecting rather than ready", () => {
+    // During this window the tunnel owns the default route and the user has no internet. Showing
+    // the row as "Ready" — or worse, "Connected" — is what left the outage unexplained.
+    const status = deriveNodeStatus({
+      node: node({ lifecycle_status: "ready", provider_status: "active" }),
+      isCurrent: true,
+      isLiveConnected: false,
+      isConnecting: true,
+    });
+    assert.equal(status, "connecting");
+  });
+
+  it("lets a live tunnel outrank a connect still in flight", () => {
+    const status = deriveNodeStatus({
+      node: node({ lifecycle_status: "connected" }),
+      isCurrent: true,
+      isLiveConnected: true,
+      isConnecting: true,
+    });
+    assert.equal(status, "connected");
+  });
+
+  it("lets a connect in flight outrank a stale error from a previous attempt", () => {
+    const status = deriveNodeStatus({
+      node: node({ lifecycle_status: "error" }),
+      isCurrent: false,
+      isLiveConnected: false,
+      isConnecting: true,
+    });
+    assert.equal(status, "connecting");
   });
 
   it("marks only connectable states as connectable", () => {
@@ -104,6 +139,9 @@ describe("deriveNodeStatus", () => {
     assert.equal(isConnectable("unavailable"), false);
     assert.equal(isConnectable("provisioning"), false);
     assert.equal(isConnectable("error"), false);
+    // A second connect for a tunnel already coming up raises a second UAC prompt and races the
+    // same service, which the backend rejects outright.
+    assert.equal(isConnectable("connecting"), false);
   });
 });
 

@@ -7,6 +7,7 @@ export default function DashboardPage() {
   const {
     activeNode,
     busyAction,
+    connectAttempt,
     connectedTunnel,
     connectPrimary,
     health,
@@ -31,6 +32,7 @@ export default function DashboardPage() {
       throughputSamples={throughputSamples}
       recovery={recovery}
       busyAction={busyAction}
+      connectAttempt={connectAttempt}
       onConnectPrimary={connectPrimary}
       onConnectTunnel={connectTunnel}
       onDisconnectTunnel={disconnectTunnel}

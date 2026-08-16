@@ -24,9 +24,13 @@ use crate::backend::secure_storage::SecureStorage;
 use crate::backend::secure_storage::SecretStoreError;
 use crate::backend::wireguard::{
   ClientConfigParams, DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS,
-  TunnelMetricsSource, TunnelRuntimeStatus, WireGuardError,
+  TunnelMetricsSource, TunnelPhaseInputs, TunnelRuntimeStatus, TunnelServiceState, WireGuardError,
   WireGuardManager,
 };
+
+pub mod tunnel_phase;
+
+pub use tunnel_phase::{classify_tunnel_phase, PhaseEvidence, TunnelPhase};
 
 #[derive(Clone)]
 pub struct Orchestrator {
@@ -51,6 +55,45 @@ struct TunnelWatch {
   expected_stop: HashSet<String>,
   /// The most recent unexpected stop, until the user reconnects.
   drop: Option<UnexpectedDrop>,
+  /// When this app asked each tunnel's service to start.
+  ///
+  /// In-memory for the same reason `drop` is: a connect attempt is only meaningful inside the
+  /// session that made it. This is what lets the phase verdict tell "still coming up" from
+  /// "wedged" — without it there is no baseline, and the verdict correctly declines to guess.
+  activation_started: HashMap<String, Instant>,
+  /// Tunnels with a connect currently executing.
+  ///
+  /// Needed because moving commands off the UI thread removed Tauri's accidental serialization:
+  /// two connects for the same tunnel can now genuinely overlap.
+  connect_in_flight: HashSet<String>,
+}
+
+/// Whether a cached egress reading may still be served.
+///
+/// Pure so the two TTLs can be asserted at their boundaries without a sleeping test.
+///
+/// A *failed* reading expires far sooner than a successful one. The cache is keyed on connection
+/// state, and connect flips that state the instant the service reports Running — at which point
+/// the tunnel already owns the default route and the handshake has not landed, so the probe
+/// reliably times out. Under one shared TTL that `None` was held for a full minute, so the card
+/// read "Could not determine your IP address" long after the tunnel started working.
+fn external_ip_cache_is_fresh(
+  has_address: bool,
+  measured_while_connected: bool,
+  connected: bool,
+  age: Duration,
+) -> bool {
+  if measured_while_connected != connected {
+    return false;
+  }
+
+  let ttl = if has_address {
+    EXTERNAL_IP_CACHE_TTL
+  } else {
+    EXTERNAL_IP_FAILURE_TTL
+  };
+
+  age < ttl
 }
 
 /// The last measured egress addresses, and the tunnel state they were measured under.
@@ -77,6 +120,12 @@ const EXTERNAL_IP_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Health polls every few seconds; probing that often would hammer a third-party service for a
 /// value that rarely changes. A connection state change bypasses this entirely.
 const EXTERNAL_IP_CACHE_TTL: Duration = Duration::from_secs(60);
+/// How long a *failed* egress probe is cached.
+///
+/// Much shorter than the success TTL, because the common cause of failure is the tunnel coming up:
+/// during the handshake wait there is no working route, so the probe times out. That answer stops
+/// being true within seconds, and holding it for the full TTL misreported a healthy tunnel.
+const EXTERNAL_IP_FAILURE_TTL: Duration = Duration::from_secs(5);
 /// How many activity events to keep. Its predecessor table grew without bound while only
 /// provisioning wrote to it; every connect and disconnect appends now, so it needs a ceiling.
 const ACTIVITY_HISTORY_LIMIT: usize = 1000;
@@ -182,6 +231,23 @@ pub struct UserFacingError {
   pub next_action: String,
 }
 
+/// One reading of how far along a tunnel is, from the cheap 1 Hz path.
+///
+/// Carries the evidence alongside the verdict so the UI can explain itself — "waiting for the
+/// server, 12s" rather than an opaque spinner — and so diagnostics show why a phase was chosen.
+#[derive(Debug, Clone, Serialize)]
+pub struct TunnelPhaseReading {
+  pub tunnel_id: String,
+  pub tunnel_name: String,
+  pub phase: TunnelPhase,
+  pub service_state: TunnelServiceState,
+  /// Seconds since this app asked the service to start; `None` when it was already running.
+  pub elapsed_seconds: Option<u64>,
+  /// Decrypted inbound octets. `> 0` is the unelevated proof that a handshake completed.
+  pub rx_bytes: Option<u64>,
+  pub tx_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthSummary {
   pub node_id: String,
@@ -201,6 +267,14 @@ pub struct HealthSummary {
   /// while connected is traffic leaving outside the tunnel.
   pub external_ipv6: Option<String>,
   pub tunnel_status: Option<TunnelStatus>,
+  /// Whether the tunnel actually carries traffic, as opposed to whether its service is running.
+  ///
+  /// This is what the UI turns green on. `tunnel_status` above reflects the Windows service and
+  /// reaches `Connected` the moment it starts — roughly fifteen seconds before the first handshake
+  /// in the reported failure, during which the tunnel owns the default route and the user has no
+  /// internet. Computed by the same `classify_tunnel_phase` the 1 Hz poll uses, so the two cannot
+  /// disagree.
+  pub phase: TunnelPhase,
   /// Which tier produced `rx_bytes`/`tx_bytes`; see `TunnelMetricsSource`.
   pub metrics_source: Option<TunnelMetricsSource>,
   /// When the current session began, or `None` if not connected or the start time is unknown.
@@ -412,6 +486,9 @@ impl Orchestrator {
     if let Ok(mut watch) = self.tunnel_watch.lock() {
       watch.expected_stop.insert(tunnel_id.to_string());
       watch.drop = None;
+      // The attempt clock belongs to one connect. Left in place, the next connect would be judged
+      // against the previous session's start and report a stall the moment it began.
+      watch.activation_started.remove(tunnel_id);
     }
   }
 
@@ -421,6 +498,47 @@ impl Orchestrator {
       watch.expected_stop.remove(tunnel_id);
       watch.last_connected.insert(tunnel_id.to_string(), true);
       watch.drop = None;
+    }
+  }
+
+  /// Stamps the moment this app asked a tunnel's service to start.
+  fn note_tunnel_activation_started(&self, tunnel_id: &str) {
+    if let Ok(mut watch) = self.tunnel_watch.lock() {
+      watch
+        .activation_started
+        .insert(tunnel_id.to_string(), Instant::now());
+    }
+  }
+
+  /// Seconds since this app asked the tunnel to start, or `None` if it did not.
+  ///
+  /// Deliberately does not stamp a baseline on first sight. A tunnel already running when the app
+  /// launched has no knowable attempt time, and inventing one would let the phase verdict report a
+  /// stall measured from an arbitrary moment. `None` is the honest answer, and the classifier is
+  /// built to treat it as "still connecting" rather than guessing.
+  ///
+  /// This doubles as the test for whether *this session* started the tunnel, which is what makes
+  /// it safe to stamp a session start time from it.
+  fn tunnel_activation_elapsed_seconds(&self, tunnel_id: &str) -> Option<u64> {
+    let watch = self.tunnel_watch.lock().ok()?;
+    watch
+      .activation_started
+      .get(tunnel_id)
+      .map(|started| started.elapsed().as_secs())
+  }
+
+  /// Claims the connect slot for a tunnel, or reports that one is already running.
+  fn try_claim_connect(&self, tunnel_id: &str) -> bool {
+    match self.tunnel_watch.lock() {
+      Ok(mut watch) => watch.connect_in_flight.insert(tunnel_id.to_string()),
+      // A poisoned lock must not wedge connect permanently; let the attempt through.
+      Err(_) => true,
+    }
+  }
+
+  fn release_connect(&self, tunnel_id: &str) {
+    if let Ok(mut watch) = self.tunnel_watch.lock() {
+      watch.connect_in_flight.remove(tunnel_id);
     }
   }
 
@@ -485,9 +603,12 @@ impl Orchestrator {
     if !force {
       if let Ok(cache) = self.external_ip.lock() {
         if let Some(snapshot) = cache.as_ref() {
-          if snapshot.measured_while_connected == connected
-            && snapshot.observed_at.elapsed() < EXTERNAL_IP_CACHE_TTL
-          {
+          if external_ip_cache_is_fresh(
+            snapshot.ipv4.is_some(),
+            snapshot.measured_while_connected,
+            connected,
+            snapshot.observed_at.elapsed(),
+          ) {
             return (snapshot.ipv4.clone(), snapshot.ipv6.clone());
           }
         }
@@ -1604,6 +1725,16 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     request: &ConnectTunnelRequest,
   ) -> Result<(), OrchestratorError> {
+    // Commands no longer run serialized on the UI thread, so two connects for one tunnel can now
+    // overlap — each spawning its own UAC prompt and racing the same service. Claimed before the
+    // activity row so a rejected duplicate does not pollute the log with a phantom attempt.
+    if !self.try_claim_connect(&request.tunnel_id) {
+      return Err(OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "A connect is already running for this tunnel. Wait for it to finish before starting another.".to_string(),
+      });
+    }
+
     // Recorded here rather than inside `connect_tunnel_inner`, which returns early from a dozen
     // places; wrapping it means every one of those exits is accounted for.
     let correlation_id = Uuid::new_v4().to_string();
@@ -1615,6 +1746,7 @@ impl Orchestrator {
     );
 
     let outcome = self.connect_tunnel_inner(wireguard, db, secure_storage, request);
+    self.release_connect(&request.tunnel_id);
 
     match &outcome {
       Ok(()) => activity.success(
@@ -1721,6 +1853,10 @@ impl Orchestrator {
     if tunnel.status == TunnelStatus::Connected && node.lifecycle_status == NodeLifecycleStatus::Connected {
       if let Ok(runtime) = wireguard.read_tunnel_status(&canonical_tunnel_name) {
         if runtime.state == crate::backend::wireguard::TunnelServiceState::Running {
+          // Idempotent return, but the caller is still watching a connect. Without a clock the
+          // phase verdict can never reach `stalled`, so a service that is running yet carrying
+          // nothing would leave the UI waiting forever with no way out.
+          self.note_tunnel_activation_started(&request.tunnel_id);
           return Ok(());
         }
       }
@@ -1733,6 +1869,8 @@ impl Orchestrator {
           persist_tunnel_stats_snapshot(db, &request.tunnel_id, &runtime)?;
           let _ = db.update_tunnel_status(&request.tunnel_id, TunnelStatus::Connected, None);
           let _ = db.transition_vpn_node_status(&request.node_id, NodeLifecycleStatus::Connected, None);
+          // Same reasoning as the idempotent return above: give the watcher a baseline.
+          self.note_tunnel_activation_started(&request.tunnel_id);
           return Ok(());
         }
       }
@@ -1773,6 +1911,11 @@ impl Orchestrator {
       }
     }
 
+    // Stamped before the service is asked to start, so the attempt clock covers the whole wait the
+    // user actually experiences — including the UAC prompt and service startup, not just the part
+    // after it succeeds.
+    self.note_tunnel_activation_started(&request.tunnel_id);
+
     if let Err(source) = wireguard.activate_tunnel(&canonical_tunnel_name) {
       if matches!(source, WireGuardError::TunnelNotFound { .. }) && !imported_in_this_connect {
         wireguard
@@ -1811,10 +1954,20 @@ impl Orchestrator {
 
     persist_tunnel_stats_snapshot(db, &request.tunnel_id, &runtime)?;
 
+    // This row records that the tunnel *service* is registered and running — not that traffic
+    // flows. Whether the tunnel actually carries traffic is `TunnelPhase`, decided from handshake
+    // and byte-counter evidence, and that is what the UI turns green on. Keeping the two separate
+    // is what stopped "service started" from being reported to the user as "connected".
+    //
+    // `Starting` and `Unknown` hold the row at Connected rather than tearing the tunnel down:
+    // `activate_tunnel` above already waited for the service to reach RUNNING, so this re-read
+    // failing to parse is a weaker signal than the activation that preceded it. Only an explicit
+    // `Stopped` reverses that.
     let status = match runtime.state {
-      crate::backend::wireguard::TunnelServiceState::Running => TunnelStatus::Connected,
+      crate::backend::wireguard::TunnelServiceState::Running
+      | crate::backend::wireguard::TunnelServiceState::Starting
+      | crate::backend::wireguard::TunnelServiceState::Unknown => TunnelStatus::Connected,
       crate::backend::wireguard::TunnelServiceState::Stopped => TunnelStatus::Disconnected,
-      crate::backend::wireguard::TunnelServiceState::Unknown => TunnelStatus::Connected,
     };
 
     db
@@ -1825,9 +1978,11 @@ impl Orchestrator {
       })?;
 
     if status == TunnelStatus::Connected {
-      // Stamps the session start so the dashboard can show a real elapsed timer. Best-effort:
-      // an uptime display is not worth failing an otherwise successful connect over.
-      let _ = db.set_tunnel_connected_at(&request.tunnel_id, true);
+      // `connected_at` is deliberately NOT stamped here. The service being up is not the session
+      // starting: in the reported failure the handshake landed 15 seconds after this point, so
+      // stamping now made "Connection Time" count 15 seconds the user spent with no internet.
+      // It is stamped instead on the first verified-carrying observation, in `get_health_summary`.
+      //
       // Clears any drop the user has now recovered from, and gives the watch a baseline so the
       // next stop can be classified.
       self.note_tunnel_connected(&request.tunnel_id);
@@ -1987,54 +2142,82 @@ impl Orchestrator {
     Ok(())
   }
 
-  pub fn read_client_tunnel_status(
+  /// The cheap read behind the connect-progress poll.
+  ///
+  /// Runs once a second while a connect is in flight, so its cost is the point: one `sc query`
+  /// spawn plus an in-process counter read, and no writes. It deliberately does not take
+  /// `SecureStorage` — that is a type-level guarantee it cannot repeat the Credential Manager
+  /// private-key read `get_health_summary` performs, which has no business happening at 1 Hz.
+  ///
+  /// Row reconciliation stays in `get_health_summary`; two writers for one fact is how the stored
+  /// status and the runtime drifted apart before.
+  pub fn get_tunnel_phase(
     &self,
     wireguard: &WireGuardManager,
     db: &Database,
+    node_id: &str,
     tunnel_id: &str,
-  ) -> Result<TunnelRuntimeStatus, OrchestratorError> {
+  ) -> Result<TunnelPhaseReading, OrchestratorError> {
     let tunnel = db
       .get_tunnel(tunnel_id)
       .map_err(|source| OrchestratorError::Database {
-        detail: "Failed loading tunnel before status read.".to_string(),
+        detail: "Failed loading tunnel before phase read.".to_string(),
         source,
       })?
       .ok_or_else(|| OrchestratorError::Database {
-        detail: "Tunnel status requested for unknown id.".to_string(),
+        detail: "Tunnel phase requested for unknown id.".to_string(),
         source: DbError::NotFound {
           entity: "tunnel",
           id: tunnel_id.to_string(),
-          detail: "No tunnel row matched the id for status query.".to_string(),
+          detail: "No tunnel row matched the id for phase query.".to_string(),
         },
       })?;
 
-    let status = match wireguard.read_tunnel_status(&tunnel.name) {
-      Ok(runtime) => runtime,
-      Err(WireGuardError::TunnelNotFound { .. }) => TunnelRuntimeStatus {
-        tunnel_name: tunnel.name.clone(),
+    if tunnel.node_id != node_id {
+      return Err(OrchestratorError::InvalidState {
+        node_id: node_id.to_string(),
+        detail: "Tunnel phase requested with a tunnel that belongs to a different node."
+          .to_string(),
+      });
+    }
+
+    // A missing service is not an error here — it is the ordinary state after a disconnect, and
+    // this runs on a timer. Reporting it as a failure produced a recurring error toast before.
+    let inputs = match wireguard.read_tunnel_phase_inputs(&tunnel.name) {
+      Ok(inputs) => inputs,
+      Err(WireGuardError::TunnelNotFound { .. }) => TunnelPhaseInputs {
         state: crate::backend::wireguard::TunnelServiceState::Stopped,
-        last_handshake_age_seconds: None,
         rx_bytes: None,
         tx_bytes: None,
-        metrics_source: None,
       },
       Err(source) => {
         return Err(OrchestratorError::WireGuard {
-          detail: "Could not read WireGuard runtime status.".to_string(),
+          detail: "Could not read tunnel service state for phase.".to_string(),
           source,
         })
       }
     };
 
-    let db_status = match status.state {
-      crate::backend::wireguard::TunnelServiceState::Running => TunnelStatus::Connected,
-      crate::backend::wireguard::TunnelServiceState::Stopped => TunnelStatus::Disconnected,
-      crate::backend::wireguard::TunnelServiceState::Unknown => tunnel.status,
-    };
-    let _ = db.update_tunnel_status(tunnel_id, db_status, None);
-    let _ = persist_tunnel_stats_snapshot(db, tunnel_id, &status);
+    let elapsed_seconds = self.tunnel_activation_elapsed_seconds(tunnel_id);
+    let phase = classify_tunnel_phase(&PhaseEvidence {
+      service_state: inputs.state,
+      // Never read here: `wg show` needs administrator, and paying a spawn for a value that is
+      // `None` in every unelevated run would defeat the purpose of this command. The elevated
+      // handshake age still arrives on the 5s health poll.
+      handshake_age_seconds: None,
+      rx_bytes: inputs.rx_bytes,
+      elapsed_seconds,
+    });
 
-    Ok(status)
+    Ok(TunnelPhaseReading {
+      tunnel_id: tunnel_id.to_string(),
+      tunnel_name: tunnel.name,
+      phase,
+      service_state: inputs.state,
+      elapsed_seconds,
+      rx_bytes: inputs.rx_bytes,
+      tx_bytes: inputs.tx_bytes,
+    })
   }
 
   pub fn get_health_summary(
@@ -2113,10 +2296,18 @@ impl Orchestrator {
     // the stored status says.
     let service_missing = selected_tunnel.is_some() && runtime.is_none();
 
+    // `Starting` reads as connected for the row's purpose — the service exists and is coming up,
+    // which is not a disconnected tunnel. `Unknown` keeps whatever the row already believed rather
+    // than declaring an error: an `sc query` we could not parse is an absence of evidence, and
+    // treating it as a failure raised "WireGuard issue" toasts for healthy tunnels. Whether the
+    // tunnel actually carries traffic is `phase` below, not this.
     let runtime_status = runtime.as_ref().map(|value| match value.state {
-      crate::backend::wireguard::TunnelServiceState::Running => TunnelStatus::Connected,
-      crate::backend::wireguard::TunnelServiceState::Stopped => TunnelStatus::Disconnected,
-      crate::backend::wireguard::TunnelServiceState::Unknown => TunnelStatus::Error,
+      TunnelServiceState::Running | TunnelServiceState::Starting => TunnelStatus::Connected,
+      TunnelServiceState::Stopped => TunnelStatus::Disconnected,
+      TunnelServiceState::Unknown => selected_tunnel
+        .as_ref()
+        .map(|tunnel| tunnel.status)
+        .unwrap_or(TunnelStatus::Disconnected),
     });
 
     let effective_status = if service_missing {
@@ -2159,6 +2350,41 @@ impl Orchestrator {
       }
     };
 
+    // The verdict the UI turns green on. Same classifier as the 1 Hz `get_tunnel_phase`, so the
+    // two polls can never contradict each other. Handshake age is included here because this path
+    // already paid for `wg show`; when unelevated it is `None` and `rx_bytes` decides instead.
+    let activation_elapsed = selected_tunnel
+      .as_ref()
+      .and_then(|tunnel| self.tunnel_activation_elapsed_seconds(&tunnel.id));
+
+    let phase = match (selected_tunnel.as_ref(), runtime.as_ref()) {
+      (Some(_), Some(value)) => classify_tunnel_phase(&PhaseEvidence {
+        service_state: value.state,
+        handshake_age_seconds: value.last_handshake_age_seconds,
+        rx_bytes: value.rx_bytes,
+        elapsed_seconds: activation_elapsed,
+      }),
+      // No tunnel row, or no service at all.
+      _ => TunnelPhase::Disconnected,
+    };
+
+    // Stamp the session start on the first observation that proves traffic crosses the tunnel,
+    // rather than when the service started — the service reaches Running well before the handshake
+    // lands, and stamping there counted the dead window as connected time.
+    //
+    // Three guards, each load-bearing:
+    // - `activation_elapsed.is_some()` means this session started this tunnel. A tunnel found
+    //   already running has an unknowable start, and the app deliberately leaves it NULL rather
+    //   than showing a timer counting from an arbitrary moment.
+    // - `connected_at.is_none()` keeps it to one write. `set_tunnel_connected_at` coalesces the
+    //   value, but the statement still bumps `updated_at`, and this runs every few seconds.
+    // Best-effort otherwise: an uptime display is not worth failing a health read over.
+    if let Some(tunnel) = selected_tunnel.as_ref() {
+      if phase.is_usable() && activation_elapsed.is_some() && tunnel.connected_at.is_none() {
+        let _ = db.set_tunnel_connected_at(&tunnel.id, true);
+      }
+    }
+
     // Measured in every state, so the card can show the address changing as the tunnel comes up.
     // Cached, because health polls far more often than an egress address changes.
     let connected = matches!(effective_status, Some(TunnelStatus::Connected));
@@ -2174,7 +2400,11 @@ impl Orchestrator {
       external_ipv4,
       external_ipv6,
       tunnel_status: effective_status,
+      phase,
       metrics_source: runtime.as_ref().and_then(|value| value.metrics_source),
+      // Read from the row loaded at the top of this call, so a session stamped for the first time
+      // just above surfaces on the next poll. One tick of lag on an uptime display, versus a timer
+      // that used to start fifteen seconds before the tunnel worked.
       connected_at: if matches!(effective_status, Some(TunnelStatus::Connected)) {
         selected_tunnel.as_ref().and_then(|tunnel| tunnel.connected_at.clone())
       } else {
@@ -2412,9 +2642,9 @@ impl Orchestrator {
             let _ = persist_tunnel_stats_snapshot(db, &tunnel.id, &runtime);
 
             let reconciled_status = match runtime.state {
-              crate::backend::wireguard::TunnelServiceState::Running => TunnelStatus::Connected,
-              crate::backend::wireguard::TunnelServiceState::Stopped => TunnelStatus::Disconnected,
-              crate::backend::wireguard::TunnelServiceState::Unknown => tunnel.status,
+              TunnelServiceState::Running | TunnelServiceState::Starting => TunnelStatus::Connected,
+              TunnelServiceState::Stopped => TunnelStatus::Disconnected,
+              TunnelServiceState::Unknown => tunnel.status,
             };
 
             if reconciled_status != tunnel.status {
@@ -4596,6 +4826,205 @@ mod tests {
       .get_health_summary(&running, &db, &secure_storage, "node-h", Some("tunnel-h"), true)
       .expect("health summary should succeed");
     assert_eq!(*probe.calls.lock().expect("counter"), 3);
+  }
+
+  /// A failed egress probe must expire long before a successful one.
+  ///
+  /// The regression: connect flips the cache key to "connected" the moment the service reports
+  /// Running, while the handshake has not landed and the probe times out. Under one shared TTL
+  /// that `None` was served for a full minute, so the card read "Could not determine your IP
+  /// address" long after the tunnel was working.
+  #[test]
+  fn a_failed_egress_reading_expires_far_sooner_than_a_successful_one() {
+    let just_after_failure_ttl = EXTERNAL_IP_FAILURE_TTL + Duration::from_secs(1);
+
+    assert!(
+      !external_ip_cache_is_fresh(false, true, true, just_after_failure_ttl),
+      "a failed reading must expire once the failure TTL passes"
+    );
+    assert!(
+      external_ip_cache_is_fresh(true, true, true, just_after_failure_ttl),
+      "a successful reading must survive well past the failure TTL"
+    );
+  }
+
+  /// Both TTLs are inclusive at their boundary, and a failure is still cached briefly so a poll
+  /// during a real outage does not re-probe on every tick.
+  #[test]
+  fn egress_cache_freshness_honours_both_ttl_boundaries() {
+    assert!(
+      external_ip_cache_is_fresh(false, true, true, EXTERNAL_IP_FAILURE_TTL - Duration::from_millis(1)),
+      "a just-taken failure is still served from cache"
+    );
+    assert!(
+      !external_ip_cache_is_fresh(false, true, true, EXTERNAL_IP_FAILURE_TTL),
+      "a failure expires exactly at the failure TTL"
+    );
+    assert!(
+      external_ip_cache_is_fresh(true, true, true, EXTERNAL_IP_CACHE_TTL - Duration::from_millis(1)),
+      "a success is served right up to the success TTL"
+    );
+    assert!(
+      !external_ip_cache_is_fresh(true, true, true, EXTERNAL_IP_CACHE_TTL),
+      "a success expires exactly at the success TTL"
+    );
+  }
+
+  /// The address changes when the tunnel comes up, so a reading taken in the other state is not
+  /// merely stale — it is about a different route.
+  #[test]
+  fn egress_cache_is_never_reused_across_a_connection_state_change() {
+    assert!(
+      !external_ip_cache_is_fresh(true, false, true, Duration::from_millis(1)),
+      "a disconnected reading must not be served while connected"
+    );
+    assert!(
+      !external_ip_cache_is_fresh(true, true, false, Duration::from_millis(1)),
+      "a connected reading must not be served while disconnected"
+    );
+  }
+
+  #[test]
+  fn tunnel_phase_is_rejected_for_an_unknown_tunnel() {
+    let (db, _secure_storage) = health_fixture("phase_unknown_tunnel");
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+
+    let result = Orchestrator::with_ip_probe(StaticIpProbe::none()).get_tunnel_phase(
+      &wireguard,
+      &db,
+      "node-h",
+      "tunnel-does-not-exist",
+    );
+
+    assert!(
+      matches!(result, Err(OrchestratorError::Database { .. })),
+      "expected a database miss, got {result:?}"
+    );
+  }
+
+  /// The node id is not decoration: without this check a caller could read one node's tunnel while
+  /// naming another, and the dashboard would attribute the phase to the wrong server.
+  #[test]
+  fn tunnel_phase_is_rejected_when_the_tunnel_belongs_to_another_node() {
+    let (db, _secure_storage) = health_fixture("phase_node_mismatch");
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+
+    let result = Orchestrator::with_ip_probe(StaticIpProbe::none()).get_tunnel_phase(
+      &wireguard,
+      &db,
+      "node-someone-else",
+      "tunnel-h",
+    );
+
+    assert!(
+      matches!(result, Err(OrchestratorError::InvalidState { .. })),
+      "expected an invalid-state rejection, got {result:?}"
+    );
+  }
+
+  /// A running service with no traffic yet is the exact window the user reported: the adapter owns
+  /// the default route, the internet is down, and the old UI showed green.
+  #[test]
+  fn tunnel_phase_reports_connecting_while_a_running_tunnel_has_carried_nothing() {
+    let (db, _secure_storage) = health_fixture("phase_running_no_traffic");
+    // `running()` reports the service up; there is no real adapter, so counters read as absent.
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+
+    let reading = Orchestrator::with_ip_probe(StaticIpProbe::none())
+      .get_tunnel_phase(&wireguard, &db, "node-h", "tunnel-h")
+      .expect("phase should read");
+
+    assert_eq!(reading.phase, TunnelPhase::Connecting);
+    assert_eq!(reading.service_state, crate::backend::wireguard::TunnelServiceState::Running);
+  }
+
+  /// Every path out of `connect_tunnel` must leave an attempt clock behind.
+  ///
+  /// Without one the phase verdict can never reach `stalled` — it refuses to claim a stall from an
+  /// unknown baseline — so a service that is running but carrying nothing would leave the connect
+  /// UI waiting indefinitely with no escape offered. The idempotent early returns originally
+  /// skipped the stamp, which is exactly that case.
+  #[test]
+  fn an_idempotent_connect_still_records_an_attempt_clock() {
+    let db = Database::new(test_db_path("phase_idempotent_clock"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_ready_node_and_tunnel(&db, &secure_storage);
+
+    // Already connected, and the service is already running: the idempotent early return.
+    db.update_tunnel_status("tunnel-ready", TunnelStatus::Connected, None)
+      .expect("connected status should persist");
+    db.transition_vpn_node_status("node-ready", NodeLifecycleStatus::Connected, None)
+      .expect("connected lifecycle should persist");
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    let orchestrator = Orchestrator::new();
+
+    assert_eq!(
+      orchestrator.tunnel_activation_elapsed_seconds("tunnel-ready"),
+      None,
+      "no attempt has been made yet"
+    );
+
+    orchestrator
+      .connect_tunnel(
+        &wireguard,
+        &db,
+        &secure_storage,
+        &ConnectTunnelRequest {
+          node_id: "node-ready".to_string(),
+          tunnel_id: "tunnel-ready".to_string(),
+        },
+      )
+      .expect("an already-connected tunnel should return Ok");
+
+    assert!(
+      orchestrator.tunnel_activation_elapsed_seconds("tunnel-ready").is_some(),
+      "the idempotent path must still leave a clock so a stall can be detected"
+    );
+  }
+
+  /// Commands no longer run serialized on the UI thread, so two connects for one tunnel can
+  /// genuinely overlap — each raising its own UAC prompt and racing the same service.
+  #[test]
+  fn a_second_concurrent_connect_for_the_same_tunnel_is_rejected() {
+    let (db, secure_storage) = health_fixture("phase_concurrent_connect");
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    let orchestrator = Orchestrator::with_ip_probe(StaticIpProbe::none());
+
+    // Claim the slot the way an in-flight connect would, then attempt a second.
+    assert!(orchestrator.try_claim_connect("tunnel-h"));
+
+    let result = orchestrator.connect_tunnel(
+      &wireguard,
+      &db,
+      &secure_storage,
+      &ConnectTunnelRequest {
+        node_id: "node-h".to_string(),
+        tunnel_id: "tunnel-h".to_string(),
+      },
+    );
+
+    assert!(
+      matches!(result, Err(OrchestratorError::InvalidState { .. })),
+      "expected a rejection while a connect is already running, got {result:?}"
+    );
+
+    // Releasing the slot lets a later connect proceed, so the guard cannot wedge connect for good.
+    orchestrator.release_connect("tunnel-h");
+    assert!(orchestrator.try_claim_connect("tunnel-h"));
+  }
+
+  #[test]
+  fn tunnel_phase_reports_disconnected_when_the_service_is_stopped() {
+    let (db, _secure_storage) = health_fixture("phase_stopped");
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+
+    let reading = Orchestrator::with_ip_probe(StaticIpProbe::none())
+      .get_tunnel_phase(&wireguard, &db, "node-h", "tunnel-h")
+      .expect("phase should read");
+
+    assert_eq!(reading.phase, TunnelPhase::Disconnected);
   }
 
   /// A disconnected tunnel has no session, so it must not report a start time.

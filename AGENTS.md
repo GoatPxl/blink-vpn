@@ -121,6 +121,38 @@ requiring `wg.exe` on PATH just to provision.
   fully wired through migration, DB, commands and UI, and was behaviorally a no-op in both
   directions — it only ever added confusion.
 
+**A running service is not a working tunnel.** The adapter captures the default route the instant
+its service starts, so from that moment the user's traffic is inside a tunnel whose peer has not
+answered — they have *no internet* until the handshake completes. Measured: service running at
+`10:22:07.851`, first handshake response at `10:22:23.051`. The UI reported "Connected" for that
+entire fifteen seconds because it keyed off `sc query`.
+
+Nothing may present a tunnel as connected on service state alone. The verdict is `TunnelPhase`
+(`backend/orchestrator/tunnel_phase.rs`), and because `wg show` needs administrator, it turns on
+evidence available unelevated: **adapter inbound octets > 0**. WireGuard discards anything it cannot
+decrypt, so non-zero inbound bytes cannot exist without a completed handshake. `connect_tunnel`
+returning still means only "the service started" — that is why it no longer announces success.
+
+While the tunnel is coming up the user is watching their internet fail, so that window must be
+explained on screen, and the app must stay responsive through it. Both were broken by the same
+root cause: **every Tauri command ran synchronously on the UI thread.**
+
+**Commands run on the blocking pool, via `run_blocking` in `commands/system.rs`.** Not on the UI
+thread, and — this part was learned the hard way — not on the async runtime either.
+`#[tauri::command(async)]` schedules the body on a tokio *async* worker, and `reqwest::blocking`
+(the DigitalOcean client and the egress probe) builds its own runtime internally; dropping one
+inside an async context panics with *"Cannot drop a runtime in a context where blocking is not
+allowed"*. That panic killed the IPC channel, so **every command in the app failed at once** — an
+empty dashboard, no nodes, no settings. Keep new commands on `run_blocking`; the bodies are all
+blocking work (subprocesses, sleeps, UAC, SQLite, Credential Manager, HTTP) and the blocking pool is
+where that is legal.
+
+The other consequence is that commands genuinely run concurrently now, where the UI thread used to
+serialize them by accident. Anything that was implicitly safe under that serialization no longer is:
+SQLite sets a `busy_timeout`, `create_provider` is `INSERT OR IGNORE` because four commands race to
+ensure the built-in rows, and connect holds a per-tunnel in-flight guard. Assume no serialization
+when adding a check-then-write.
+
 ---
 
 ## 5. No parallel implementations

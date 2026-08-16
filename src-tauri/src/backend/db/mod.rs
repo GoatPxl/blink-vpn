@@ -2,6 +2,7 @@ use std::fmt::{Display, Formatter};
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
@@ -12,6 +13,12 @@ use thiserror::Error;
 /// Named once so that startup and the "where are my files" listing cannot drift apart and point the
 /// user at a database that does not exist.
 pub const DATABASE_FILE_NAME: &str = "goatstare_phase1.sqlite3";
+
+/// How long a statement waits for a competing writer before reporting SQLITE_BUSY.
+///
+/// Generous because contention here is brief — every write in this app is a small single-row
+/// update — and because the alternative the user sees is a database error mid-connect.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const MIGRATIONS: &[(i64, &str)] = &[
   (1, include_str!("../../../migrations/0001_init.sql")),
@@ -424,6 +431,18 @@ impl Database {
     Ok(())
   }
 
+  /// Inserts a provider row, or leaves an existing one untouched.
+  ///
+  /// `OR IGNORE` because every caller is establishing a row that must exist — the built-in
+  /// DigitalOcean and Docker records — rather than creating a user-named entity where a collision
+  /// would be a mistake worth reporting.
+  ///
+  /// It also has to be race-safe. Tauri used to run every command inline on the UI thread, which
+  /// serialized all database access as a side effect, so the check-then-insert in
+  /// `ensure_provider_present` could never interleave. Commands now run on the blocking pool so the
+  /// window stays responsive, and the dashboard fires four of them at once on load — each seeing no
+  /// provider and inserting one. Under a plain `INSERT` the losers failed with a unique-constraint
+  /// violation, which surfaced as an empty dashboard.
   pub fn create_provider(
     &self,
     id: &str,
@@ -434,13 +453,12 @@ impl Database {
     let connection = self.open_connection()?;
     connection
       .execute(
-        "INSERT INTO providers (id, name, slug, token_ref) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT OR IGNORE INTO providers (id, name, slug, token_ref) VALUES (?1, ?2, ?3, ?4)",
         params![id, name, slug, token_ref],
       )
       .map_err(|source| DbError::Query {
         action: "create_provider",
-        detail: "Failed to insert provider. Ensure id/slug/token_ref values are unique."
-          .to_string(),
+        detail: "Failed to insert provider.".to_string(),
         source,
       })?;
 
@@ -1362,12 +1380,28 @@ impl Database {
 
   fn open_connection(&self) -> Result<Connection, DbError> {
     let path = self.path.to_string_lossy().to_string();
-    Connection::open(&self.path).map_err(|source| DbError::Open {
-      path,
+    let connection = Connection::open(&self.path).map_err(|source| DbError::Open {
+      path: path.clone(),
       detail: "Could not open SQLite file. Verify folder exists and process has write access."
         .to_string(),
       source,
-    })
+    })?;
+
+    // Wait for a competing writer instead of failing immediately with SQLITE_BUSY.
+    //
+    // Tauri used to run every command inline on the UI thread, which serialized all database
+    // access as a side effect. Commands now run off that thread so the window stays responsive
+    // during a connect, which means the 1 Hz phase poll and a connect's writes genuinely overlap.
+    // Without this, that overlap surfaces to the user as a spurious database error.
+    connection
+      .busy_timeout(BUSY_TIMEOUT)
+      .map_err(|source| DbError::Open {
+        path,
+        detail: "Could not configure SQLite busy timeout.".to_string(),
+        source,
+      })?;
+
+    Ok(connection)
   }
 }
 

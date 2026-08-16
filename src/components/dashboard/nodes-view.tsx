@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import { Button, Card, Field, PageChrome, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type TunnelRecord, type VpnNodeRecord, type PlanDisplayModel, type HealthPanelData } from "./shared";
 import { formatCreatedTime, formatCurrency, formatMemory, getNodePricingDisplay } from "./shared";
@@ -15,6 +15,9 @@ import {
 /** One treatment per state, so a powered-on server no longer looks identical to a connected one. */
 const NODE_STATUS_CLASSES: Record<NodeStatus, string> = {
   connected: "border-[color:rgba(78,222,163,0.35)] bg-[color:rgba(78,222,163,0.12)] text-[var(--secondary)]",
+  // Amber, and deliberately not the green used for `connected`: during this state the user has no
+  // internet, so it must not be mistaken at a glance for a working tunnel.
+  connecting: "border-[color:rgba(255,185,95,0.35)] bg-[color:rgba(255,185,95,0.12)] text-[var(--tertiary)]",
   current: "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)] text-[var(--primary)]",
   ready: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.04)] text-[var(--on-surface-variant)]",
   provisioning: "border-[color:rgba(171,199,255,0.25)] bg-[color:rgba(171,199,255,0.07)] text-[var(--on-surface-variant)]",
@@ -107,7 +110,6 @@ export function NodesView({
     () => new Map(providers.map((provider) => [provider.id, provider.name])),
     [providers],
   );
-  const [optimisticConnectedByNodeId, setOptimisticConnectedByNodeId] = useState<Record<string, boolean>>({});
 
   return (
     <PageChrome>
@@ -167,9 +169,13 @@ export function NodesView({
                     const diagnosticsTunnelForNode = (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === node.id) ?? null;
                     const liveSelectedTunnelForNode = node.id === selectedNodeId ? selectedNodeTunnel : null;
                     const tunnelForNode = liveSelectedTunnelForNode ?? diagnosticsTunnelForNode;
-                    const optimisticConnected = optimisticConnectedByNodeId[node.id] ?? (status === "connected");
+                    // Derived from the one shared status, not a per-row optimistic shadow. The row
+                    // used to flip to "Disconnect" the moment it was clicked, which asserted a
+                    // working tunnel during the exact window where the user has no internet.
+                    const isConnectedRow = status === "connected";
+                    const isConnectingRow = status === "connecting";
                     const canInstallHost = node.lifecycle_status.toLowerCase() === "new";
-                    const canToggleTunnel = isConnectable(status) || optimisticConnected || !!tunnelForNode;
+                    const canToggleTunnel = isConnectable(status) || isConnectedRow || !!tunnelForNode;
                     const nodePricing = getNodePricingDisplay(node, pricingByRegion);
                     const monthly = node.price_monthly_usd ?? nodePricing?.monthlyUsd;
 
@@ -212,42 +218,21 @@ export function NodesView({
                               </Button>
                             ) : (
                               <Button
-                                tone={optimisticConnected ? "danger" : "primary"}
+                                tone={isConnectedRow ? "danger" : "primary"}
                                 onClick={() => {
-                                  const previous = optimisticConnected;
-                                  if (previous) {
-                                    setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: false }));
-                                    void (async () => {
-                                      try {
-                                        if (tunnelForNode) {
-                                          await onDisconnectTunnel(tunnelForNode);
-                                        } else {
-                                          await onForceDisconnectNodeService(node);
-                                        }
-                                      } catch {
-                                        setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: true }));
-                                      }
-                                    })();
+                                  if (isConnectedRow) {
+                                    void (tunnelForNode
+                                      ? onDisconnectTunnel(tunnelForNode)
+                                      : onForceDisconnectNodeService(node));
                                     return;
                                   }
 
-                                  setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: true }));
-                                  void (async () => {
-                                    try {
-                                      if (tunnelForNode) {
-                                        await onConnectTunnel(tunnelForNode);
-                                        return;
-                                      }
-                                      await onConnectNode(node);
-                                    } catch {
-                                      setOptimisticConnectedByNodeId((current) => ({ ...current, [node.id]: false }));
-                                    }
-                                  })();
+                                  void (tunnelForNode ? onConnectTunnel(tunnelForNode) : onConnectNode(node));
                                 }}
-                                disabled={busyAction !== null || !canToggleTunnel}
+                                disabled={busyAction !== null || isConnectingRow || !canToggleTunnel}
                                 className="min-w-[104px] px-3 py-2 text-xs"
                               >
-                                {optimisticConnected ? "Disconnect" : "Connect"}
+                                {isConnectingRow ? "Connecting" : isConnectedRow ? "Disconnect" : "Connect"}
                               </Button>
                             )}
                             <button

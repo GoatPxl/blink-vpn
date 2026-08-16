@@ -25,14 +25,13 @@ Provider adapters currently included:
 | `suspend` | Pause provider or node operations | `suspend_provider` |
 | `resume` | Resume provider or node operations | `resume_provider` |
 | `delete` | Deprovision remote and local state | `destroy_vpn_node`, `force_cleanup_vpn_node` |
-| `get_system_info` | Retrieve runtime health and diagnostics | `get_health_panel_data`, `read_client_tunnel_status`, diagnostics commands |
+| `get_system_info` | Retrieve runtime health and diagnostics | `get_health_panel_data`, `get_tunnel_phase`, diagnostics commands |
 | `list` / `get` | Query local metadata | `list_providers`, `list_vpn_nodes`, `list_tunnels_for_node` |
 
 ## Command Reference
 
 | Command | Request | Response | Notes |
 | --- | --- | --- | --- |
-| `hello` | `name?: string` | `string` | Connectivity sanity check |
 | `register_provider_token` | `provider_id`, `provider_name`, `api_token` | `string` | Stores the credential in secure storage and persists its reference. Provider-neutral: the adapter is resolved from the stored provider record, so there is no per-provider command. |
 | `validate_provider_token` | `provider_id` | `string` | Checks the stored key through the adapter and records the verdict on that provider row. Reads the *stored* key, so it never validates something newly typed but unsaved |
 | `list_provider_regions` | `provider_id` | `ProviderRegion[]` | Region catalog with normalized geography — see below |
@@ -41,7 +40,7 @@ Provider adapters currently included:
 | `create_and_activate_client_tunnel` | `tunnel_id`, `node_id`, `tunnel_name`, `client_address_cidr`, `dns_server?`, `allowed_ips` | `string` | Reuses the client keypair generated at provision time and marks the tunnel ready |
 | `activate_client_tunnel` | `tunnel_id` | `void` | Activates a local tunnel through the WireGuard tunnel service |
 | `deactivate_client_tunnel` | `tunnel_id` | `void` | Deactivates a local tunnel through the WireGuard tunnel service |
-| `connect_tunnel` | `node_id`, `tunnel_id` | `void` | Marks tunnel connected and updates node lifecycle |
+| `connect_tunnel` | `node_id`, `tunnel_id` | `void` | Registers and starts the tunnel service. **Returning means the service is running, not that the tunnel carries traffic** — poll `get_tunnel_phase` for that. Rejects a second concurrent connect for the same tunnel with `invalid-state` |
 | `disconnect_tunnel` | `node_id`, `tunnel_id` | `void` | Marks tunnel disconnected and updates node lifecycle |
 | `suspend_provider` | `provider_id` | `void` | Suspends provider operations |
 | `resume_provider` | `provider_id` | `void` | Resumes provider operations |
@@ -55,8 +54,8 @@ Provider adapters currently included:
 | `set_tunnel_settings` | `dns_server` (nullable), `keepalive_seconds` | `void` | Validates before storing; a non-IP DNS value is rejected with `invalid-input` |
 | `list_providers` | none | `ProviderRecord[]` | Local provider records, including `last_validation_status` / `last_validated_at` from the last key check |
 | `list_tunnels_for_node` | `node_id` | `TunnelRecord[]` | Local tunnels for node |
-| `read_client_tunnel_status` | `tunnel_id` | `string` | Runtime status summary |
-| `get_health_panel_data` | `node_id`, `tunnel_id?` | `HealthPanelData` | Health card payload. Also reconciles a stale tunnel row against the live service state — see below |
+| `get_tunnel_phase` | `node_id`, `tunnel_id` | `TunnelPhaseSnapshot` | How far along a connect is. Cheap enough to poll at 1 Hz — see below |
+| `get_health_panel_data` | `node_id`, `tunnel_id?` | `HealthPanelData` | Health card payload, including the same `phase` verdict. Also reconciles a stale tunnel row against the live service state — see below |
 | `get_diagnostics_bundle` | none | `DiagnosticsBundleResponse` | Sanitized diagnostics payload, including the `activity` history — see below |
 | `export_diagnostics_bundle` | none | `string` | Path to exported diagnostics JSON |
 | `list_app_locations` | none | `AppLocation[]` | The folders this app writes to, with a `key`, a display `path`, and whether it `exists` yet |
@@ -165,6 +164,61 @@ the caller**: passing a webview-supplied path to the Windows shell would let any
 page open an arbitrary target. An unrecognised key returns `invalid-input`, and a path that does not
 exist yet is refused rather than opened.
 
+### Connect progress: `tunnel_status` vs `phase`
+
+These answer different questions, and conflating them was a real bug.
+
+- **`tunnel_status`** tracks the Windows *service*. It reads `connected` as soon as the service is
+  running.
+- **`phase`** tracks whether the tunnel actually **carries traffic**. Only this may turn a UI green.
+
+The gap between them is not incidental. The WireGuard adapter captures the default route the moment
+its service starts, so from that instant the user's traffic is inside a tunnel whose peer has not
+answered — their internet is down. Observed in the field: service running at `10:22:07.851`, first
+handshake response at `10:22:23.051`. For fifteen seconds the app reported success while nothing
+worked.
+
+```json
+{
+  "tunnel_id": "tunnel-node-1",
+  "tunnel_name": "Primary-Node-wg",
+  "phase": "connecting",
+  "service_state": "running",
+  "elapsed_seconds": 6,
+  "rx_bytes": 0,
+  "tx_bytes": 592
+}
+```
+
+| `phase` | Meaning |
+| --- | --- |
+| `disconnected` | No service, or it is stopped. Traffic uses the normal connection. |
+| `connecting` | Service up, nothing has come back. **The user has no working internet in this state.** |
+| `stalled` | Still connecting past when a working server would have answered. |
+| `connected` | Traffic has provably crossed the tunnel. |
+| `degraded` | A handshake happened, but old enough that the link may be dead. |
+
+**How `connected` is decided, without administrator.** `wg show` reads the tunnel service's
+restricted pipe, so `handshake_age_seconds` is `null` in every unelevated run and cannot be the
+gate. The load-bearing signal is instead **`rx_bytes > 0`**: WireGuard discards anything it cannot
+decrypt and authenticate, so the adapter's inbound octet counter only advances for payload that was
+decrypted with a live session key. Non-zero inbound bytes cannot exist without a completed
+handshake, and the counter comes from Win32 `GetIfTable2` — in-process, no elevation, no subprocess.
+
+The converse does not hold: a handshake whose only traffic is a keepalive decrypts to a zero-length
+payload that is never injected, so `rx_bytes == 0` can briefly outlive a real handshake. That is why
+zero maps to `connecting` and a slow peer becomes `stalled` rather than an error. When the app *is*
+elevated, a fresh handshake age outranks the counter.
+
+`elapsed_seconds` is `null` for a tunnel that was already running when the app started — it has no
+knowable attempt time, and such a tunnel is never reported as `stalled`, because asserting a stall
+from an unknown baseline would be a lie.
+
+Both `get_tunnel_phase` and `get_health_panel_data` compute this through the same
+`classify_tunnel_phase`, so the 1 Hz and 5 s polls cannot disagree. `get_tunnel_phase` is the cheap
+one — one `sc query` spawn plus an in-process counter read, no credential-store access, no HTTP, and
+no database writes — and is what the connect-progress UI polls.
+
 ### Health panel payload
 
 ```json
@@ -178,6 +232,7 @@ exist yet is refused rather than opened.
   "external_ipv4": "203.0.113.10",
   "external_ipv6": null,
   "tunnel_status": "connected",
+  "phase": "connected",
   "metrics_source": "adapter",
   "connected_at": "2026-08-15T10:00:00.000Z",
   "kill_switch": {
@@ -202,10 +257,12 @@ until reconnect. A user-initiated disconnect records intent first and is never r
 `observed_at_epoch_ms` is Unix milliseconds, unlike the ISO-8601 timestamps elsewhere in this
 payload.
 
-Takes an optional `force_ip_probe` flag. The egress addresses are cached for 60 seconds because
-health polls far more often than an address changes; the cache is bypassed automatically whenever
-the connection state changes, and explicitly when the user asks for a refresh. Leave it off for
-ambient polling or the app will hammer a third-party IP service.
+Takes an optional `force_ip_probe` flag. A successful egress reading is cached for 60 seconds
+because health polls far more often than an address changes; a **failed** one is cached for only 5,
+because the usual cause of failure is the tunnel coming up and that answer stops being true within
+seconds. The cache is bypassed automatically whenever the connection state changes, and explicitly
+when the user asks for a refresh. Leave the flag off for ambient polling or the app will hammer a
+third-party IP service.
 
 Five fields carry meaning in their absence, and callers must not paper over it:
 
@@ -216,6 +273,12 @@ Five fields carry meaning in their absence, and callers must not paper over it:
 | `handshake_age_seconds` | `wg show` needs administrator (see AGENTS.md §4) | Reported as `0` |
 | `rx_bytes` / `tx_bytes` | No counters could be read | Reported as `0`, which would claim a measured idle tunnel |
 | `connected_at` | Not connected, or the session started before the app was watching | Backfilled with the current time |
+
+`connected_at` is stamped on the first observation where `phase` proves the tunnel carries traffic,
+not when the service started — the two are seconds apart, and stamping at service start made
+"Connection Time" count the outage as connected time. It is only ever stamped for a tunnel this
+session started, so one found already running keeps `null` rather than showing a timer counting from
+an arbitrary moment.
 
 `external_ipv4` is measured in **every** connection state, not only while connected — the address
 changing as the tunnel comes up is the user-visible evidence that it carries traffic.

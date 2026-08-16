@@ -3,6 +3,7 @@
 import { DashboardEmptyState } from "@/components/dashboard-empty-state";
 import { AppIcon, Button, ConnectionTimer, PageChrome, formatHandshakeAge, type AppView, type HealthPanelData, type RecoveryState, type DashboardBusyAction, type TunnelRecord, type VpnNodeRecord } from "./shared";
 import { describeEgress, describeIpv6, handshakeFreshness, type EgressTone } from "@/lib/connection-display";
+import type { ConnectAttempt } from "./dashboard-provider";
 
 /** Maps an egress verdict onto the theme's colour tokens. */
 const EGRESS_TONE_VAR: Record<EgressTone, string> = {
@@ -107,6 +108,7 @@ export function DashboardOverview({
   throughputSamples,
   recovery,
   busyAction,
+  connectAttempt,
   onConnectPrimary,
   onConnectTunnel,
   onDisconnectTunnel,
@@ -122,6 +124,7 @@ export function DashboardOverview({
   throughputSamples: ThroughputSample[];
   recovery: RecoveryState | null;
   busyAction: DashboardBusyAction;
+  connectAttempt: ConnectAttempt | null;
   onConnectPrimary: () => Promise<void>;
   onConnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onDisconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
@@ -135,22 +138,31 @@ export function DashboardOverview({
   if (!(noServerConfigured && activeView === "dashboard") && activeView === "dashboard") {
     // Every connection widget reads the same live value, so the headline can no longer contradict
     // the handshake card beside it.
-    const statusLabel = recovery
-      ? "Status: Attention"
-      : tunnelConnected
-        ? "Status: Secure"
-        : connectedTunnel
-          ? "Status: Disconnected"
-          : "Status: Idle";
-    const statusTone = recovery
+    // A connect in flight outranks everything else here: the user's internet is down during it, so
+    // it is the one thing worth saying. It must not read as "Idle" — that is what made losing
+    // connectivity look like a fault rather than a step.
+    const isConnecting = connectAttempt !== null;
+    const statusLabel = isConnecting
+      ? "Status: Connecting"
+      : recovery
+        ? "Status: Attention"
+        : tunnelConnected
+          ? "Status: Secure"
+          : connectedTunnel
+            ? "Status: Disconnected"
+            : "Status: Idle";
+    const statusTone = isConnecting
       ? "var(--tertiary)"
+      : recovery
+        ? "var(--tertiary)"
+        : tunnelConnected
+          ? "var(--secondary)"
+          : "var(--on-surface-variant)";
+    const buttonLabel = isConnecting
+      ? "Connecting"
       : tunnelConnected
-        ? "var(--secondary)"
-        : "var(--on-surface-variant)";
-    const isConnectBusy = busyAction === "connect-tunnel" || busyAction === "create-tunnel";
-    const buttonLabel = tunnelConnected
-      ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect")
-      : (isConnectBusy ? "Connecting" : "Connect");
+        ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect")
+        : "Connect";
     const buttonTone = tunnelConnected ? "danger" : "primary";
 
     // Known only when this app established the session. A tunnel already running at startup has
@@ -214,7 +226,7 @@ export function DashboardOverview({
                   }
                   void onConnectPrimary();
                 }}
-                disabled={busyAction !== null || !activeNode}
+                disabled={busyAction !== null || isConnecting || !activeNode}
               >
                 <AppIcon name="power" className="h-4 w-4" />
                 {buttonLabel}

@@ -18,6 +18,7 @@ import {
   setTunnelSettings as setTunnelSettingsCommand,
   getDiagnosticsBundle,
   getHealthPanelData,
+  getTunnelPhase,
   listAppLocations,
   listProviders,
   listTunnelsForNode,
@@ -31,6 +32,8 @@ import {
   type DockerReadiness,
   type ProviderRecord,
   type TunnelMetricsSource,
+  type TunnelPhase,
+  type TunnelPhaseSnapshot,
   type TunnelRecord,
   type TunnelSettings,
   type VpnNodeRecord,
@@ -82,8 +85,32 @@ function snapshotIsConnected(snapshot: HealthPanelData): boolean {
   return snapshot.tunnel_status?.toLowerCase() === "connected";
 }
 
+/**
+ * A connect the user started that has not finished.
+ *
+ * Separate from `busyAction` because that slot is global and exclusive — every control in the app
+ * is disabled while it is set. A connect takes tens of seconds and leaves the user without
+ * internet, which is the worst possible moment to also freeze the window they would use to
+ * understand or undo it.
+ */
+export type ConnectAttempt = {
+  nodeId: string;
+  tunnelId: string | null;
+  tunnelName: string;
+  /** `Date.now()` at the click, so the clock runs before the first poll lands. */
+  startedAt: number;
+  /** True while the tunnel record is being created, before there is a service to poll. */
+  creatingTunnel: boolean;
+  /** Latest backend verdict; null until the first phase poll returns. */
+  snapshot: TunnelPhaseSnapshot | null;
+};
+
 type DashboardContextValue = {
   busyAction: DashboardBusyAction;
+  /** The in-flight connect, or null. Drives the progress card and gates connect controls. */
+  connectAttempt: ConnectAttempt | null;
+  /** Tears down a connect that is taking too long, restoring the user's normal connection. */
+  cancelConnect: () => Promise<void>;
   toasts: Toast[];
   recovery: RecoveryState | null;
   nodes: VpnNodeRecord[];
@@ -113,8 +140,15 @@ type DashboardContextValue = {
   activeNode: VpnNodeRecord | null;
   connectedTunnel: TunnelRecord | null;
   noServerConfigured: boolean;
-  /** Live service state, not the stored row. The one value every connection widget keys off. */
+  /**
+   * Whether the tunnel provably carries traffic. The one value every connection widget keys off.
+   *
+   * Not "is the service running" — that is true roughly fifteen seconds before the tunnel works,
+   * and turning the indicator green there is the bug this replaced.
+   */
   tunnelConnected: boolean;
+  /** The backend's phase verdict, for widgets that need to distinguish connecting from idle. */
+  tunnelPhase: TunnelPhase;
   /** The node the app connects to by default, or null when several exist and none was chosen. */
   currentNodeId: string | null;
   setCurrentNode: (nodeId: string) => Promise<void>;
@@ -165,6 +199,7 @@ const DashboardContext = createContext<DashboardContextValue | null>(null);
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const dockerDevEnabled = process.env.NEXT_PUBLIC_DEV_DOCKER === "1";
   const [busyAction, setBusyAction] = useState<DashboardBusyAction>(null);
+  const [connectAttempt, setConnectAttempt] = useState<ConnectAttempt | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [nodes, setNodes] = useState<VpnNodeRecord[]>([]);
@@ -202,6 +237,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const providerIdRef = useRef(providerId);
   const selectedNodeIdRef = useRef(selectedNodeId);
   const selectedTunnelIdRef = useRef(selectedTunnelId);
+  // Guards against a slow health read queueing more of itself behind the tick.
+  const healthPollInFlightRef = useRef(false);
   const lastTrafficSampleRef = useRef<{
     timestamp: number;
     nodeId: string;
@@ -228,16 +265,24 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const connectedTunnel = tunnels.find((tunnel) => tunnel.status.toLowerCase() === "connected") ?? tunnels[0] ?? null;
   const noServerConfigured = nodes.length === 0;
 
-  // The live Windows service decides whether a tunnel is up; the stored row is only a fallback
-  // for the moment before the first health snapshot arrives.
+  // Whether the tunnel provably carries traffic, decided in Rust by `classify_tunnel_phase`.
   //
-  // These disagreed. The row went stale whenever a tunnel changed state outside a completed
-  // connect flow, and reading it made the dashboard show "Idle" with a Connect button while the
-  // handshake card on the same screen — fed by the runtime — correctly read "connected".
-  const runtimeStatus = health?.tunnel_status?.toLowerCase() ?? null;
-  const tunnelConnected = runtimeStatus !== null
-    ? runtimeStatus === "connected"
-    : connectedTunnel?.status.toLowerCase() === "connected";
+  // This used to read `health.tunnel_status`, which reports the Windows *service*. The service
+  // reaches "connected" the instant it starts — and because the adapter captures the default route
+  // at that same instant, that is exactly when the user's internet goes down. In the reported
+  // failure the handshake landed fifteen seconds later, so the indicator was green for the entire
+  // outage. The phase verdict waits for evidence that traffic actually crossed the tunnel.
+  //
+  // While an attempt is live, only its own snapshot may turn anything green: the 5s health poll is
+  // suspended during a connect, so its last value is stale by definition.
+  const tunnelPhase: TunnelPhase = connectAttempt !== null
+    ? connectAttempt.snapshot?.phase ?? "connecting"
+    : health?.phase
+      // Before the first snapshot of the session there is nothing measured yet, so the stored row
+      // stands in. It is the only fallback left, and only for that moment.
+      ?? (connectedTunnel?.status.toLowerCase() === "connected" ? "connected" : "disconnected");
+
+  const tunnelConnected = tunnelPhase === "connected" || tunnelPhase === "degraded";
 
   useEffect(() => {
     providerIdRef.current = providerId;
@@ -547,7 +592,18 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    if (!silent) {
+    // A silent poll that is already running must not be stacked on. This read can take seconds —
+    // its egress probe alone has a three-second timeout — and the 5s interval would otherwise queue
+    // several, which then all resolve at once and fight over `health`.
+    //
+    // A user-initiated refresh is never dropped: the user pressed a button and is owed an answer.
+    if (silent && healthPollInFlightRef.current) {
+      return;
+    }
+
+    if (silent) {
+      healthPollInFlightRef.current = true;
+    } else {
       setBusyAction("refresh-health");
     }
 
@@ -571,7 +627,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         handleError(error);
       }
     } finally {
-      if (!silent) {
+      if (silent) {
+        healthPollInFlightRef.current = false;
+      } else {
         setBusyAction(null);
       }
     }
@@ -776,13 +834,25 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       .replace(/^-|-$/g, "")
       .slice(0, 56) || "primary"}-wg`;
 
-    setBusyAction("connect-tunnel");
+    // Not `busyAction`: that slot disables every control in the app, and a connect runs for tens of
+    // seconds while the user has no internet — the worst moment to also freeze the window.
+    setConnectAttempt({
+      nodeId: node.id,
+      tunnelId: null,
+      tunnelName: canonicalTunnelName,
+      startedAt: Date.now(),
+      creatingTunnel: false,
+      snapshot: null,
+    });
+
     try {
       let tunnelForNode = tunnels.find((tunnel) => tunnel.node_id === node.id) ?? null;
       const canonicalTunnelId = `tunnel-${node.id}`;
 
       if (!tunnelForNode) {
-        setBusyAction("create-tunnel");
+        setConnectAttempt((current) =>
+          current === null ? current : { ...current, creatingTunnel: true },
+        );
         await createAndActivateClientTunnel({
           tunnelId: canonicalTunnelId,
           nodeId: node.id,
@@ -800,15 +870,25 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         throw new Error("Primary tunnel could not be resolved after creation.");
       }
 
+      // Recorded before the command runs so the phase poll has something to ask about while the
+      // service is being registered — that window includes the UAC prompt and is where the app
+      // previously looked frozen with nothing on screen to explain it.
+      const resolvedTunnel = tunnelForNode;
+      setConnectAttempt((current) =>
+        current === null
+          ? current
+          : { ...current, tunnelId: resolvedTunnel.id, creatingTunnel: false },
+      );
+
       if (tunnelForNode.status.toLowerCase() !== "connected") {
-        setBusyAction("connect-tunnel");
         await connectTunnelCommand(node.id, tunnelForNode.id);
       }
 
+      // No success toast here. The command resolving means the *service* started, which is roughly
+      // fifteen seconds before the tunnel carries traffic. The toast now fires from the phase poll
+      // when the verdict actually reaches `connected`.
       setRecovery(null);
-      pushToast("success", "Tunnel connected", `${tunnelForNode.name} is now connected.`);
       await loadDashboard(node.id);
-      await refreshHealthSnapshot(true);
     } catch (error) {
       // A stale or missing tunnel service is recoverable by re-importing the tunnel. The backend
       // reports it as a WireGuard failure; this used to be inferred by matching five different
@@ -820,7 +900,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         const recoverableTunnel = tunnels.find((tunnel) => tunnel.node_id === node.id) ?? null;
         if (recoverableTunnel) {
           try {
-            setBusyAction("create-tunnel");
+            setConnectAttempt((current) =>
+              current === null
+                ? current
+                : { ...current, tunnelId: recoverableTunnel.id, creatingTunnel: true },
+            );
             await createAndActivateClientTunnel({
               tunnelId: recoverableTunnel.id,
               nodeId: recoverableTunnel.node_id,
@@ -830,26 +914,30 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
               allowedIps: ["0.0.0.0/0", "::/0"],
             });
 
-            setBusyAction("connect-tunnel");
+            setConnectAttempt((current) =>
+              current === null ? current : { ...current, creatingTunnel: false },
+            );
             await connectTunnelCommand(node.id, recoverableTunnel.id);
 
+            // Same reasoning as the happy path: the service starting is not the tunnel working, so
+            // the phase poll announces success and this only reports the repair.
             setRecovery(null);
-            pushToast("success", "Tunnel recovered", `${recoverableTunnel.name} was re-imported and connected.`);
             await loadDashboard(node.id);
-            await refreshHealthSnapshot(true);
             return;
           } catch (recoveryError) {
+            setConnectAttempt(null);
             handleError(recoveryError);
             return;
           }
         }
       }
 
+      setConnectAttempt(null);
       handleError(error);
-    } finally {
-      setBusyAction(null);
     }
-  }, [handleError, loadDashboard, pushToast, refreshHealthSnapshot, tunnels]);
+    // No `finally` clearing the attempt: on success it stays live so the phase poll can watch the
+    // handshake land. The poll owns clearing it.
+  }, [handleError, loadDashboard, pushToast, tunnels]);
 
   const connectPrimary = useCallback(async () => {
     if (!activeNode) {
@@ -861,19 +949,28 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [activeNode, connectNode, pushToast]);
 
   const connectTunnel = useCallback(async (tunnel: TunnelRecord) => {
-    setBusyAction("connect-tunnel");
+    setConnectAttempt({
+      nodeId: tunnel.node_id,
+      tunnelId: tunnel.id,
+      tunnelName: tunnel.name,
+      startedAt: Date.now(),
+      creatingTunnel: false,
+      snapshot: null,
+    });
+
     try {
       await connectTunnelCommand(tunnel.node_id, tunnel.id);
+      // Success is announced by the phase poll, once traffic provably crosses the tunnel.
       setRecovery(null);
-      pushToast("success", "Tunnel connected", `${tunnel.name} is now connected.`);
       await loadDashboard(tunnel.node_id);
-      await refreshHealth();
     } catch (error) {
       const missingService = toCommandError(error).kind === "wire-guard";
 
       if (missingService) {
         try {
-          setBusyAction("create-tunnel");
+          setConnectAttempt((current) =>
+            current === null ? current : { ...current, creatingTunnel: true },
+          );
           await createAndActivateClientTunnel({
             tunnelId: tunnel.id,
             nodeId: tunnel.node_id,
@@ -888,28 +985,31 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
             allowedIps: ["0.0.0.0/0", "::/0"],
           });
 
-          setBusyAction("connect-tunnel");
+          setConnectAttempt((current) =>
+            current === null ? current : { ...current, creatingTunnel: false },
+          );
           await connectTunnelCommand(tunnel.node_id, tunnel.id);
 
           setRecovery(null);
-          pushToast("success", "Tunnel recovered", `${tunnel.name} was re-imported and connected.`);
           await loadDashboard(tunnel.node_id);
-          await refreshHealth();
           return;
         } catch (recoveryError) {
+          setConnectAttempt(null);
           handleError(recoveryError);
           return;
         }
       }
 
+      setConnectAttempt(null);
       handleError(error);
-    } finally {
-      setBusyAction(null);
     }
-  }, [handleError, loadDashboard, nodes, pushToast, refreshHealth]);
+  }, [handleError, loadDashboard, nodes]);
 
   const disconnectTunnel = useCallback(async (tunnel: TunnelRecord) => {
     setBusyAction("disconnect-tunnel");
+    // Ends any attempt for this tunnel first, so the progress card cannot outlive the tunnel it is
+    // reporting on — and so its poll stops competing with the teardown.
+    setConnectAttempt((current) => (current?.tunnelId === tunnel.id ? null : current));
     try {
       await disconnectTunnelCommand(tunnel.node_id, tunnel.id);
       setRecovery(null);
@@ -922,6 +1022,45 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setBusyAction(null);
     }
   }, [handleError, loadDashboard, pushToast, refreshHealth]);
+
+  /**
+   * Abandons a connect that is taking too long and restores the user's normal connection.
+   *
+   * Tearing the tunnel down is the only real escape: the adapter holds the default route for as
+   * long as it exists, so simply hiding the progress card would leave the user offline with nothing
+   * on screen explaining why.
+   */
+  const cancelConnect = useCallback(async () => {
+    const attempt = connectAttempt;
+    if (!attempt) return;
+
+    setBusyAction("disconnect-tunnel");
+    try {
+      if (attempt.tunnelId) {
+        await disconnectTunnelCommand(attempt.nodeId, attempt.tunnelId);
+      } else {
+        // No tunnel record resolved yet, so there is no id to disconnect by. The node-wide stop is
+        // the only handle available.
+        await forceDisconnectNodeServiceCommand(attempt.nodeId);
+      }
+
+      setConnectAttempt(null);
+      pushToast(
+        "info",
+        "Connection cancelled",
+        "The tunnel was shut down and your normal connection is back.",
+      );
+      await loadDashboard(attempt.nodeId);
+      await refreshHealthSnapshot(true);
+    } catch (error) {
+      // The attempt is cleared regardless: leaving the card up would imply a connect is still
+      // progressing when the user has asked for it to stop.
+      setConnectAttempt(null);
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [connectAttempt, handleError, loadDashboard, pushToast, refreshHealthSnapshot]);
 
   const forceDisconnectNodeService = useCallback(async (node: VpnNodeRecord) => {
     setBusyAction("disconnect-tunnel");
@@ -1083,11 +1222,107 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
 
     const intervalId = window.setInterval(() => {
+      // Deliberately keeps running during a connect. Its egress probe is the traffic that proves
+      // the tunnel carries anything — the phase verdict waits for decrypted inbound bytes, and on
+      // an otherwise idle machine something has to generate them. Suspending this poll produced a
+      // connect that could sit at "waiting for the server" while the tunnel was already working.
+      //
+      // Safe to leave running now that commands execute off the UI thread: the three-second egress
+      // timeout it can hit during the handshake wait no longer blocks the window.
       void refreshHealthSnapshot(true);
     }, 5000);
 
     return () => window.clearInterval(intervalId);
   }, [refreshHealthSnapshot, selectedNodeId]);
+
+  /**
+   * Watches a connect through to the point where traffic actually crosses the tunnel.
+   *
+   * This is what replaced announcing success when `connect_tunnel` returned. That command resolves
+   * when the Windows service is running, which in the reported failure was fifteen seconds before
+   * the first handshake — the entire time the user had no internet and the app showed green.
+   *
+   * Runs at 1 Hz because the user is staring at a dead connection and the elapsed counter has to
+   * look alive. `get_tunnel_phase` is built for that rate: one `sc query` and an in-process counter
+   * read, no credential access and no network call.
+   */
+  useEffect(() => {
+    const nodeId = connectAttempt?.nodeId;
+    const tunnelId = connectAttempt?.tunnelId;
+
+    // Nothing to poll until a tunnel record exists — during creation there is no service yet.
+    if (!nodeId || !tunnelId) {
+      return;
+    }
+
+    let cancelled = false;
+    let inFlight = false;
+    // A tunnel whose service has not been registered yet reports `disconnected`, and that is the
+    // normal opening state of a connect — the service is created partway through, after the UAC
+    // prompt. Only a service that was up and then went away is a failure, so the two are told apart
+    // by whether one was ever observed.
+    let serviceWasSeenUp = false;
+
+    const poll = async () => {
+      // The command runs off the UI thread now, so a slow read no longer blocks the window — but
+      // it can still outlive its tick, and overlapping reads would queue up behind each other.
+      if (inFlight) return;
+      inFlight = true;
+
+      try {
+        const snapshot = await getTunnelPhase(nodeId, tunnelId);
+        if (cancelled) return;
+
+        setConnectAttempt((current) => {
+          // A different attempt started, or the user cancelled, while this read was in flight.
+          if (current === null || current.tunnelId !== tunnelId) return current;
+          return { ...current, snapshot };
+        });
+
+        if (snapshot.phase !== "disconnected") {
+          serviceWasSeenUp = true;
+        }
+
+        if (snapshot.phase === "connected" || snapshot.phase === "degraded") {
+          setConnectAttempt(null);
+          pushToast(
+            "success",
+            "Tunnel connected",
+            `${snapshot.tunnel_name} is carrying traffic.`,
+          );
+          // Forced refresh: this both updates the egress card immediately and generates the
+          // traffic that keeps proving the tunnel works.
+          void refreshHealthSnapshot(true);
+        } else if (snapshot.phase === "disconnected" && serviceWasSeenUp) {
+          // The service was up and has gone away — the connect failed rather than completed, and
+          // leaving the card up would show progress that is no longer happening.
+          setConnectAttempt(null);
+          pushToast(
+            "warning",
+            "Connection did not start",
+            `${snapshot.tunnel_name} stopped before it carried any traffic. Try connecting again.`,
+          );
+          void refreshHealthSnapshot(true);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        // A failed status read is not a failed connect — the tunnel may still be coming up — so the
+        // attempt continues and the next tick tries again. Surfacing a toast per second here would
+        // bury the progress card the user is reading.
+        console.warn("connect phase poll failed", error);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void poll();
+    const intervalId = window.setInterval(() => void poll(), 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [connectAttempt?.nodeId, connectAttempt?.tunnelId, pushToast, refreshHealthSnapshot]);
 
   useEffect(() => {
     if (!dockerDevEnabled) {
@@ -1173,6 +1408,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const value: DashboardContextValue = {
     busyAction,
+    connectAttempt,
+    cancelConnect,
     toasts,
     recovery,
     nodes,
@@ -1203,6 +1440,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     connectedTunnel,
     noServerConfigured,
     tunnelConnected,
+    tunnelPhase,
     currentNodeId,
     setCurrentNode,
     dismissRecovery,

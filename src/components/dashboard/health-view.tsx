@@ -35,6 +35,7 @@ export function HealthView({
   selectedNode,
   selectedTunnelId,
   busyAction,
+  reconnecting,
   onRunChecks,
   onReconnect,
 }: {
@@ -49,6 +50,8 @@ export function HealthView({
   selectedNode: VpnNodeRecord | null;
   selectedTunnelId: string;
   busyAction: DashboardBusyAction;
+  /** A connect started from this banner is still in flight. */
+  reconnecting: boolean;
   onRunChecks: () => Promise<void>;
   onReconnect: (() => Promise<void>) | null;
 }) {
@@ -74,8 +77,12 @@ export function HealthView({
               </p>
             </div>
             {onReconnect ? (
-              <Button tone="primary" onClick={() => void onReconnect()} disabled={busyAction !== null}>
-                {busyAction === "connect-tunnel" ? "Reconnecting" : "Reconnect"}
+              <Button
+                tone="primary"
+                onClick={() => void onReconnect()}
+                disabled={busyAction !== null || reconnecting}
+              >
+                {reconnecting ? "Reconnecting" : "Reconnect"}
               </Button>
             ) : null}
           </div>

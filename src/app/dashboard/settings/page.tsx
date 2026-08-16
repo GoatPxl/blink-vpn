@@ -8,6 +8,7 @@ import { useCallback } from "react";
 export default function DashboardSettingsPage() {
   const {
     busyAction,
+    connectAttempt,
     connectedTunnel,
     connectTunnel,
     deleteProvider,
@@ -60,6 +61,7 @@ export default function DashboardSettingsPage() {
       onReconnect={connectedTunnel ? handleReconnect : null}
       readiness={wireguardReadiness}
       busyAction={busyAction}
+      reconnecting={connectAttempt !== null}
     />
   );
 }

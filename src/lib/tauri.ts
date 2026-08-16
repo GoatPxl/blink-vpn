@@ -176,6 +176,53 @@ export interface TunnelRecord {
  */
 export type TunnelMetricsSource = "peer" | "adapter";
 
+/**
+ * How far along a connect is — as opposed to whether the Windows service is running.
+ *
+ * The distinction is the whole point. The tunnel adapter captures the default route the moment its
+ * service starts, so from that instant the user's traffic is inside a tunnel whose peer has not
+ * answered yet and their internet is down. In the reported failure the service was up at 10:22:07
+ * and the first handshake landed at 10:22:23 — fifteen seconds during which the old UI showed
+ * green.
+ *
+ * Decided in Rust by `classify_tunnel_phase`, from evidence readable without administrator:
+ * decrypted inbound bytes on the adapter, which cannot be non-zero without a completed handshake.
+ * `wg show` handshake data needs elevation and is unavailable in a normal run, so it is an
+ * enrichment here, never the gate.
+ */
+export type TunnelPhase =
+  /** No service, or it is stopped. Traffic uses the normal connection. */
+  | "disconnected"
+  /** Service up, nothing has come back through it — the user has no working internet right now. */
+  | "connecting"
+  /** Still connecting past the point a working server would have answered. */
+  | "stalled"
+  /** Traffic has provably crossed the tunnel. The only phase that may render as green. */
+  | "connected"
+  /** A handshake happened, but long enough ago that the link may be dead. */
+  | "degraded";
+
+/** The raw `sc query` verdict behind a {@link TunnelPhase}. */
+export type TunnelServiceState = "running" | "starting" | "stopped" | "unknown";
+
+/**
+ * One reading from `get_tunnel_phase`, the cheap command polled while a connect is in flight.
+ *
+ * Carries the evidence next to the verdict so the UI can say why it is still waiting rather than
+ * showing an unexplained spinner.
+ */
+export interface TunnelPhaseSnapshot {
+  tunnel_id: string;
+  tunnel_name: string;
+  phase: TunnelPhase;
+  service_state: TunnelServiceState;
+  /** Seconds since the app asked the service to start; `null` when it was already running. */
+  elapsed_seconds: number | null;
+  /** Decrypted inbound octets. `> 0` is the unelevated proof a handshake completed. */
+  rx_bytes: number | null;
+  tx_bytes: number | null;
+}
+
 export interface HealthPanelData {
   node_id: string;
   tunnel_id: string | null;
@@ -192,7 +239,16 @@ export interface HealthPanelData {
    * The tunnel is IPv4-only, so a value here while connected means IPv6 traffic is bypassing it.
    */
   external_ipv6: string | null;
+  /**
+   * The stored row's status, which tracks the Windows *service*.
+   *
+   * Reaches `"connected"` as soon as the service starts. Use {@link HealthPanelData.phase} to
+   * decide what the user is told — this reads connected during the window where their internet is
+   * down.
+   */
   tunnel_status: string | null;
+  /** Whether the tunnel actually carries traffic. This is what may turn the UI green. */
+  phase: TunnelPhase;
   metrics_source: TunnelMetricsSource | null;
   connected_at: string | null;
   kill_switch: KillSwitchState;
@@ -503,8 +559,25 @@ export async function listTunnelsForNode(nodeId: string): Promise<TunnelRecord[]
   return invokeCommand<TunnelRecord[]>("list_tunnels_for_node", { nodeId });
 }
 
+/**
+ * Registers and starts the tunnel service. Resolving means the service is *running*, not that the
+ * tunnel carries traffic — poll {@link getTunnelPhase} for that.
+ */
 export async function connectTunnel(nodeId: string, tunnelId: string): Promise<void> {
   await invokeCommand<void>("connect_tunnel", { nodeId, tunnelId });
+}
+
+/**
+ * How far along a connect is. Cheap enough to poll once a second while one is in flight.
+ *
+ * Costs one `sc query` process spawn and an in-process counter read — no credential-manager access
+ * and no egress HTTP probe, unlike {@link getHealthPanelData}.
+ */
+export async function getTunnelPhase(
+  nodeId: string,
+  tunnelId: string,
+): Promise<TunnelPhaseSnapshot> {
+  return invokeCommand<TunnelPhaseSnapshot>("get_tunnel_phase", { nodeId, tunnelId });
 }
 
 export async function disconnectTunnel(nodeId: string, tunnelId: string): Promise<void> {

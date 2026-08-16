@@ -34,6 +34,7 @@ function health(overrides: Partial<HealthPanelData> = {}): HealthPanelData {
     external_ipv4: SERVER_IP,
     external_ipv6: null,
     tunnel_status: "connected",
+    phase: "connected",
     metrics_source: "adapter",
     connected_at: "2026-08-16T10:00:00.000Z",
     kill_switch: killSwitch(),

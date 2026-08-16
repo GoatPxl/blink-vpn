@@ -12,11 +12,40 @@ use crate::backend::logging;
 use crate::backend::provider::{ProviderPlanPricing, ProviderRegion};
 use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
-  ForceCleanupResult, KillSwitchState, TunnelSettings, UnexpectedDrop,
+  ForceCleanupResult, KillSwitchState, TunnelPhase, TunnelSettings, UnexpectedDrop,
 };
 use crate::backend::db::{TunnelRecord, VpnNodeRecord};
 use crate::backend::secure_storage::SecureStorage;
-use crate::backend::wireguard::WireGuardReadiness;
+use crate::backend::wireguard::{TunnelServiceState, WireGuardReadiness};
+
+/// Runs a command body on the blocking thread pool.
+///
+/// Every command in this file does blocking work — subprocess spawns, `thread::sleep`, a modal UAC
+/// prompt, SQLite, Windows Credential Manager, and `reqwest::blocking` HTTP. None of it belongs on
+/// the UI thread, which is where Tauri runs a plain `#[tauri::command]` and which is why the window
+/// went "Not Responding" during a connect.
+///
+/// It does not belong on an async worker either. `#[tauri::command(async)]` schedules the body on
+/// the tokio *async* runtime, and `reqwest::blocking` builds its own runtime internally — dropping
+/// one inside an async context panics with "Cannot drop a runtime in a context where blocking is
+/// not allowed". That panic killed the IPC channel, so every command in the app failed at once.
+///
+/// `spawn_blocking` is the pool meant for exactly this: the UI thread stays free, and blocking
+/// calls remain legal.
+async fn run_blocking<T, F>(work: F) -> Result<T, CommandError>
+where
+  F: FnOnce() -> Result<T, CommandError> + Send + 'static,
+  T: Send + 'static,
+{
+  match tauri::async_runtime::spawn_blocking(work).await {
+    Ok(result) => result,
+    Err(source) => Err(CommandError::new(
+      CommandErrorKind::Unknown,
+      format!("A background operation did not finish: {source}"),
+      "Retry the action. If it keeps failing, restart the app and export diagnostics.",
+    )),
+  }
+}
 
 const BUILTIN_DIGITALOCEAN_PROVIDER_ID: &str = "provider-1";
 const BUILTIN_DIGITALOCEAN_PROVIDER_NAME: &str = "DigitalOcean";
@@ -42,6 +71,12 @@ pub struct HealthPanelData {
   /// while connected means IPv6 traffic is bypassing it.
   pub external_ipv6: Option<String>,
   pub tunnel_status: Option<String>,
+  /// Whether the tunnel actually carries traffic — the value the UI turns green on.
+  ///
+  /// `tunnel_status` above tracks the Windows service, which reaches "connected" the moment it
+  /// starts. The tunnel captures the default route at that instant, so between then and the first
+  /// handshake the user has no internet while the old UI showed success.
+  pub phase: TunnelPhase,
   /// `"peer"` or `"adapter"` — which tier produced the byte counters. Consumers differencing
   /// samples must reset their baseline when this changes.
   pub metrics_source: Option<String>,
@@ -52,6 +87,25 @@ pub struct HealthPanelData {
   pub kill_switch: KillSwitchState,
   /// Set when the tunnel stopped without the app asking; traffic is unprotected until reconnect.
   pub unexpected_drop: Option<UnexpectedDrop>,
+}
+
+/// The connect-progress reading, polled once a second while a connect is in flight.
+///
+/// Carries the evidence next to the verdict so the UI can say *why* it is still waiting — elapsed
+/// seconds and whether anything has come back through the tunnel — instead of showing an
+/// unexplained spinner while the user's internet is down.
+#[derive(Debug, Clone, Serialize)]
+pub struct TunnelPhaseSnapshot {
+  pub tunnel_id: String,
+  pub tunnel_name: String,
+  pub phase: TunnelPhase,
+  /// The raw `sc query` verdict behind the phase, for display and diagnostics.
+  pub service_state: TunnelServiceState,
+  /// Seconds since this app asked the service to start; `null` when it was already running.
+  pub elapsed_seconds: Option<u64>,
+  /// Decrypted inbound octets. `> 0` is the unelevated proof that a handshake completed.
+  pub rx_bytes: Option<u64>,
+  pub tx_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -211,16 +265,11 @@ fn clear_provider_credential(
 }
 
 #[tauri::command]
-pub fn hello(name: Option<String>, backend: State<'_, Backend>) -> String {
-  let caller = name.unwrap_or_else(|| "operator".to_string());
-  let provider = backend.provider.active().provider_name();
-  format!(
-    "Hello, {caller}. Rust backend is reachable (provider adapter: {provider})."
-  )
-}
-
-#[tauri::command]
-pub fn validate_provider_token(provider_id: String, backend: State<'_, Backend>) -> Result<String, CommandError> {
+pub async fn validate_provider_token(provider_id: String, backend: State<'_, Backend>) -> Result<String, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   let account = backend
     .provider
     .validate_provider_token(&backend.db, &backend.secure_storage, &provider_id)
@@ -230,14 +279,20 @@ pub fn validate_provider_token(provider_id: String, backend: State<'_, Backend>)
     "Provider token valid for account {} ({})",
     account.uuid, account.status
   ))
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn provision_provider_droplet(
+pub async fn provision_provider_droplet(
   provider_id: String,
   droplet_name: String,
   backend: State<'_, Backend>,
 ) -> Result<String, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   let droplet = backend
     .orchestrator
     .provision_droplet_for_provider(
@@ -254,14 +309,20 @@ pub fn provision_provider_droplet(
     "Droplet provisioned: id={}, public_ipv4={}",
     droplet.droplet_id, droplet.public_ipv4
   ))
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn delete_provider_droplet(
+pub async fn delete_provider_droplet(
   provider_id: String,
   droplet_id: u64,
   backend: State<'_, Backend>,
 ) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .destroy_droplet_for_provider(
@@ -272,15 +333,21 @@ pub fn delete_provider_droplet(
       droplet_id,
     )
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn register_provider_token(
+pub async fn register_provider_token(
   provider_id: String,
   provider_name: String,
   api_token: String,
   backend: State<'_, Backend>,
 ) -> Result<String, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   // The slug comes from the provider record rather than from the caller, so the UI no longer
   // picks a command name by slug and the backend stays the single source of truth for which
   // adapter a provider uses.
@@ -312,14 +379,20 @@ pub fn register_provider_token(
     .unwrap_or_else(|| "<missing-token-ref>".to_string());
 
   Ok(format!("Provider registered with token_ref: {}", token_ref))
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn list_provider_pricing(
+pub async fn list_provider_pricing(
   provider_id: String,
   region: String,
   backend: State<'_, Backend>,
 ) -> Result<ProviderPricingResponse, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   let plans = backend
     .provider
     .list_provider_plan_pricing(&backend.db, &backend.secure_storage, &provider_id, &region)
@@ -330,78 +403,126 @@ pub fn list_provider_pricing(
     region,
     plans,
   })
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn list_provider_regions(
+pub async fn list_provider_regions(
   provider_id: String,
   backend: State<'_, Backend>,
 ) -> Result<Vec<ProviderRegion>, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .provider
     .list_provider_regions(&backend.db, &backend.secure_storage, &provider_id)
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 /// The node the app connects to by default, or `null` when the user has more than one node and
 /// has not chosen between them.
 #[tauri::command]
-pub fn get_current_node_id(backend: State<'_, Backend>) -> Result<Option<String>, CommandError> {
+pub async fn get_current_node_id(backend: State<'_, Backend>) -> Result<Option<String>, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .get_current_node_id(&backend.db)
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 /// Client tunnel parameters. Applied when a tunnel next starts; a running tunnel keeps the config
 /// it was started with.
 #[tauri::command]
-pub fn get_tunnel_settings(backend: State<'_, Backend>) -> Result<TunnelSettings, CommandError> {
+pub async fn get_tunnel_settings(backend: State<'_, Backend>) -> Result<TunnelSettings, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .get_tunnel_settings(&backend.db)
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn set_tunnel_settings(
+pub async fn set_tunnel_settings(
   dns_server: Option<String>,
   keepalive_seconds: u16,
   backend: State<'_, Backend>,
 ) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .set_tunnel_settings(&backend.db, &TunnelSettings { dns_server, keepalive_seconds })
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn set_current_node_id(
+pub async fn set_current_node_id(
   node_id: Option<String>,
   backend: State<'_, Backend>,
 ) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .set_current_node_id(&backend.db, node_id.as_deref())
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn list_vpn_nodes(backend: State<'_, Backend>) -> Result<Vec<VpnNodeRecord>, CommandError> {
+pub async fn list_vpn_nodes(backend: State<'_, Backend>) -> Result<Vec<VpnNodeRecord>, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .list_nodes(&backend.provider, &backend.db, &backend.secure_storage)
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn list_providers(backend: State<'_, Backend>) -> Result<Vec<ProviderRecord>, CommandError> {
+pub async fn list_providers(backend: State<'_, Backend>) -> Result<Vec<ProviderRecord>, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   ensure_builtin_providers(&backend.db, backend.feature_flags.docker_dev)?;
   backend.db.list_providers().map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn suspend_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
+pub async fn suspend_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   let provider = backend
     .db
     .get_provider(&provider_id)
@@ -420,10 +541,16 @@ pub fn suspend_provider(provider_id: String, backend: State<'_, Backend>) -> Res
     .db
     .suspend_provider(&provider_id)
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn resume_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
+pub async fn resume_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   let provider = backend
     .db
     .get_provider(&provider_id)
@@ -442,26 +569,44 @@ pub fn resume_provider(provider_id: String, backend: State<'_, Backend>) -> Resu
     .db
     .resume_provider(&provider_id)
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn delete_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
+pub async fn delete_provider(provider_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   clear_provider_credential(&backend.db, &backend.secure_storage, &provider_id)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn list_tunnels_for_node(
+pub async fn list_tunnels_for_node(
   node_id: String,
   backend: State<'_, Backend>,
 ) -> Result<Vec<TunnelRecord>, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .list_tunnels_for_node(&backend.db, &node_id)
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn destroy_vpn_node(node_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
+pub async fn destroy_vpn_node(node_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .destroy_vpn_node(
@@ -472,13 +617,19 @@ pub fn destroy_vpn_node(node_id: String, backend: State<'_, Backend>) -> Result<
       &node_id,
     )
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn force_cleanup_vpn_node(
+pub async fn force_cleanup_vpn_node(
   node_id: String,
   backend: State<'_, Backend>,
 ) -> Result<ForceCleanupResult, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .force_cleanup_vpn_node(
@@ -489,10 +640,12 @@ pub fn force_cleanup_vpn_node(
       &node_id,
     )
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn create_vpn_node_to_ready(
+pub async fn create_vpn_node_to_ready(
   node_id: String,
   provider_id: String,
   node_name: String,
@@ -500,6 +653,10 @@ pub fn create_vpn_node_to_ready(
   plan_key: String,
   backend: State<'_, Backend>,
 ) -> Result<String, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   let result = backend
     .orchestrator
     .create_vpn_node_to_ready(
@@ -526,10 +683,12 @@ pub fn create_vpn_node_to_ready(
     result.correlation_id,
     result.idempotent_reuse
   ))
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn create_and_activate_client_tunnel(
+pub async fn create_and_activate_client_tunnel(
   tunnel_id: String,
   node_id: String,
   tunnel_name: String,
@@ -538,6 +697,10 @@ pub fn create_and_activate_client_tunnel(
   allowed_ips: Vec<String>,
   backend: State<'_, Backend>,
 ) -> Result<String, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   let result = backend
     .orchestrator
     .create_and_activate_client_tunnel(
@@ -559,53 +722,83 @@ pub fn create_and_activate_client_tunnel(
     "Tunnel configured: tunnel_id={}, tunnel_name={}, client_public_key={}",
     result.tunnel_id, result.tunnel_name, result.client_public_key
   ))
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn activate_client_tunnel(tunnel_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
+pub async fn activate_client_tunnel(tunnel_id: String, backend: State<'_, Backend>) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .activate_client_tunnel(&backend.wireguard, &backend.db, &backend.secure_storage, &tunnel_id)
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn deactivate_client_tunnel(
+pub async fn deactivate_client_tunnel(
   tunnel_id: String,
   backend: State<'_, Backend>,
 ) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .deactivate_client_tunnel(&backend.wireguard, &backend.db, &backend.secure_storage, &tunnel_id)
     .map_err(CommandError::from)
+  })
+  .await
 }
 
+/// How far along a connect is. Cheap enough to poll once a second while one is in flight.
+///
+/// Replaces `read_client_tunnel_status`, which returned a `format!`ed sentence no caller could
+/// parse and which nothing on the frontend ever invoked.
 #[tauri::command]
-pub fn read_client_tunnel_status(
+pub async fn get_tunnel_phase(
+  node_id: String,
   tunnel_id: String,
   backend: State<'_, Backend>,
-) -> Result<String, CommandError> {
-  let status = backend
+) -> Result<TunnelPhaseSnapshot, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+  let reading = backend
     .orchestrator
-    .read_client_tunnel_status(&backend.wireguard, &backend.db, &tunnel_id)
+    .get_tunnel_phase(&backend.wireguard, &backend.db, &node_id, &tunnel_id)
     .map_err(CommandError::from)?;
 
-  Ok(format!(
-    "Tunnel status: name={}, state={:?}, handshake_age_seconds={:?}, rx_bytes={:?}, tx_bytes={:?}",
-    status.tunnel_name,
-    status.state,
-    status.last_handshake_age_seconds,
-    status.rx_bytes,
-    status.tx_bytes
-  ))
+  Ok(TunnelPhaseSnapshot {
+    tunnel_id: reading.tunnel_id,
+    tunnel_name: reading.tunnel_name,
+    phase: reading.phase,
+    service_state: reading.service_state,
+    elapsed_seconds: reading.elapsed_seconds,
+    rx_bytes: reading.rx_bytes,
+    tx_bytes: reading.tx_bytes,
+  })
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn connect_tunnel(
+pub async fn connect_tunnel(
   node_id: String,
   tunnel_id: String,
   backend: State<'_, Backend>,
 ) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .connect_tunnel(
@@ -615,15 +808,21 @@ pub fn connect_tunnel(
       &ConnectTunnelRequest { node_id, tunnel_id },
     )
     .map_err(CommandError::from)
+  })
+  .await
 }
 
   #[tauri::command]
-  pub fn get_health_panel_data(
+  pub async fn get_health_panel_data(
     node_id: String,
     tunnel_id: Option<String>,
     force_ip_probe: Option<bool>,
     backend: State<'_, Backend>,
   ) -> Result<HealthPanelData, CommandError> {
+    // Cloned out of the managed state so the body can move onto a blocking thread.
+    // Every field is an Arc or a PathBuf, so this is cheap.
+    let backend = backend.inner().clone();
+    run_blocking(move || {
     let summary = backend
       .orchestrator
       .get_health_summary(
@@ -646,15 +845,22 @@ pub fn connect_tunnel(
       external_ipv4: summary.external_ipv4,
       external_ipv6: summary.external_ipv6,
       tunnel_status: summary.tunnel_status.map(|status| status.to_string()),
+      phase: summary.phase,
       metrics_source: summary.metrics_source.map(|source| source.as_str().to_string()),
       connected_at: summary.connected_at,
       kill_switch: summary.kill_switch,
       unexpected_drop: summary.unexpected_drop,
     })
+      })
+    .await
   }
 
   #[tauri::command]
-  pub fn get_diagnostics_bundle(backend: State<'_, Backend>) -> Result<DiagnosticsBundleResponse, CommandError> {
+  pub async fn get_diagnostics_bundle(backend: State<'_, Backend>) -> Result<DiagnosticsBundleResponse, CommandError> {
+    // Cloned out of the managed state so the body can move onto a blocking thread.
+    // Every field is an Arc or a PathBuf, so this is cheap.
+    let backend = backend.inner().clone();
+    run_blocking(move || {
     ensure_builtin_providers(&backend.db, backend.feature_flags.docker_dev)?;
     let bundle = backend
       .orchestrator
@@ -670,13 +876,19 @@ pub fn connect_tunnel(
       redacted_notes: bundle.redacted_notes,
       wireguard_debug: bundle.wireguard_debug,
     })
+      })
+    .await
   }
 
 #[tauri::command]
-pub fn export_diagnostics_bundle(
+pub async fn export_diagnostics_bundle(
   app: AppHandle,
   backend: State<'_, Backend>,
 ) -> Result<String, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   let bundle = backend
     .orchestrator
     .build_diagnostics_bundle(&backend.wireguard, &backend.db)
@@ -697,14 +909,20 @@ pub fn export_diagnostics_bundle(
   std::fs::write(&file_path, sanitized_json).map_err(CommandError::from)?;
 
   Ok(file_path.display().to_string())
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn disconnect_tunnel(
+pub async fn disconnect_tunnel(
   node_id: String,
   tunnel_id: String,
   backend: State<'_, Backend>,
 ) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .disconnect_tunnel(
@@ -714,26 +932,42 @@ pub fn disconnect_tunnel(
       &DisconnectTunnelRequest { node_id, tunnel_id },
     )
     .map_err(CommandError::from)
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn force_disconnect_node_service(
+pub async fn force_disconnect_node_service(
   node_id: String,
   backend: State<'_, Backend>,
 ) -> Result<(), CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   backend
     .orchestrator
     .force_disconnect_node_service(&backend.wireguard, &backend.db, &node_id)
     .map_err(CommandError::from)
+  })
+  .await
 }
 
+/// Returns `Result` purely so this can run off the UI thread: Tauri rejects a command that both
+/// borrows state and returns a bare value. It has no failure mode of its own — `check_readiness`
+/// reports "not installed" as data — so the `Err` arm is unreachable in practice, and the frontend
+/// binding needs no new error handling.
 #[tauri::command]
-pub fn check_wireguard_readiness(
+pub async fn check_wireguard_readiness(
   app: tauri::AppHandle,
   backend: State<'_, Backend>,
-) -> WireGuardReadinessResponse {
+) -> Result<WireGuardReadinessResponse, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   let readiness: WireGuardReadiness = backend.wireguard.check_readiness();
-  WireGuardReadinessResponse {
+  Ok(WireGuardReadinessResponse {
     installed: readiness.installed,
     executable_found: readiness.executable_found,
     service_available: readiness.service_available,
@@ -741,13 +975,19 @@ pub fn check_wireguard_readiness(
     app_version: app.package_info().version.to_string(),
     message: readiness.message,
     action_guidance: readiness.action_guidance,
-  }
+  })
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn check_docker_readiness(
+pub async fn check_docker_readiness(
   backend: State<'_, Backend>,
 ) -> Result<DockerReadinessResponse, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
   if !backend.feature_flags.docker_dev {
     return Err(CommandError::dependency(
       "Docker development mode is disabled.",
@@ -830,6 +1070,8 @@ pub fn check_docker_readiness(
       .to_string(),
     }),
   }
+  })
+  .await
 }
 
 /// Keys `list_app_locations` reports and `reveal_app_location` accepts.
@@ -884,7 +1126,8 @@ fn resolve_app_location(
 }
 
 #[tauri::command]
-pub fn list_app_locations(app: AppHandle) -> Result<Vec<AppLocation>, CommandError> {
+pub async fn list_app_locations(app: AppHandle) -> Result<Vec<AppLocation>, CommandError> {
+  run_blocking(move || {
   let app_data_dir = app.path().app_data_dir()?;
   let app_log_dir = app.path().app_log_dir()?;
 
@@ -892,6 +1135,8 @@ pub fn list_app_locations(app: AppHandle) -> Result<Vec<AppLocation>, CommandErr
     .iter()
     .map(|key| resolve_app_location(key, &app_data_dir, &app_log_dir))
     .collect()
+  })
+  .await
 }
 
 /// Opens one of the known locations in Explorer.
@@ -899,7 +1144,8 @@ pub fn list_app_locations(app: AppHandle) -> Result<Vec<AppLocation>, CommandErr
 /// Takes a **key, never a path**: accepting a caller-supplied path would let anything running in
 /// the webview hand an arbitrary target to the shell. The path is resolved here.
 #[tauri::command]
-pub fn reveal_app_location(key: String, app: AppHandle) -> Result<(), CommandError> {
+pub async fn reveal_app_location(key: String, app: AppHandle) -> Result<(), CommandError> {
+  run_blocking(move || {
   if !cfg!(target_os = "windows") {
     return Err(CommandError::dependency(
       "Opening a folder is supported on Windows only in Phase 1.",
@@ -925,10 +1171,13 @@ pub fn reveal_app_location(key: String, app: AppHandle) -> Result<(), CommandErr
     .map_err(|error| format!("Could not open the folder: {error}"))?;
 
   Ok(())
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn open_wireguard_install_page() -> Result<(), CommandError> {
+pub async fn open_wireguard_install_page() -> Result<(), CommandError> {
+  run_blocking(move || {
   if !cfg!(target_os = "windows") {
     return Err(CommandError::dependency(
       "WireGuard install shortcut is supported on Windows only in Phase 1.",
@@ -942,10 +1191,13 @@ pub fn open_wireguard_install_page() -> Result<(), CommandError> {
     .map_err(|error| format!("Could not open WireGuard install page: {error}"))?;
 
   Ok(())
+  })
+  .await
 }
 
 #[tauri::command]
-pub fn install_wireguard_with_prerequisites() -> Result<WireGuardInstallResult, CommandError> {
+pub async fn install_wireguard_with_prerequisites() -> Result<WireGuardInstallResult, CommandError> {
+  run_blocking(move || {
   if !cfg!(target_os = "windows") {
     return Err(CommandError::dependency(
       "WireGuard installation is supported on Windows only for Phase 1.",
@@ -998,6 +1250,8 @@ pub fn install_wireguard_with_prerequisites() -> Result<WireGuardInstallResult, 
     message: "WireGuard installer completed and prerequisites were configured.".to_string(),
     next_action: "Click Re-check to verify readiness and continue onboarding.".to_string(),
   })
+  })
+  .await
 }
 
 fn build_wireguard_install_script() -> Result<PathBuf, std::io::Error> {
@@ -1116,6 +1370,62 @@ mod tests {
     let providers = db.list_providers().expect("provider listing should succeed");
     assert!(providers.iter().any(|provider| provider.id == "provider-1"));
     assert!(providers.iter().any(|provider| provider.id == "provider-docker"));
+
+    let _ = fs::remove_file(path);
+  }
+
+  /// Four commands call `ensure_builtin_providers`, and the dashboard fires them together on load.
+  ///
+  /// They used to be serialized by Tauri running every command on the UI thread, so the
+  /// check-then-insert inside could never interleave. Now that commands run on the blocking pool,
+  /// the losers of that race hit a unique-constraint violation and the whole dashboard came back
+  /// empty. The insert has to be idempotent, and repeating it must not duplicate rows.
+  #[test]
+  fn ensuring_builtin_providers_repeatedly_is_idempotent() {
+    let (db, path) = create_test_db("ensure-builtins-idempotent");
+
+    for _ in 0..5 {
+      ensure_builtin_providers(&db, true).expect("repeat ensure must not fail on an existing row");
+    }
+
+    let providers = db.list_providers().expect("provider listing should succeed");
+    assert_eq!(
+      providers.iter().filter(|provider| provider.id == "provider-1").count(),
+      1,
+      "the built-in DigitalOcean row must exist exactly once"
+    );
+    assert_eq!(
+      providers.iter().filter(|provider| provider.id == "provider-docker").count(),
+      1,
+      "the built-in Docker row must exist exactly once"
+    );
+
+    let _ = fs::remove_file(path);
+  }
+
+  /// A second insert of an existing provider must not clobber what is already stored — in
+  /// particular the credential reference, which would silently disconnect the user's saved key.
+  #[test]
+  fn re_creating_an_existing_provider_leaves_its_stored_row_intact() {
+    let (db, path) = create_test_db("create-provider-idempotent");
+
+    db.update_provider("provider-1", "DigitalOcean", "digitalocean", Some("ref-abc"))
+      .expect("provider should accept a token ref");
+
+    db.create_provider("provider-1", "Something Else", "digitalocean", None)
+      .expect("re-creating an existing provider must succeed rather than error");
+
+    let provider = db
+      .get_provider("provider-1")
+      .expect("query should succeed")
+      .expect("provider should still exist");
+
+    assert_eq!(provider.name, "DigitalOcean", "the existing name must survive");
+    assert_eq!(
+      provider.token_ref.as_deref(),
+      Some("ref-abc"),
+      "the stored credential reference must survive"
+    );
 
     let _ = fs::remove_file(path);
   }

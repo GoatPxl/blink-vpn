@@ -578,7 +578,6 @@ pub struct ProviderPlanPricing {
 #[derive(Clone)]
 pub struct ProviderRegistry {
   adapters_by_slug: HashMap<String, Arc<dyn ProviderAdapter>>,
-  default_provider_slug: String,
 }
 
 #[derive(Debug, Error)]
@@ -631,14 +630,18 @@ impl ProviderRegistry {
       panic!("failed to initialize DigitalOcean adapter: {err}")
     });
 
-    let mut adapters_by_slug: HashMap<String, Arc<dyn ProviderAdapter>> = HashMap::new();
-    adapters_by_slug.insert("digitalocean".to_string(), Arc::new(digitalocean));
-    adapters_by_slug.insert("docker".to_string(), Arc::new(DockerProviderAdapter::new()));
+    // Each adapter names itself, so the registry key and the adapter's own identity cannot drift.
+    // These slugs were written out a second time here, which meant a renamed adapter would still
+    // answer to its old key and `UnsupportedProviderSlug` would name a provider that exists.
+    let adapters: [Arc<dyn ProviderAdapter>; 2] =
+      [Arc::new(digitalocean), Arc::new(DockerProviderAdapter::new())];
 
-    Self {
-      adapters_by_slug,
-      default_provider_slug: "digitalocean".to_string(),
-    }
+    let adapters_by_slug = adapters
+      .into_iter()
+      .map(|adapter| (adapter.provider_name().to_string(), adapter))
+      .collect();
+
+    Self { adapters_by_slug }
   }
 
   /// A registry holding one mock adapter, so orchestrator tests can exercise the real flows
@@ -647,19 +650,8 @@ impl ProviderRegistry {
   pub fn from_adapter(adapter: Arc<dyn ProviderAdapter>) -> Self {
     let slug = adapter.provider_name().to_string();
     let mut adapters_by_slug = HashMap::new();
-    adapters_by_slug.insert(slug.clone(), adapter);
-    Self {
-      adapters_by_slug,
-      default_provider_slug: slug,
-    }
-  }
-
-  pub fn active(&self) -> &dyn ProviderAdapter {
-    self
-      .adapters_by_slug
-      .get(&self.default_provider_slug)
-      .map(|adapter| adapter.as_ref())
-      .unwrap_or_else(|| panic!("default provider adapter missing: {}", self.default_provider_slug))
+    adapters_by_slug.insert(slug, adapter);
+    Self { adapters_by_slug }
   }
 
   /// A node provider with no credential attached.

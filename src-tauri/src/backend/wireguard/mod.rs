@@ -285,12 +285,48 @@ impl WireGuardManager {
     self.activate_tunnel_service(tunnel_name)
   }
 
+  /// Service state plus adapter byte counters — everything the phase verdict needs, and nothing
+  /// that costs more than a single `sc query`.
+  ///
+  /// Deliberately skips `ensure_installed`: that probe spawns `wireguard.exe /help` to produce a
+  /// good "not installed" error before a *write*, but a status read that finds no service already
+  /// has the right answer. This runs once a second during a connect, so a second spawn per call
+  /// would be doubling the cost of the thing added to make polling cheap.
+  ///
+  /// Deliberately never calls `wg show`: it requires administrator (AGENTS.md §4), so the verdict
+  /// this feeds is built not to need it. `adapter_byte_counters` reads the same interface the
+  /// tunnel uses through Win32 `GetIfTable2`, in-process and unelevated.
+  pub fn read_tunnel_phase_inputs(
+    &self,
+    tunnel_name: &str,
+  ) -> Result<TunnelPhaseInputs, WireGuardError> {
+    validate_tunnel_name(tunnel_name)?;
+
+    let state = self.probe_tunnel_service_state(tunnel_name)?;
+
+    // Counters only mean anything once the interface exists; asking earlier just costs a lookup.
+    let (rx_bytes, tx_bytes) = if state == TunnelServiceState::Running {
+      match adapter_byte_counters(tunnel_name) {
+        Some((rx, tx)) => (Some(rx), Some(tx)),
+        None => (None, None),
+      }
+    } else {
+      (None, None)
+    };
+
+    Ok(TunnelPhaseInputs {
+      state,
+      rx_bytes,
+      tx_bytes,
+    })
+  }
+
   fn wait_for_running_tunnel(&self, tunnel_name: &str) -> Result<(), WireGuardError> {
-    let mut last_state = TunnelActivationProbeState::Unknown;
+    let mut last_state = TunnelServiceState::Unknown;
 
     for _ in 0..ACTIVATE_POLL_ATTEMPTS {
       match self.probe_tunnel_service_state(tunnel_name) {
-        Ok(TunnelActivationProbeState::Running) => return Ok(()),
+        Ok(TunnelServiceState::Running) => return Ok(()),
         Ok(state) => {
           last_state = state;
           thread::sleep(ACTIVATE_POLL_INTERVAL);
@@ -308,7 +344,7 @@ impl WireGuardManager {
     Err(WireGuardError::InvalidOutput {
       detail: format!(
         "WireGuard tunnel '{tunnel_name}' did not reach Running after activation; last observed service state was {}. Check whether the tunnel is still starting, disabled, or blocked by a bad tunnel configuration.",
-        describe_tunnel_activation_probe_state(last_state)
+        last_state.as_str()
       ),
     })
   }
@@ -316,7 +352,7 @@ impl WireGuardManager {
   fn probe_tunnel_service_state(
     &self,
     tunnel_name: &str,
-  ) -> Result<TunnelActivationProbeState, WireGuardError> {
+  ) -> Result<TunnelServiceState, WireGuardError> {
     let service_name = wireguard_service_name(tunnel_name);
     self.record_command(&format!("sc query {}", service_name));
     let service_out = self
@@ -324,28 +360,10 @@ impl WireGuardManager {
       .run("sc", &["query", &service_name], None)
       .map_err(|source| map_sc_tunnel_error(source, &service_name, "query"))?;
 
-    for line in service_out.stdout.lines() {
-      let trimmed = line.trim();
-      if !trimmed.to_ascii_uppercase().starts_with("STATE") {
-        continue;
-      }
-
-      if trimmed.contains("RUNNING") {
-        return Ok(TunnelActivationProbeState::Running);
-      }
-
-      if trimmed.contains("START_PENDING") {
-        return Ok(TunnelActivationProbeState::Starting);
-      }
-
-      if trimmed.contains("STOPPED") {
-        return Ok(TunnelActivationProbeState::Stopped);
-      }
-
-      return Ok(TunnelActivationProbeState::Unknown);
-    }
-
-    Ok(TunnelActivationProbeState::Unknown)
+    // An `sc query` whose output carries no STATE line is an absence of evidence, not a stopped
+    // service. The activation poll treats that as "keep waiting"; the phase verdict treats it as
+    // `Connecting`. Neither may read it as success.
+    parse_sc_state(&service_out.stdout).or(Ok(TunnelServiceState::Unknown))
   }
 
   /// Disconnect goes through `unregister_tunnel` alone: `/uninstalltunnelservice` stops the
@@ -447,7 +465,7 @@ impl WireGuardManager {
     validate_tunnel_name(tunnel_name)?;
 
     if let Ok(state) = self.probe_tunnel_service_state(tunnel_name) {
-      if matches!(state, TunnelActivationProbeState::Running | TunnelActivationProbeState::Starting) {
+      if matches!(state, TunnelServiceState::Running | TunnelServiceState::Starting) {
         return self.wait_for_running_tunnel(tunnel_name);
       }
     }
@@ -670,11 +688,34 @@ pub struct ClientConfigParams {
   pub persistent_keepalive_seconds: u16,
 }
 
+/// What `sc query` says about a tunnel's service.
+///
+/// `Starting` (`START_PENDING`) exists because the activation poll always knew about it while the
+/// status read discarded it — two parsers of the same output, one of which threw away the single
+/// state that distinguishes "coming up" from "wedged". They are now one parser (`parse_sc_state`).
+///
+/// Serialized lowercase: this crosses the IPC boundary inside `TunnelPhaseSnapshot`, and the
+/// derive without a rename would emit `"Running"` where every other enum on that boundary is
+/// lowercase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TunnelServiceState {
   Running,
+  /// `START_PENDING` — the service was asked to start and has not finished.
+  Starting,
   Stopped,
   Unknown,
+}
+
+impl TunnelServiceState {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Running => "running",
+      Self::Starting => "start_pending",
+      Self::Stopped => "stopped",
+      Self::Unknown => "unknown",
+    }
+  }
 }
 
 /// Which measurement produced the byte counters in a status read.
@@ -712,21 +753,17 @@ pub struct TunnelRuntimeStatus {
   pub metrics_source: Option<TunnelMetricsSource>,
 }
 
+/// The cheap half of a status read: what `read_tunnel_phase_inputs` can learn for one `sc query`.
+///
+/// Separate from `TunnelRuntimeStatus` because that type carries `last_handshake_age_seconds`,
+/// which cannot be filled without `wg show` and therefore without administrator. Returning it here
+/// would invite a caller to read a field that is structurally always `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TunnelActivationProbeState {
-  Running,
-  Starting,
-  Stopped,
-  Unknown,
-}
-
-fn describe_tunnel_activation_probe_state(state: TunnelActivationProbeState) -> &'static str {
-  match state {
-    TunnelActivationProbeState::Running => "running",
-    TunnelActivationProbeState::Starting => "start_pending",
-    TunnelActivationProbeState::Stopped => "stopped",
-    TunnelActivationProbeState::Unknown => "unknown",
-  }
+pub struct TunnelPhaseInputs {
+  pub state: TunnelServiceState,
+  /// Decrypted inbound octets. `Some(0)` means measured and idle; `None` means unreadable.
+  pub rx_bytes: Option<u64>,
+  pub tx_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1113,6 +1150,11 @@ fn parse_wg_dump_metrics(now_unix_seconds: u64, dump: &str) -> Result<PeerMetric
   })
 }
 
+/// The single parser for `sc query` output.
+///
+/// There were two: the activation poll recognised `START_PENDING` and the status read collapsed it
+/// to `Unknown`, so the same output meant different things depending on which caller looked. That
+/// is the divergence AGENTS.md §5 exists to prevent.
 fn parse_sc_state(raw_output: &str) -> Result<TunnelServiceState, WireGuardError> {
   for line in raw_output.lines() {
     let trimmed = line.trim();
@@ -1122,6 +1164,9 @@ fn parse_sc_state(raw_output: &str) -> Result<TunnelServiceState, WireGuardError
 
     if trimmed.contains("RUNNING") {
       return Ok(TunnelServiceState::Running);
+    }
+    if trimmed.contains("START_PENDING") {
+      return Ok(TunnelServiceState::Starting);
     }
     if trimmed.contains("STOPPED") {
       return Ok(TunnelServiceState::Stopped);
@@ -1674,6 +1719,86 @@ mod tests {
 
     assert_eq!(parse_sc_state(running).expect("running parse"), TunnelServiceState::Running);
     assert_eq!(parse_sc_state(stopped).expect("stopped parse"), TunnelServiceState::Stopped);
+  }
+
+  /// `START_PENDING` used to be visible to the activation poll and discarded by the status read,
+  /// which is how the same `sc query` output meant two different things.
+  #[test]
+  fn parse_sc_state_detects_start_pending() {
+    let starting = "STATE              : 2  START_PENDING";
+
+    assert_eq!(
+      parse_sc_state(starting).expect("start_pending parse"),
+      TunnelServiceState::Starting
+    );
+  }
+
+  #[test]
+  fn parse_sc_state_reports_an_unrecognised_state_rather_than_guessing() {
+    let pausing = "STATE              : 6  PAUSE_PENDING";
+
+    assert_eq!(parse_sc_state(pausing).expect("parse"), TunnelServiceState::Unknown);
+  }
+
+  /// The connect-progress poll runs once a second, so its cost is part of its contract.
+  ///
+  /// Without this, `read_tunnel_phase_inputs` could quietly regain an `ensure_installed` probe or a
+  /// `wg show` call and nobody would notice until the UI froze again.
+  #[test]
+  fn reading_phase_inputs_costs_exactly_one_sc_query() {
+    let runner = Arc::new(MockImportRunner::with_service_exists(true));
+    let manager = WireGuardManager::with_runner(runner.clone());
+
+    manager
+      .read_tunnel_phase_inputs("wg-node-phase")
+      .expect("phase inputs should read");
+
+    let calls = runner.calls();
+    let programs: Vec<&str> = calls.iter().map(|(program, _)| program.as_str()).collect();
+
+    assert_eq!(
+      programs,
+      vec!["sc"],
+      "the 1 Hz poll must spawn exactly one process; got {calls:?}"
+    );
+    assert_eq!(calls[0].1, vec!["query", "WireGuardTunnel$wg-node-phase"]);
+  }
+
+  /// Reading service state needs no elevation, and this runs on a timer — prompting for UAC from
+  /// inside a polling loop is the failure AGENTS.md §4 calls out by name.
+  #[test]
+  fn reading_phase_inputs_never_elevates_when_the_service_is_missing() {
+    let runner = Arc::new(MockImportRunner::with_service_exists(false));
+    let manager = WireGuardManager::with_runner(runner.clone());
+
+    let result = manager.read_tunnel_phase_inputs("wg-node-phase");
+
+    assert!(
+      matches!(result, Err(WireGuardError::TunnelNotFound { .. })),
+      "a missing service must surface as TunnelNotFound, got {result:?}"
+    );
+    assert!(
+      !runner
+        .calls()
+        .iter()
+        .any(|(program, _)| program.eq_ignore_ascii_case("powershell")),
+      "status reads must never escalate to a UAC prompt"
+    );
+  }
+
+  #[test]
+  fn phase_inputs_report_no_counters_while_the_service_is_stopped() {
+    let runner = Arc::new(MockImportRunner::with_service_exists(true));
+    let manager = WireGuardManager::with_runner(runner);
+
+    let inputs = manager
+      .read_tunnel_phase_inputs("wg-node-phase")
+      .expect("phase inputs should read");
+
+    // The mock reports STOPPED, so there is no adapter to read counters from.
+    assert_eq!(inputs.state, TunnelServiceState::Stopped);
+    assert_eq!(inputs.rx_bytes, None);
+    assert_eq!(inputs.tx_bytes, None);
   }
 
   #[test]

@@ -23,6 +23,7 @@ export default function DashboardNodesPage() {
   const router = useRouter();
   const {
     busyAction,
+    connectAttempt,
     currentNodeId,
     diagnostics,
     forceCleanupSelectedNode,
@@ -91,9 +92,13 @@ export default function DashboardNodesPage() {
       isCurrent: node.id === currentNodeId,
       // Only the node holding the live tunnel counts as connected.
       isLiveConnected: tunnelConnected && node.lifecycle_status.toLowerCase() === "connected",
+      // Sourced from the one in-flight attempt rather than per-row local state. A row used to flip
+      // to "Disconnect" the instant it was clicked, which claimed a working tunnel during the very
+      // window where the user has no internet.
+      isConnecting: connectAttempt?.nodeId === node.id,
     }),
     location: describeLocation(node.region_geo, node.region),
-  })), [currentNodeId, nodes, tunnelConnected]);
+  })), [connectAttempt, currentNodeId, nodes, tunnelConnected]);
 
   const rows = useMemo(
     () => selectNodeRows({ rows: allRows, statusFilter, regionFilter, sort }),

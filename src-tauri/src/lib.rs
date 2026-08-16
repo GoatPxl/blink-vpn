@@ -79,7 +79,6 @@ pub fn run() {
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
-      commands::system::hello,
       commands::system::open_wireguard_install_page,
       commands::system::install_wireguard_with_prerequisites,
       commands::system::check_wireguard_readiness,
@@ -107,11 +106,11 @@ pub fn run() {
       commands::system::disconnect_tunnel,
       commands::system::force_disconnect_node_service,
       commands::system::get_health_panel_data,
+      commands::system::get_tunnel_phase,
       commands::system::get_diagnostics_bundle,
       commands::system::export_diagnostics_bundle,
       commands::system::list_app_locations,
       commands::system::reveal_app_location,
-      commands::system::read_client_tunnel_status,
       commands::system::validate_provider_token,
       commands::system::provision_provider_droplet,
       commands::system::delete_provider_droplet
