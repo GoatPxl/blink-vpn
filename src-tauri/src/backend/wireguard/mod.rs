@@ -28,6 +28,7 @@ const TRACE_HISTORY_LIMIT: usize = 120;
 #[derive(Clone)]
 pub struct WireGuardManager {
   runner: Arc<dyn CommandRunner>,
+  counters: Arc<dyn AdapterCounters>,
   debug_trace: Arc<Mutex<WireGuardDebugTrace>>,
 }
 
@@ -35,16 +36,32 @@ impl WireGuardManager {
   pub fn new() -> Self {
     Self {
       runner: Arc::new(ProcessCommandRunner),
+      counters: Arc::new(SystemAdapterCounters),
       debug_trace: Arc::new(Mutex::new(WireGuardDebugTrace::default())),
     }
   }
 
   /// Substitutes the process runner so tests can drive `wireguard.exe` and `sc` without either
   /// being installed, and without elevation.
+  ///
+  /// Adapter counters report nothing here. That is the safe default rather than an omission: the
+  /// real reader walks the machine’s interface table, so a test built this way would otherwise
+  /// see whatever tunnels happened to be up while it ran. Use `with_runner_and_counters` to ask
+  /// for a reading.
   #[cfg(test)]
   pub fn with_runner(runner: Arc<dyn CommandRunner>) -> Self {
+    Self::with_runner_and_counters(runner, Arc::new(NoAdapterCounters))
+  }
+
+  /// Substitutes both the process runner and the adapter counters.
+  #[cfg(test)]
+  pub fn with_runner_and_counters(
+    runner: Arc<dyn CommandRunner>,
+    counters: Arc<dyn AdapterCounters>,
+  ) -> Self {
     Self {
       runner,
+      counters,
       debug_trace: Arc::new(Mutex::new(WireGuardDebugTrace::default())),
     }
   }
@@ -295,7 +312,7 @@ impl WireGuardManager {
   /// would be doubling the cost of the thing added to make polling cheap.
   ///
   /// Deliberately never calls `wg show`: it requires administrator (AGENTS.md §4), so the verdict
-  /// this feeds is built not to need it. `adapter_byte_counters` reads the same interface the
+  /// this feeds is built not to need it. `AdapterCounters` reads the same interface the
   /// tunnel uses through Win32 `GetIfTable2`, in-process and unelevated.
   pub fn read_tunnel_phase_inputs(
     &self,
@@ -307,7 +324,7 @@ impl WireGuardManager {
 
     // Counters only mean anything once the interface exists; asking earlier just costs a lookup.
     let (rx_bytes, tx_bytes) = if state == TunnelServiceState::Running {
-      match adapter_byte_counters(tunnel_name) {
+      match self.counters.read(tunnel_name) {
         Some((rx, tx)) => (Some(rx), Some(tx)),
         None => (None, None),
       }
@@ -584,7 +601,7 @@ impl WireGuardManager {
 
         // Fall back to the adapter's own counters, which need no elevation. Throughput survives;
         // handshake age does not, because only the tunnel service knows it.
-        match adapter_byte_counters(tunnel_name) {
+        match self.counters.read(tunnel_name) {
           Some((rx_bytes, tx_bytes)) => {
             self.record_command(&format!(
               "adapter counters {} -> rx={} tx={} (handshake age needs elevation)",
@@ -825,6 +842,55 @@ impl PeerMetrics {
 ///
 /// WireGuard for Windows names the adapter after the tunnel, so the tunnel name is the alias to
 /// look for.
+/// Where a tunnel's byte counters come from.
+///
+/// Behind a trait because the real implementation is a Win32 syscall against whatever interfaces
+/// the machine actually has. `running_tunnel_reports_connected_when_peer_metrics_are_not_readable`
+/// asserted that no counters were readable, and so passed or failed depending on whether a tunnel
+/// of that name happened to be up on the developer’s machine at the time — a test that reads real
+/// system state is not deterministic (AGENTS.md §9).
+pub trait AdapterCounters: Send + Sync {
+  /// Inbound and outbound octets for `adapter_alias`, or `None` when no such adapter exists.
+  fn read(&self, adapter_alias: &str) -> Option<(u64, u64)>;
+}
+
+/// The real lookup, through Win32 `GetIfTable2`.
+pub struct SystemAdapterCounters;
+
+impl AdapterCounters for SystemAdapterCounters {
+  fn read(&self, adapter_alias: &str) -> Option<(u64, u64)> {
+    adapter_byte_counters(adapter_alias)
+  }
+}
+
+/// Counters that report nothing. The default under test.
+///
+/// Deliberately the default in `with_runner` rather than the real syscall: a test that reads the
+/// machine’s interface table is not deterministic, so wanting real counters has to be asked for.
+#[cfg(test)]
+pub struct NoAdapterCounters;
+
+#[cfg(test)]
+impl AdapterCounters for NoAdapterCounters {
+  fn read(&self, _adapter_alias: &str) -> Option<(u64, u64)> {
+    None
+  }
+}
+
+/// Counters that report a fixed reading, for the tests that need one.
+#[cfg(test)]
+pub struct StaticAdapterCounters {
+  pub rx_bytes: u64,
+  pub tx_bytes: u64,
+}
+
+#[cfg(test)]
+impl AdapterCounters for StaticAdapterCounters {
+  fn read(&self, _adapter_alias: &str) -> Option<(u64, u64)> {
+    Some((self.rx_bytes, self.tx_bytes))
+  }
+}
+
 #[cfg(target_os = "windows")]
 fn adapter_byte_counters(adapter_alias: &str) -> Option<(u64, u64)> {
   use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -1468,13 +1534,60 @@ mod tests {
   use super::{
     tunnel_config_dir,
     ClientConfigParams, CommandExecError, CommandOutput, CommandRunner,
-    DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS, TunnelServiceState,
+    DEFAULT_CLIENT_ALLOWED_IPS, DEFAULT_CLIENT_KEEPALIVE_SECONDS, StaticAdapterCounters,
+    TunnelMetricsSource, TunnelServiceState,
     WireGuardError, WireGuardManager, build_client_config,
     is_windows_access_denied_detail,
     is_windows_service_missing_detail, parse_sc_state,
     parse_wg_dump_metrics,
   };
   use std::sync::{Arc, Mutex};
+
+  /// Service is running, but `wg show` is refused, as it is for a non-elevated caller.
+  #[derive(Clone, Default)]
+  struct MetricsDeniedRunner;
+
+  impl CommandRunner for MetricsDeniedRunner {
+    fn run(
+      &self,
+      program: &str,
+      args: &[&str],
+      _stdin: Option<&str>,
+    ) -> Result<CommandOutput, CommandExecError> {
+      let program_name = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+
+      if program_name == "wg" && args == ["--version"] {
+        return Ok(CommandOutput { stdout: "wireguard-tools v1".to_string() });
+      }
+
+      if program_name == "wireguard" && args == ["/help"] {
+        return Ok(CommandOutput { stdout: "WireGuard for Windows".to_string() });
+      }
+
+      if program_name == "sc" && args.first().is_some_and(|arg| *arg == "query") {
+        return Ok(CommandOutput {
+          stdout: "STATE              : 4  RUNNING".to_string(),
+        });
+      }
+
+      if program_name == "wg" && args.first().is_some_and(|arg| *arg == "show") {
+        return Err(CommandExecError::NonZeroExit {
+          program: "wg".to_string(),
+          code: Some(1),
+          detail: "Unable to access interface Primary-Node-wg: Permission denied".to_string(),
+        });
+      }
+
+      Err(CommandExecError::NonZeroExit {
+        program: program_name.to_string(),
+        code: Some(1),
+        detail: "unsupported mock command".to_string(),
+      })
+    }
+  }
 
   #[derive(Clone, Default)]
   struct MockImportRunner {
@@ -2204,52 +2317,6 @@ mod tests {
   /// installed and started correctly — the app reported an error for a working tunnel.
   #[test]
   fn running_tunnel_reports_connected_when_peer_metrics_are_not_readable() {
-    /// Service is running, but `wg show` is refused, as it is for a non-elevated caller.
-    #[derive(Clone, Default)]
-    struct MetricsDeniedRunner;
-
-    impl CommandRunner for MetricsDeniedRunner {
-      fn run(
-        &self,
-        program: &str,
-        args: &[&str],
-        _stdin: Option<&str>,
-      ) -> Result<CommandOutput, CommandExecError> {
-        let program_name = std::path::Path::new(program)
-          .file_stem()
-          .and_then(|value| value.to_str())
-          .unwrap_or(program);
-
-        if program_name == "wg" && args == ["--version"] {
-          return Ok(CommandOutput { stdout: "wireguard-tools v1".to_string() });
-        }
-
-        if program_name == "wireguard" && args == ["/help"] {
-          return Ok(CommandOutput { stdout: "WireGuard for Windows".to_string() });
-        }
-
-        if program_name == "sc" && args.first().is_some_and(|arg| *arg == "query") {
-          return Ok(CommandOutput {
-            stdout: "STATE              : 4  RUNNING".to_string(),
-          });
-        }
-
-        if program_name == "wg" && args.first().is_some_and(|arg| *arg == "show") {
-          return Err(CommandExecError::NonZeroExit {
-            program: "wg".to_string(),
-            code: Some(1),
-            detail: "Unable to access interface Primary-Node-wg: Permission denied".to_string(),
-          });
-        }
-
-        Err(CommandExecError::NonZeroExit {
-          program: program_name.to_string(),
-          code: Some(1),
-          detail: "unsupported mock command".to_string(),
-        })
-      }
-    }
-
     let wireguard = WireGuardManager::with_runner(Arc::new(MetricsDeniedRunner));
 
     let status = wireguard
@@ -2578,5 +2645,43 @@ mod tests {
       "a non-permission failure must not escalate to a UAC prompt"
     );
     assert_eq!(calls.len(), 1, "the command should be attempted exactly once");
+  }
+  /// The counters seam has to actually be read, or a regression that stopped reading it would
+  /// look exactly like the unelevated case this module is built around.
+  #[test]
+  fn a_running_tunnel_reports_the_counters_its_adapter_supplies() {
+    let manager = WireGuardManager::with_runner_and_counters(
+      Arc::new(MetricsDeniedRunner),
+      Arc::new(StaticAdapterCounters { rx_bytes: 4096, tx_bytes: 2048 }),
+    );
+
+    let inputs = manager
+      .read_tunnel_phase_inputs("wg-node-counters")
+      .expect("phase inputs should read");
+
+    assert_eq!(inputs.state, TunnelServiceState::Running);
+    assert_eq!(inputs.rx_bytes, Some(4096));
+    assert_eq!(inputs.tx_bytes, Some(2048));
+  }
+
+  /// When `wg show` is refused, the adapter counters are the fallback — and they carry the
+  /// `Adapter` source so the UI can say where the numbers came from.
+  #[test]
+  fn refused_peer_metrics_fall_back_to_adapter_counters() {
+    let manager = WireGuardManager::with_runner_and_counters(
+      Arc::new(MetricsDeniedRunner),
+      Arc::new(StaticAdapterCounters { rx_bytes: 1234, tx_bytes: 567 }),
+    );
+
+    let status = manager
+      .read_tunnel_status("Primary-Node-wg")
+      .expect("unreadable peer metrics must not fail the status read");
+
+    assert_eq!(status.state, TunnelServiceState::Running);
+    assert_eq!(status.rx_bytes, Some(1234));
+    assert_eq!(status.tx_bytes, Some(567));
+    assert_eq!(status.metrics_source, Some(TunnelMetricsSource::Adapter));
+    // Only the tunnel service knows the handshake age, and that is what was refused.
+    assert_eq!(status.last_handshake_age_seconds, None);
   }
 }
