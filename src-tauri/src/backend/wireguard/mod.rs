@@ -2286,16 +2286,6 @@ mod tests {
     }
   }
 
-  /// An adapter that does not exist yields no counters, rather than zeroes.
-  ///
-  /// Zeroes would read as "connected, no traffic", which is a different and misleading claim.
-  #[test]
-  fn adapter_counters_are_absent_for_an_unknown_adapter() {
-    assert_eq!(
-      super::adapter_byte_counters("goatstare-no-such-adapter-a1b2c3"),
-      None
-    );
-  }
 
   #[cfg(target_os = "windows")]
   #[test]

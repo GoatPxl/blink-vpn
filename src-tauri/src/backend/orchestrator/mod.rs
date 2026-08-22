@@ -3449,6 +3449,28 @@ mod tests {
     }
   }
 
+  /// A runner for flows that must never reach the machine.
+  ///
+  /// Both tests using this are hermetic today by accident of ordering rather than by design:
+  /// one only reads an in-memory debug snapshot, the other fails on a missing database row
+  /// before WireGuard is consulted. Wiring them to the real runner instead would leave them one
+  /// upstream change away from silently reading real system state — which is exactly how
+  /// `running_tunnel_reports_connected_when_peer_metrics_are_not_readable` became flaky
+  /// (AGENTS.md §9). Panicking here means such a change fails loudly and immediately.
+  #[derive(Clone, Default)]
+  struct UnreachableRunner;
+
+  impl CommandRunner for UnreachableRunner {
+    fn run(
+      &self,
+      program: &str,
+      args: &[&str],
+      _stdin: Option<&str>,
+    ) -> Result<CommandOutput, CommandExecError> {
+      panic!("this flow must not spawn a process; got {program} {args:?}");
+    }
+  }
+
   #[derive(Clone)]
   struct MockWireGuardRunner {
     state: Arc<Mutex<MockWireGuardState>>,
@@ -4404,7 +4426,10 @@ mod tests {
   fn diagnostics_bundle_redacts_provider_token_refs() {
     let db = Database::new(test_db_path("diagnostics_redaction"));
     db.run_migrations().expect("migrations should succeed");
-    let wireguard = WireGuardManager::new();
+    // The bundle reads an in-memory debug snapshot and nothing else. `UnreachableRunner` holds
+    // that true: if the bundle ever gains a version probe, this fails instead of quietly
+    // reporting whatever is installed on the machine running the suite.
+    let wireguard = WireGuardManager::with_runner(Arc::new(UnreachableRunner));
 
     setup_provider_and_token(&db, &SecureStorage::dev_mock());
 
@@ -4803,7 +4828,9 @@ mod tests {
   fn a_failed_connect_records_start_and_error_under_one_correlation_id() {
     let orchestrator = Orchestrator::new();
     let db = watch_test_db("connect_failure_recorded");
-    let wireguard = WireGuardManager::new();
+    // The node row is missing, so connect fails before WireGuard is consulted at all. Asserting
+    // that rather than assuming it: reaching the runner here would mean the ordering changed.
+    let wireguard = WireGuardManager::with_runner(Arc::new(UnreachableRunner));
     let secure_storage = SecureStorage::dev_mock();
 
     let result = orchestrator.connect_tunnel(
