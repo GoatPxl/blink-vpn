@@ -314,6 +314,32 @@ impl DigitalOceanProviderAdapter {
     Ok(ProviderCredential::parse(stored).single()?.to_string())
   }
 
+  /// Delete a droplet this call created but can no longer return, and fold the outcome into the
+  /// error the caller sees.
+  ///
+  /// A failed delete is never swallowed (AGENTS.md §8): if the droplet survives, its id goes into
+  /// the message so the user can remove it, rather than being left paying for an invisible droplet.
+  fn abandon_droplet(
+    &self,
+    api_token: &str,
+    droplet_id: u64,
+    detail: &str,
+    cause: DigitalOceanError,
+  ) -> ProviderAdapterError {
+    match self.client.delete_droplet(api_token, droplet_id) {
+      Ok(()) => ProviderAdapterError::api(
+        format!("{detail} The droplet was deleted, so nothing is still billing."),
+        cause,
+      ),
+      Err(cleanup_error) => ProviderAdapterError::api(
+        format!(
+          "{detail} Droplet {droplet_id} could NOT be deleted and may still be billing — remove it in the DigitalOcean console. Cleanup failure: {cleanup_error}"
+        ),
+        cause,
+      ),
+    }
+  }
+
   /// DigitalOcean's API keys droplets by a numeric id, so the opaque node id is parsed back at the
   /// adapter boundary. A malformed id is a caller error, not a panic.
   fn droplet_id(node_id: &str) -> Result<u64, ProviderAdapterError> {
@@ -456,28 +482,48 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
       user_data: Some(init_payload.to_string()),
     };
 
+    // Resolved once and reused for every call below. Passing the raw stored value to the client
+    // sends the whole JSON credential object as the bearer token, which DigitalOcean answers with
+    // 401 — see `abandon_droplet` for what that cost when it happened mid-poll.
+    let api_token = Self::api_token(token)?;
+
     let created = self
       .client
-      .create_droplet(&Self::api_token(token)?, &request)
+      .create_droplet(&api_token, &request)
       .map_err(|source| ProviderAdapterError::api("DigitalOcean droplet create call failed.", source))?;
 
-    let active = self
-      .client
-      .wait_for_droplet_active(
-        token,
-        created.id,
-        self.config.poll_interval,
-        self.config.poll_max_attempts,
-        self.config.droplet_ready_timeout,
-      )
-      .map_err(|source| {
-        ProviderAdapterError::api("DigitalOcean droplet did not become active before timeout.", source)
-      })?;
+    // Past this line a billable droplet exists. The orchestrator's rollback only fires once
+    // `create_node` has *returned* a node id, so a failure from here on has to delete the droplet
+    // itself or leave the user paying for one the app never recorded.
+    let active = match self.client.wait_for_droplet_active(
+      &api_token,
+      created.id,
+      self.config.poll_interval,
+      self.config.poll_max_attempts,
+      self.config.droplet_ready_timeout,
+    ) {
+      Ok(active) => active,
+      Err(source) => {
+        return Err(self.abandon_droplet(
+          &api_token,
+          created.id,
+          "DigitalOcean droplet never reached active state.",
+          source,
+        ));
+      }
+    };
 
-    let public_ipv4 = self
-      .client
-      .extract_public_ipv4(&active)
-      .map_err(|source| ProviderAdapterError::api("Active droplet did not expose public IPv4.", source))?;
+    let public_ipv4 = match self.client.extract_public_ipv4(&active) {
+      Ok(public_ipv4) => public_ipv4,
+      Err(source) => {
+        return Err(self.abandon_droplet(
+          &api_token,
+          created.id,
+          "Active droplet did not expose public IPv4.",
+          source,
+        ));
+      }
+    };
 
     Ok(ProvisionedNode {
       node_id: active.id.to_string(),
@@ -2044,6 +2090,128 @@ mod tests {
       .expect_err("a droplet that is not active must not report ready");
 
     assert!(error.to_string().contains("active"));
+  }
+
+  /// The stored credential is a JSON field set, so every DigitalOcean call has to go through
+  /// `api_token`. The readiness poll used to receive the raw stored value and send the whole JSON
+  /// object as the bearer token, which DigitalOcean answered with 401 — after the droplet was
+  /// already created and billing. The exact-header matcher is what makes this test able to fail.
+  #[test]
+  fn digitalocean_create_node_polls_with_the_parsed_token_not_the_stored_credential() {
+    let mut server = mockito::Server::new();
+    let stored = ProviderCredential::from_fields([(
+      "api_token".to_string(),
+      "dop_v1_EXAMPLE_NOT_A_REAL_TOKEN".to_string(),
+    )])
+    .to_stored_value();
+
+    let create = server
+      .mock("POST", "/v2/droplets")
+      .match_header(
+        "authorization",
+        mockito::Matcher::Exact("Bearer dop_v1_EXAMPLE_NOT_A_REAL_TOKEN".to_string()),
+      )
+      .with_status(202)
+      .with_header("content-type", "application/json")
+      .with_body(r#"{"droplet":{"id":7001,"name":"gs-node","status":"new","networks":{"v4":[]}}}"#)
+      .create();
+
+    let poll = server
+      .mock("GET", "/v2/droplets/7001")
+      .match_header(
+        "authorization",
+        mockito::Matcher::Exact("Bearer dop_v1_EXAMPLE_NOT_A_REAL_TOKEN".to_string()),
+      )
+      .with_status(200)
+      .with_header("content-type", "application/json")
+      .with_body(
+        r#"{"droplet":{"id":7001,"name":"gs-node","status":"active","networks":{"v4":[{"ip_address":"203.0.113.9","type":"public"}]}}}"#,
+      )
+      .create();
+
+    let adapter = super::DigitalOceanProviderAdapter::with_base_url(&server.url())
+      .expect("adapter should construct against mock server");
+
+    let provisioned = adapter
+      .create_node(&stored, "gs-node", "nyc1", "s-1vcpu-512mb-10gb", "#cloud-config")
+      .expect("create should succeed when both calls carry the parsed token");
+
+    create.assert();
+    poll.assert();
+    assert_eq!(provisioned.node_id, "7001");
+    assert_eq!(provisioned.public_ipv4, "203.0.113.9");
+  }
+
+  /// A failure *after* the droplet exists must not strand it. The orchestrator's rollback only
+  /// fires once `create_node` has returned a node id, so the adapter owns this cleanup — otherwise
+  /// the user pays for a droplet the app never recorded.
+  #[test]
+  fn digitalocean_create_node_deletes_the_droplet_when_readiness_fails() {
+    let mut server = mockito::Server::new();
+
+    let _create = server
+      .mock("POST", "/v2/droplets")
+      .with_status(202)
+      .with_header("content-type", "application/json")
+      .with_body(r#"{"droplet":{"id":7002,"name":"gs-node","status":"new","networks":{"v4":[]}}}"#)
+      .create();
+
+    // The exact failure seen in the field: the poll is rejected while the droplet is already live.
+    let _poll = server
+      .mock("GET", "/v2/droplets/7002")
+      .with_status(401)
+      .with_body(r#"{"id":"unauthorized","message":"Unable to authenticate you."}"#)
+      .create();
+
+    let delete = server
+      .mock("DELETE", "/v2/droplets/7002")
+      .with_status(204)
+      .expect(1)
+      .create();
+
+    let adapter = super::DigitalOceanProviderAdapter::with_base_url(&server.url())
+      .expect("adapter should construct against mock server");
+
+    let error = adapter
+      .create_node(&single_field_credential("dop_v1_EXAMPLE_NOT_A_REAL_TOKEN").to_stored_value(), "gs-node", "nyc1", "s-1vcpu-512mb-10gb", "#cloud-config")
+      .expect_err("a rejected readiness poll must fail the create");
+
+    delete.assert();
+    assert!(
+      error.to_string().contains("never reached active state"),
+      "error should name the readiness failure, got: {error}"
+    );
+  }
+
+  /// Cleanup that itself fails is reported, never swallowed — the droplet id has to reach the user
+  /// so they can remove it by hand (AGENTS.md §8).
+  #[test]
+  fn digitalocean_create_node_reports_a_droplet_it_could_not_delete() {
+    let mut server = mockito::Server::new();
+
+    let _create = server
+      .mock("POST", "/v2/droplets")
+      .with_status(202)
+      .with_header("content-type", "application/json")
+      .with_body(r#"{"droplet":{"id":7003,"name":"gs-node","status":"new","networks":{"v4":[]}}}"#)
+      .create();
+
+    let _poll = server.mock("GET", "/v2/droplets/7003").with_status(401).create();
+    let _delete = server.mock("DELETE", "/v2/droplets/7003").with_status(403).create();
+
+    let adapter = super::DigitalOceanProviderAdapter::with_base_url(&server.url())
+      .expect("adapter should construct against mock server");
+
+    let error = adapter
+      .create_node(&single_field_credential("dop_v1_EXAMPLE_NOT_A_REAL_TOKEN").to_stored_value(), "gs-node", "nyc1", "s-1vcpu-512mb-10gb", "#cloud-config")
+      .expect_err("a rejected readiness poll must fail the create");
+
+    let message = error.to_string();
+    assert!(message.contains("7003"), "the surviving droplet id must reach the user, got: {message}");
+    assert!(
+      message.contains("could NOT be deleted"),
+      "a failed cleanup must be reported, got: {message}"
+    );
   }
 
   // --- Amazon EC2 -----------------------------------------------------------------------------
