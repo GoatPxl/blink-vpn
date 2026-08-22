@@ -39,7 +39,11 @@ Provider adapters currently included:
 | `list_provider_regions` | `provider_id` | `ProviderRegion[]` | Region catalog with normalized geography — see below |
 | `list_provider_pricing` | `provider_id`, `region` | `ProviderPricingResponse` | Plan and pricing catalog |
 | `create_vpn_node_to_ready` | `node_id`, `provider_id`, `node_name`, `region`, `plan_key` | `string` | Provision and bootstrap workflow |
-| `create_and_activate_client_tunnel` | `tunnel_id`, `node_id`, `tunnel_name`, `client_address_cidr`, `dns_server?`, `allowed_ips` | `string` | Reuses the client keypair generated at provision time and marks the tunnel ready |
+| `create_and_activate_client_tunnel` | `tunnel_id`, `node_id`, `tunnel_name`, `dns_server?`, `allowed_ips` | `string` | Binds the tunnel to the node’s slot 0 peer and marks it ready. The address comes from that slot, never from the caller — the server only accepts that key at that address |
+| `list_node_peers` | `node_id` | `NodePeerRecord[]` | Every baked device slot, claimed and unclaimed, in slot order |
+| `claim_node_peer` | `node_id`, `peer_id`, `label` | `NodePeerRecord` | Names an unclaimed slot so it becomes a device. Local bookkeeping only — nothing is sent to the server |
+| `get_peer_config` | `node_id`, `peer_id` | `PeerConfigPayload` | The slot’s WireGuard config plus a QR module matrix. Refused for an endpoint only this machine can reach |
+| `export_peer_config` | `node_id`, `peer_id` | `string` | Writes the config under `peer-configs/` in the app data directory and returns the path |
 | `activate_client_tunnel` | `tunnel_id` | `void` | Activates a local tunnel through the WireGuard tunnel service |
 | `deactivate_client_tunnel` | `tunnel_id` | `void` | Deactivates a local tunnel through the WireGuard tunnel service |
 | `connect_tunnel` | `node_id`, `tunnel_id` | `void` | Registers and starts the tunnel service. **Returning means the service is running, not that the tunnel carries traffic** — poll `get_tunnel_phase` for that. Rejects a second concurrent connect for the same tunnel with `invalid-state` |

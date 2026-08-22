@@ -12,7 +12,7 @@ use thiserror::Error;
 ///
 /// Named once so that startup and the "where are my files" listing cannot drift apart and point the
 /// user at a database that does not exist.
-pub const DATABASE_FILE_NAME: &str = "goatstare_phase1.sqlite3";
+pub const DATABASE_FILE_NAME: &str = "goatstare.sqlite3";
 
 /// How long a statement waits for a competing writer before reporting SQLITE_BUSY.
 ///
@@ -40,6 +40,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (17, include_str!("../../../migrations/0017_activity_events.sql")),
   (18, include_str!("../../../migrations/0018_backfill_legacy_correlation_ids.sql")),
   (19, include_str!("../../../migrations/0019_seed_ec2_provider.sql")),
+  (20, include_str!("../../../migrations/0020_node_peers.sql")),
 ];
 
 
@@ -262,15 +263,44 @@ pub struct VpnNodeRecord {
   pub error_reason: Option<String>,
   pub created_at: String,
   pub updated_at: String,
-  /// Reference to the client private key in Windows Credential Manager. Never serialized to the
-  /// UI — it is backend bookkeeping that lets tunnel creation reuse the keypair that was baked
-  /// into the server's `[Peer]` block at provision time.
-  #[serde(skip_serializing)]
-  pub client_private_key_ref: Option<String>,
-  #[serde(skip_serializing)]
-  pub client_public_key: Option<String>,
   /// UDP port the client dials, as reported by the provider adapter at provision time.
   pub endpoint_port: Option<u16>,
+}
+
+/// A peer slot about to be written. Borrowed rather than owned: every field already exists in the
+/// caller, and a slot is created once and never held.
+#[derive(Debug, Clone, Copy)]
+pub struct NewNodePeer<'a> {
+  pub id: &'a str,
+  pub slot_index: i64,
+  /// `Some` marks the slot claimed on creation, which is how slot 0 becomes "This PC".
+  pub label: Option<&'a str>,
+  pub client_public_key: &'a str,
+  pub client_private_key_ref: &'a str,
+  pub client_address_cidr: &'a str,
+}
+
+/// One baked `[Peer]` slot on a provisioned server.
+///
+/// Created in bulk when the node is provisioned and never added to afterwards — AGENTS.md §2
+/// leaves no channel to register a peer on a running server, so the slot list a node is born
+/// with is the slot list it dies with. "Adding a device" claims an existing unclaimed row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodePeerRecord {
+  pub id: String,
+  pub node_id: String,
+  /// Position in the server's `[Peer]` list. Slot 0 is the Windows desktop.
+  pub slot_index: i64,
+  /// What the user called this device. `None` means the slot is unclaimed and free to hand out.
+  pub label: Option<String>,
+  pub client_public_key: String,
+  /// Reference to the private key in Windows Credential Manager, never the key itself. Not
+  /// serialized: the UI has no use for a handle it cannot resolve.
+  #[serde(skip_serializing)]
+  pub client_private_key_ref: String,
+  pub client_address_cidr: String,
+  pub claimed_at: Option<String>,
+  pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -279,8 +309,8 @@ pub struct TunnelRecord {
   pub node_id: String,
   pub name: String,
   pub status: TunnelStatus,
-  pub client_private_key_ref: Option<String>,
-  pub client_address_cidr: Option<String>,
+  /// The `node_peers` row supplying this tunnel's key and address.
+  pub peer_id: Option<String>,
   pub dns_server: Option<String>,
   pub allowed_ips: Option<String>,
   pub interface_name: Option<String>,
@@ -679,7 +709,7 @@ impl Database {
         "SELECT id, provider_id, name, region, plan_key, size_slug, price_monthly_usd,
           price_hourly_usd, price_source_timestamp, lifecycle_status, external_ref,
           public_ipv4, server_public_key, error_reason, created_at, updated_at,
-          client_private_key_ref, client_public_key, endpoint_port
+          endpoint_port
          FROM vpn_nodes
          ORDER BY created_at ASC",
       )
@@ -718,7 +748,7 @@ impl Database {
         "SELECT id, provider_id, name, region, plan_key, size_slug, price_monthly_usd,
           price_hourly_usd, price_source_timestamp, lifecycle_status, external_ref,
           public_ipv4, server_public_key, error_reason, created_at, updated_at,
-          client_private_key_ref, client_public_key, endpoint_port
+          endpoint_port
          FROM vpn_nodes
          WHERE id = ?1",
         params![id],
@@ -829,41 +859,149 @@ impl Database {
     Ok(())
   }
 
-  /// Record the client keypair that was baked into this node's server `[Peer]` block.
+  /// Create every peer slot for a node in one transaction.
   ///
-  /// Written during provisioning, before the node is created, so the tunnel built later reuses
-  /// the same key rather than generating a second one the server has never heard of.
-  pub fn update_vpn_node_client_key(
-    &self,
-    id: &str,
-    client_private_key_ref: Option<&str>,
-    client_public_key: Option<&str>,
-  ) -> Result<(), DbError> {
+  /// All-or-nothing on purpose. A node whose server config bakes five peers but whose database
+  /// records three has no way to hand out the other two and no way to notice it should — and
+  /// because the server cannot be reached after create (AGENTS.md §2), that is unrecoverable.
+  pub fn insert_node_peers(&self, node_id: &str, peers: &[NewNodePeer]) -> Result<(), DbError> {
+    let mut connection = self.open_connection()?;
+    let transaction = connection.transaction().map_err(|source| DbError::Query {
+      action: "insert_node_peers_begin",
+      detail: "Failed opening a transaction for node peer creation.".to_string(),
+      source,
+    })?;
+
+    for peer in peers {
+      transaction
+        .execute(
+          "INSERT INTO node_peers (
+             id, node_id, slot_index, label, client_public_key, client_private_key_ref,
+             client_address_cidr, claimed_at, created_at
+           ) VALUES (
+             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+             CASE WHEN ?4 IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%fZ', 'now') END,
+             strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           )",
+          params![
+            peer.id,
+            node_id,
+            peer.slot_index,
+            peer.label,
+            peer.client_public_key,
+            peer.client_private_key_ref,
+            peer.client_address_cidr,
+          ],
+        )
+        .map_err(|source| DbError::Query {
+          action: "insert_node_peers",
+          detail: "Failed creating a node peer slot.".to_string(),
+          source,
+        })?;
+    }
+
+    transaction.commit().map_err(|source| DbError::Query {
+      action: "insert_node_peers_commit",
+      detail: "Failed committing node peer slots.".to_string(),
+      source,
+    })
+  }
+
+  pub fn list_node_peers(&self, node_id: &str) -> Result<Vec<NodePeerRecord>, DbError> {
+    let connection = self.open_connection()?;
+    let mut statement = connection
+      .prepare(
+        "SELECT id, node_id, slot_index, label, client_public_key, client_private_key_ref,
+          client_address_cidr, claimed_at, created_at
+         FROM node_peers
+         WHERE node_id = ?1
+         ORDER BY slot_index ASC",
+      )
+      .map_err(|source| DbError::Query {
+        action: "list_node_peers_prepare",
+        detail: "Failed preparing node peers query.".to_string(),
+        source,
+      })?;
+
+    let rows = statement
+      .query_map(params![node_id], map_node_peer_row)
+      .map_err(|source| DbError::Query {
+        action: "list_node_peers_query",
+        detail: "Failed running node peers query.".to_string(),
+        source,
+      })?;
+
+    let mut output = Vec::new();
+    for row in rows {
+      output.push(row.map_err(|source| DbError::Query {
+        action: "list_node_peers_collect",
+        detail: "Failed decoding node peer rows.".to_string(),
+        source,
+      })?);
+    }
+    Ok(output)
+  }
+
+  pub fn get_node_peer(&self, id: &str) -> Result<Option<NodePeerRecord>, DbError> {
+    let connection = self.open_connection()?;
+    connection
+      .query_row(
+        "SELECT id, node_id, slot_index, label, client_public_key, client_private_key_ref,
+          client_address_cidr, claimed_at, created_at
+         FROM node_peers
+         WHERE id = ?1",
+        params![id],
+        map_node_peer_row,
+      )
+      .optional()
+      .map_err(|source| DbError::Query {
+        action: "get_node_peer",
+        detail: "Failed retrieving node peer by id.".to_string(),
+        source,
+      })
+  }
+
+  /// Name an unclaimed slot, making it a device.
+  ///
+  /// `claimed_at` is only stamped once. Renaming a device later is a label change, not a new
+  /// claim, and the original date is what tells the user when they set it up.
+  pub fn claim_node_peer(&self, id: &str, label: &str) -> Result<(), DbError> {
     let connection = self.open_connection()?;
     let changed = connection
       .execute(
-        "UPDATE vpn_nodes
-         SET client_private_key_ref = ?2,
-             client_public_key = ?3,
-             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        "UPDATE node_peers
+         SET label = ?2,
+             claimed_at = COALESCE(claimed_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
          WHERE id = ?1",
-        params![id, client_private_key_ref, client_public_key],
+        params![id, label],
       )
       .map_err(|source| DbError::Query {
-        action: "update_vpn_node_client_key",
-        detail: "Failed recording node client key reference.".to_string(),
+        action: "claim_node_peer",
+        detail: "Failed claiming a node peer slot.".to_string(),
         source,
       })?;
 
     if changed == 0 {
       return Err(DbError::NotFound {
-        entity: "vpn_node",
+        entity: "node_peer",
         id: id.to_string(),
-        detail: "Client key update skipped because no row matched the id.".to_string(),
+        detail: "Peer claim skipped because no row matched the id.".to_string(),
       });
     }
 
     Ok(())
+  }
+
+  pub fn delete_node_peers_for_node(&self, node_id: &str) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    connection
+      .execute("DELETE FROM node_peers WHERE node_id = ?1", params![node_id])
+      .map(|_| ())
+      .map_err(|source| DbError::Query {
+        action: "delete_node_peers_for_node",
+        detail: "Failed deleting node peer slots.".to_string(),
+        source,
+      })
   }
 
   pub fn update_vpn_node_pricing_snapshot(
@@ -963,7 +1101,7 @@ impl Database {
     let connection = self.open_connection()?;
     connection
       .query_row(
-        "SELECT id, node_id, name, status, client_private_key_ref, client_address_cidr,
+        "SELECT id, node_id, name, status, peer_id,
           dns_server, allowed_ips, interface_name, assigned_ipv4, last_handshake_age_seconds,
           rx_bytes, tx_bytes, stats_updated_at, last_error, connected_at, created_at, updated_at
          FROM tunnels
@@ -984,7 +1122,7 @@ impl Database {
     let connection = self.open_connection()?;
     let mut statement = connection
       .prepare(
-        "SELECT id, node_id, name, status, client_private_key_ref, client_address_cidr,
+        "SELECT id, node_id, name, status, peer_id,
           dns_server, allowed_ips, interface_name, assigned_ipv4, last_handshake_age_seconds,
           rx_bytes, tx_bytes, stats_updated_at, last_error, connected_at, created_at, updated_at
          FROM tunnels
@@ -1093,8 +1231,8 @@ impl Database {
   pub fn update_tunnel_client_config(
     &self,
     id: &str,
-    client_private_key_ref: Option<&str>,
-    client_address_cidr: Option<&str>,
+    peer_id: Option<&str>,
+    assigned_ipv4: Option<&str>,
     dns_server: Option<&str>,
     allowed_ips: Option<&str>,
   ) -> Result<(), DbError> {
@@ -1102,17 +1240,16 @@ impl Database {
     let changed = connection
       .execute(
         "UPDATE tunnels
-         SET client_private_key_ref = ?2,
-             client_address_cidr = ?3,
+         SET peer_id = ?2,
+             assigned_ipv4 = ?3,
              dns_server = ?4,
              allowed_ips = ?5,
-             assigned_ipv4 = ?3,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?1",
         params![
           id,
-          client_private_key_ref,
-          client_address_cidr,
+          peer_id,
+          assigned_ipv4,
           dns_server,
           allowed_ips,
         ],
@@ -1458,9 +1595,21 @@ fn map_vpn_node_row(row: &Row<'_>) -> rusqlite::Result<VpnNodeRecord> {
     error_reason: row.get(13)?,
     created_at: row.get(14)?,
     updated_at: row.get(15)?,
-    client_private_key_ref: row.get(16)?,
-    client_public_key: row.get(17)?,
-    endpoint_port: row.get::<_, Option<i64>>(18)?.and_then(|value| u16::try_from(value).ok()),
+    endpoint_port: row.get::<_, Option<i64>>(16)?.and_then(|value| u16::try_from(value).ok()),
+  })
+}
+
+fn map_node_peer_row(row: &Row<'_>) -> rusqlite::Result<NodePeerRecord> {
+  Ok(NodePeerRecord {
+    id: row.get(0)?,
+    node_id: row.get(1)?,
+    slot_index: row.get(2)?,
+    label: row.get(3)?,
+    client_public_key: row.get(4)?,
+    client_private_key_ref: row.get(5)?,
+    client_address_cidr: row.get(6)?,
+    claimed_at: row.get(7)?,
+    created_at: row.get(8)?,
   })
 }
 
@@ -1479,20 +1628,19 @@ fn map_tunnel_row(row: &Row<'_>) -> rusqlite::Result<TunnelRecord> {
     node_id: row.get(1)?,
     name: row.get(2)?,
     status,
-    client_private_key_ref: row.get(4)?,
-    client_address_cidr: row.get(5)?,
-    dns_server: row.get(6)?,
-    allowed_ips: row.get(7)?,
-    interface_name: row.get(8)?,
-    assigned_ipv4: row.get(9)?,
-    last_handshake_age_seconds: row.get(10)?,
-    rx_bytes: row.get(11)?,
-    tx_bytes: row.get(12)?,
-    stats_updated_at: row.get(13)?,
-    last_error: row.get(14)?,
-    connected_at: row.get(15)?,
-    created_at: row.get(16)?,
-    updated_at: row.get(17)?,
+    peer_id: row.get(4)?,
+    dns_server: row.get(5)?,
+    allowed_ips: row.get(6)?,
+    interface_name: row.get(7)?,
+    assigned_ipv4: row.get(8)?,
+    last_handshake_age_seconds: row.get(9)?,
+    rx_bytes: row.get(10)?,
+    tx_bytes: row.get(11)?,
+    stats_updated_at: row.get(12)?,
+    last_error: row.get(13)?,
+    connected_at: row.get(14)?,
+    created_at: row.get(15)?,
+    updated_at: row.get(16)?,
   })
 }
 
@@ -1871,6 +2019,19 @@ mod tests {
              slug TEXT NOT NULL UNIQUE,
              token_ref TEXT
            );
+           -- Not touched by 0017/0018, but later migrations alter them, and a fixture missing
+           -- tables that migration 0001 always creates is not a legacy database — it is an
+           -- impossible one.
+           CREATE TABLE vpn_nodes (
+             id TEXT PRIMARY KEY,
+             client_private_key_ref TEXT,
+             client_public_key TEXT
+           );
+           CREATE TABLE tunnels (
+             id TEXT PRIMARY KEY,
+             client_private_key_ref TEXT,
+             client_address_cidr TEXT
+           );
            CREATE TABLE init_run_logs (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              node_id TEXT NOT NULL,
@@ -1976,6 +2137,19 @@ mod tests {
              name TEXT NOT NULL,
              slug TEXT NOT NULL UNIQUE,
              token_ref TEXT
+           );
+           -- Not touched by 0017/0018, but later migrations alter them, and a fixture missing
+           -- tables that migration 0001 always creates is not a legacy database — it is an
+           -- impossible one.
+           CREATE TABLE vpn_nodes (
+             id TEXT PRIMARY KEY,
+             client_private_key_ref TEXT,
+             client_public_key TEXT
+           );
+           CREATE TABLE tunnels (
+             id TEXT PRIMARY KEY,
+             client_private_key_ref TEXT,
+             client_address_cidr TEXT
            );
            CREATE TABLE activity_events (
              id INTEGER PRIMARY KEY AUTOINCREMENT,

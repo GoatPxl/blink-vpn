@@ -68,8 +68,7 @@ Columns:
 - `status` TEXT NOT NULL
 - `interface_name` TEXT NULL
 - `assigned_ipv4` TEXT NULL
-- `client_private_key_ref` TEXT NULL
-- `client_address_cidr` TEXT NULL
+- `peer_id` TEXT NULL REFERENCES node_peers(id)
 - `dns_server` TEXT NULL
 - `allowed_ips` TEXT NULL
 - `last_error` TEXT NULL
@@ -81,10 +80,14 @@ Columns:
 - `created_at` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
 
-The four columns from migration 0010 (`client_private_key_ref`, `client_address_cidr`, `dns_server`,
-`allowed_ips`) record what the last connect used. `dns_server` in particular is a **record, not an
-input**: the value written into a new config comes from `app_settings`, so there is one source of
-truth for what the next connect will do.
+`peer_id` names the `node_peers` row supplying this tunnel’s key and address. It replaced
+`client_private_key_ref` and `client_address_cidr` (migration 0020): a tunnel carrying its own copy
+of a peer’s identity was a second source of truth for the same fact, which is the drift AGENTS.md
+§5 exists to prevent.
+
+`dns_server` and `allowed_ips` record what the last connect used. `dns_server` in particular is a
+**record, not an input**: the value written into a new config comes from `app_settings`, so there
+is one source of truth for what the next connect will do.
 
 `connected_at` is the start of the current session, stamped on a successful connect and cleared on
 every disconnect path. NULL therefore means either "not connected" or "connected, but the start is
@@ -96,6 +99,39 @@ Indexes:
 
 - `idx_tunnels_node_id`
 - `idx_tunnels_status`
+
+### node_peers
+
+Columns:
+
+- `id` TEXT PRIMARY KEY
+- `node_id` TEXT NOT NULL REFERENCES vpn_nodes(id) ON DELETE CASCADE
+- `slot_index` INTEGER NOT NULL
+- `label` TEXT NULL
+- `client_public_key` TEXT NOT NULL
+- `client_private_key_ref` TEXT NOT NULL
+- `client_address_cidr` TEXT NOT NULL
+- `claimed_at` TEXT NULL
+- `created_at` TEXT NOT NULL
+
+One row per `[Peer]` block baked into a server. Every row a node will ever have is written when it
+is provisioned, because AGENTS.md §2 makes provisioning write-only — there is no channel to
+register a peer on a running server, so a slot that was not baked can never exist. Slot 0 is the
+Windows desktop and arrives with a label; the rest are unclaimed until a device takes one.
+
+`label IS NULL` means the slot is free. Claiming one only sets `label` and `claimed_at`; nothing is
+sent anywhere. `client_private_key_ref` points at Windows Credential Manager and is never
+serialized to the UI.
+
+Constraints: `UNIQUE (node_id, slot_index)` and `UNIQUE (node_id, client_address_cidr)` — two
+devices answering to the same tunnel address would be a silent routing failure.
+
+This table replaced `vpn_nodes.client_public_key` / `client_private_key_ref`, which between them
+could describe exactly one peer. Both were dropped in migration 0020.
+
+Indexes:
+
+- `idx_node_peers_node_id`
 
 ### activity_events
 

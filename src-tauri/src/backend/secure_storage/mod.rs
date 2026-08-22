@@ -232,7 +232,7 @@ pub struct WindowsCredentialStore {
 impl WindowsCredentialStore {
   pub fn new() -> Self {
     Self {
-      service_name: "com.goatstare.vpn.phase1".to_string(),
+      service_name: "com.goatstare.vpn".to_string(),
     }
   }
 
@@ -421,7 +421,7 @@ impl SecretStore for WindowsCredentialStore {
 
 /// Plain in-memory storage, with none of Credential Manager's protection.
 ///
-/// Reachable in exactly two situations: a test, and a non-Windows build — which Phase 1 does not
+/// Reachable in exactly two situations: a test, and a non-Windows build — which this app does not
 /// ship (AGENTS.md §1). Gated so a Windows release cannot contain it at all, rather than merely
 /// not calling it.
 #[cfg(any(test, not(target_os = "windows")))]

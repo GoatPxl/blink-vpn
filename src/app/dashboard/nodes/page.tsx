@@ -44,6 +44,11 @@ export default function DashboardNodesPage() {
     forceDisconnectNodeService,
     tunnelConnected,
     tunnels,
+    nodePeers,
+    claimDevice,
+    loadDeviceConfig,
+    exportDeviceConfig,
+    copyText,
   } = useDashboard();
   const [statusFilter, setStatusFilter] = useState<NodeStatus | "all">("all");
   const [regionFilter, setRegionFilter] = useState<string>("all");
@@ -186,6 +191,11 @@ export default function DashboardNodesPage() {
       onConnectTunnel={connectTunnel}
       onDisconnectTunnel={disconnectTunnel}
       onForceDisconnectNodeService={forceDisconnectNodeService}
+      nodePeers={nodePeers}
+      onClaimDevice={claimDevice}
+      onLoadDeviceConfig={loadDeviceConfig}
+      onExportDeviceConfig={exportDeviceConfig}
+      onCopyText={copyText}
       onForceCleanupSelectedNode={forceCleanupSelectedNode}
       isDetailsModalOpen={isDetailsModalOpen}
       onOpenNodeDetails={handleOpenNodeDetails}

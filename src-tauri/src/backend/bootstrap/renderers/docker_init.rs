@@ -1,5 +1,8 @@
-use super::super::contract::{BootstrapParams, READINESS_MARKER_PATH};
-use super::shared::{FIREWALL_RULES_FRAGMENT, WG_INTERFACE_CONFIG_FRAGMENT};
+use super::super::contract::{subnet_of, BootstrapError, BootstrapParams, READINESS_MARKER_PATH};
+use super::shared::{
+  peer_public_keys_shell_list, peer_specs_shell_list, render_wg_interface_config,
+  FIREWALL_RULES_FRAGMENT,
+};
 
 /// Docker's equivalent of the cloud-init payload.
 ///
@@ -12,10 +15,10 @@ pub(crate) fn build_docker_init_script(
   params: &BootstrapParams,
   server_private_key: &str,
   server_public_key: &str,
-) -> String {
-  let script_body = render_docker_bootstrap_body(params);
+) -> Result<String, BootstrapError> {
+  let script_body = render_docker_bootstrap_body(params)?;
 
-  format!(
+  Ok(format!(
     r#"#!/usr/bin/env bash
 set -euo pipefail
 
@@ -48,11 +51,15 @@ fi
 
 {script_body}
 "#
-  )
+  ))
 }
 
-fn render_docker_bootstrap_body(params: &BootstrapParams) -> String {
-  format!(
+fn render_docker_bootstrap_body(params: &BootstrapParams) -> Result<String, BootstrapError> {
+  // Never fails in practice — the CIDR is validated before any renderer runs — but propagated
+  // rather than unwrapped so a future caller that skips validation gets an error, not a panic.
+  let nat_source_cidr = subnet_of(&params.server_interface_cidr)?;
+
+  Ok(format!(
     r#"
 log_stage() {{
   local stage="$1"
@@ -65,8 +72,9 @@ trap 'log_stage "failed" "line=${{LINENO}} exit_status=$?"' ERR
 WG_IFACE="{iface}"
 WG_PORT="{port}"
 SERVER_CIDR="{server_cidr}"
-CLIENT_CIDR="{client_cidr}"
-CLIENT_PUBLIC_KEY="{client_public_key}"
+NAT_SOURCE_CIDR="{nat_source_cidr}"
+PEER_PUBLIC_KEYS="{peer_public_keys}"
+PEER_SPECS="{peer_specs}"
 MARKER_PATH="{marker}"
 
 umask 077
@@ -99,18 +107,20 @@ SERVER_PUBLIC_KEY=$(tr -d '\r\n' < /etc/wireguard/server_public.key)
 
 chmod 600 /etc/wireguard/server_private.key /etc/wireguard/server_public.key
 
-log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf with baked client peer"
+log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf with baked client peers"
 
 cat > /etc/wireguard/${{WG_IFACE}}.conf <<EOF
 {interface_config_fragment}
 EOF
 chmod 600 /etc/wireguard/${{WG_IFACE}}.conf
 
-log_stage "verify-peer" "confirming client peer is present in ${{WG_IFACE}}.conf"
-grep -q "^PublicKey = ${{CLIENT_PUBLIC_KEY}}$" /etc/wireguard/${{WG_IFACE}}.conf || {{
-  log_stage "verify-peer" "client peer missing from generated config"
-  exit 65
-}}
+log_stage "verify-peer" "confirming every baked peer is present in ${{WG_IFACE}}.conf"
+for peer_key in ${{PEER_PUBLIC_KEYS}}; do
+  grep -q "^PublicKey = ${{peer_key}}$" /etc/wireguard/${{WG_IFACE}}.conf || {{
+    log_stage "verify-peer" "peer ${{peer_key}} missing from generated config"
+    exit 65
+  }}
+done
 
 log_stage "sysctl" "ensuring IPv4 forwarding is enabled"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
@@ -130,9 +140,11 @@ else
   ip link add "${{WG_IFACE}}" type wireguard
   ip addr replace "${{SERVER_CIDR}}" dev "${{WG_IFACE}}"
   wg set "${{WG_IFACE}}" private-key /etc/wireguard/server_private.key listen-port "${{WG_PORT}}"
-  # wg-quick would have applied the [Peer] block from the config; the manual path must add it
-  # explicitly or the server comes up with no peer and rejects every handshake.
-  wg set "${{WG_IFACE}}" peer "${{CLIENT_PUBLIC_KEY}}" allowed-ips "${{CLIENT_CIDR}}"
+  # wg-quick would have applied the [Peer] blocks from the config; the manual path must add
+  # every one explicitly or the server comes up with no peers and rejects every handshake.
+  for peer_spec in ${{PEER_SPECS}}; do
+    wg set "${{WG_IFACE}}" peer "${{peer_spec%%|*}}" allowed-ips "${{peer_spec##*|}}"
+  done
   ip link set up dev "${{WG_IFACE}}"
 fi
 
@@ -141,11 +153,13 @@ ip link show "${{WG_IFACE}}" >/dev/null 2>&1
 ip -o link show "${{WG_IFACE}}" | grep -q 'UP'
 wg show "${{WG_IFACE}}" >/dev/null 2>&1
 
-log_stage "verify-runtime-peer" "confirming client peer is live on ${{WG_IFACE}}"
-wg show "${{WG_IFACE}}" peers | grep -qF "${{CLIENT_PUBLIC_KEY}}" || {{
-  log_stage "verify-runtime-peer" "client peer not present on running interface"
-  exit 66
-}}
+log_stage "verify-runtime-peer" "confirming every peer is live on ${{WG_IFACE}}"
+for peer_key in ${{PEER_PUBLIC_KEYS}}; do
+  wg show "${{WG_IFACE}}" peers | grep -qF "${{peer_key}}" || {{
+    log_stage "verify-runtime-peer" "peer ${{peer_key}} not present on running interface"
+    exit 66
+  }}
+done
 
 log_stage "verify-config" "ensuring /etc/wireguard/${{WG_IFACE}}.conf exists and is non-empty"
 if [ ! -s "/etc/wireguard/${{WG_IFACE}}.conf" ]; then
@@ -172,11 +186,12 @@ log_stage "complete" "bootstrap finished"
     iface = params.interface_name,
     port = params.listen_port,
     server_cidr = params.server_interface_cidr,
-    client_cidr = params.client_cidr,
-    client_public_key = params.client_public_key,
+    nat_source_cidr = nat_source_cidr,
+    peer_public_keys = peer_public_keys_shell_list(&params.peers),
+    peer_specs = peer_specs_shell_list(&params.peers),
     marker = READINESS_MARKER_PATH,
     endpoint = params.server_endpoint_ip,
-    interface_config_fragment = WG_INTERFACE_CONFIG_FRAGMENT,
+    interface_config_fragment = render_wg_interface_config(&params.peers),
     firewall_rules_fragment = FIREWALL_RULES_FRAGMENT,
-  )
+  ))
 }

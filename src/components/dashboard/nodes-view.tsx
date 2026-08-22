@@ -2,8 +2,10 @@
 
 import { useMemo } from "react";
 
-import { Button, Card, Field, PageChrome, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type TunnelRecord, type VpnNodeRecord, type PlanDisplayModel, type HealthPanelData } from "./shared";
+import { Button, Card, Field, Modal, PageChrome, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type TunnelRecord, type VpnNodeRecord, type PlanDisplayModel, type HealthPanelData } from "./shared";
 import { formatCreatedTime, formatCurrency, formatMemory, getNodePricingDisplay } from "./shared";
+import { DeviceSlots } from "./device-slots";
+import type { NodePeerRecord, PeerConfigPayload } from "@/lib/tauri";
 import {
   NODE_STATUS_LABEL,
   isConnectable,
@@ -65,6 +67,11 @@ export function NodesView({
   onConnectTunnel,
   onDisconnectTunnel,
   onForceDisconnectNodeService,
+  nodePeers,
+  onClaimDevice,
+  onLoadDeviceConfig,
+  onExportDeviceConfig,
+  onCopyText,
   onForceCleanupSelectedNode,
   isDetailsModalOpen,
   onOpenNodeDetails,
@@ -101,6 +108,11 @@ export function NodesView({
   onConnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onDisconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onForceDisconnectNodeService: (node: VpnNodeRecord) => Promise<void>;
+  nodePeers: NodePeerRecord[];
+  onClaimDevice: (nodeId: string, peerId: string, label: string) => Promise<boolean>;
+  onLoadDeviceConfig: (nodeId: string, peerId: string) => Promise<PeerConfigPayload | null>;
+  onExportDeviceConfig: (nodeId: string, peerId: string) => Promise<void>;
+  onCopyText: (value: string, label: string) => Promise<void>;
   onForceCleanupSelectedNode: () => Promise<void>;
   isDetailsModalOpen: boolean;
   onOpenNodeDetails: (nodeId: string) => void;
@@ -269,6 +281,11 @@ export function NodesView({
           onClose={onCloseNodeDetails}
           onSetCurrentNode={onSetCurrentNode}
           onDestroyNode={onDestroyNode}
+          nodePeers={nodePeers}
+          onClaimDevice={onClaimDevice}
+          onLoadDeviceConfig={onLoadDeviceConfig}
+          onExportDeviceConfig={onExportDeviceConfig}
+          onCopyText={onCopyText}
           onForceCleanup={onForceCleanupSelectedNode}
         />
       ) : null}
@@ -303,6 +320,11 @@ function NodeDetailsDrawer({
   onClose,
   onSetCurrentNode,
   onDestroyNode,
+  nodePeers,
+  onClaimDevice,
+  onLoadDeviceConfig,
+  onExportDeviceConfig,
+  onCopyText,
   onForceCleanup,
 }: {
   node: VpnNodeRecord;
@@ -316,6 +338,11 @@ function NodeDetailsDrawer({
   onClose: () => void;
   onSetCurrentNode: (nodeId: string) => Promise<void>;
   onDestroyNode: (node: VpnNodeRecord) => Promise<void>;
+  nodePeers: NodePeerRecord[];
+  onClaimDevice: (nodeId: string, peerId: string, label: string) => Promise<boolean>;
+  onLoadDeviceConfig: (nodeId: string, peerId: string) => Promise<PeerConfigPayload | null>;
+  onExportDeviceConfig: (nodeId: string, peerId: string) => Promise<void>;
+  onCopyText: (value: string, label: string) => Promise<void>;
   onForceCleanup: () => Promise<void>;
 }) {
   const specs = pricing
@@ -323,15 +350,12 @@ function NodeDetailsDrawer({
     : "n/a";
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-[2px]" onClick={onClose} aria-hidden="true">
-      <aside
-        className="flex h-full w-full max-w-[460px] flex-col overflow-y-auto border-l border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(24,28,36,0.99),rgba(13,16,23,0.99))] p-6 shadow-[-30px_0_90px_rgba(0,0,0,0.45)]"
-        onClick={(event) => event.stopPropagation()}
-      >
+    <Modal onClose={onClose} labelledBy="node-details-title" placement="end">
+      <>
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-xs uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Server</p>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-[var(--on-surface)]">{node.name}</h2>
+            <h2 id="node-details-title" className="mt-2 text-2xl font-semibold tracking-tight text-[var(--on-surface)]">{node.name}</h2>
           </div>
           <Button tone="secondary" onClick={onClose} className="px-3 py-2 text-xs">Close</Button>
         </div>
@@ -389,6 +413,16 @@ function NodeDetailsDrawer({
             <div className="mt-1">{actionMessage}</div>
           </section>
 
+          <DeviceSlots
+            nodeId={node.id}
+            peers={nodePeers}
+            busyAction={busyAction}
+            onClaimDevice={onClaimDevice}
+            onLoadDeviceConfig={onLoadDeviceConfig}
+            onExportDeviceConfig={onExportDeviceConfig}
+            onCopyText={onCopyText}
+          />
+
           {/* Separated because both actions delete a paid server. "Uninstall Host" used to sit in
               every row, coloured red, one click from destroying a droplet the user is billed for. */}
           <section className="rounded-[18px] border border-[color:rgba(255,155,155,0.25)] bg-[color:rgba(255,155,155,0.05)] p-4">
@@ -410,7 +444,7 @@ function NodeDetailsDrawer({
             </div>
           </section>
         </div>
-      </aside>
-    </div>
+      </>
+    </Modal>
   );
 }

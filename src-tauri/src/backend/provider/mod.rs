@@ -292,7 +292,7 @@ impl DigitalOceanProviderAdapter {
   }
 
   fn for_base_url(base_url: &str) -> Result<Self, ProviderAdapterError> {
-    let config = DigitalOceanConfig::phase1_defaults();
+    let config = DigitalOceanConfig::defaults();
     let client = DigitalOceanApiClient::new_with_timeout(
       base_url,
       RetryPolicy::digitalocean_default(),
@@ -478,7 +478,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
         size_slug.trim().to_string()
       },
       image: self.config.image.to_string(),
-      tags: vec!["goatstare-phase1".to_string()],
+      tags: vec!["goatstare".to_string()],
       user_data: Some(init_payload.to_string()),
     };
 
@@ -675,7 +675,7 @@ struct Ec2PlanSpec {
 
 /// Tag key marking every resource this app creates, so an operator can find them in the console.
 const EC2_OWNER_TAG_KEY: &str = "goatstare";
-const EC2_OWNER_TAG_VALUE: &str = "phase1";
+const EC2_OWNER_TAG_VALUE: &str = "managed";
 
 /// Maps a user's node name onto an AWS tag value.
 ///
@@ -769,7 +769,7 @@ impl Ec2ProviderAdapter {
   /// a panic; adding a second adapter that can fail at construction would double that hazard, so
   /// the HTTP client is built lazily-safe here and a build failure surfaces as a normal API error.
   pub fn new() -> Self {
-    let config = Ec2Config::phase1_defaults();
+    let config = Ec2Config::defaults();
     let client = Ec2ApiClient::new_with_timeout(RetryPolicy::digitalocean_default(), config.request_timeout)
       .unwrap_or_else(|_| {
         // `reqwest` only fails to build a client on a malformed TLS configuration, which is not
@@ -783,7 +783,7 @@ impl Ec2ProviderAdapter {
 
   #[cfg(test)]
   fn with_base_url(base_url: &str) -> Self {
-    let config = Ec2Config::phase1_defaults();
+    let config = Ec2Config::defaults();
     // A fast retry policy keeps mock-server tests from sleeping through real backoff.
     let client = Ec2ApiClient::with_base_url(
       base_url,
@@ -2580,16 +2580,33 @@ mod tests {
   /// guards against an edit to the shared bootstrap script silently breaking provisioning.
   #[test]
   fn the_rendered_cloud_init_fits_inside_the_ec2_user_data_limit() {
-    use crate::backend::bootstrap::{Bootstrap, BootstrapParams};
+    use crate::backend::bootstrap::{
+      allocate_peer_addresses, Bootstrap, BootstrapParams, BootstrapPeer, DEFAULT_PEER_SLOTS,
+      DEFAULT_SERVER_INTERFACE_CIDR,
+    };
     use crate::backend::crypto::keypair::{generate_client_keypair, generate_server_keypair};
 
-    let client = generate_client_keypair().expect("client keypair should generate");
     let server = generate_server_keypair().expect("server keypair should generate");
+
+    // A full slot complement, because that is what production renders and the whole point of
+    // this test is the size of a real payload.
+    let peers = allocate_peer_addresses(DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_PEER_SLOTS)
+      .expect("the default subnet has room for a full slot complement")
+      .into_iter()
+      .map(|address_cidr| BootstrapPeer {
+        // A distinct key per slot, as provisioning generates. Reusing one trips the duplicate
+        // check, and would understate the payload size this test exists to bound.
+        public_key: generate_client_keypair()
+          .expect("client keypair should generate")
+          .public_key,
+        address_cidr,
+      })
+      .collect();
 
     let artifact = Bootstrap
       .render_cloud_init(
         &BootstrapParams {
-          client_public_key: client.public_key,
+          peers,
           ..BootstrapParams::default()
         },
         &server.private_key,

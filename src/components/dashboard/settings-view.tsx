@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   Field,
+  Modal,
   PageChrome,
   useNow,
   type DashboardBusyAction,
@@ -195,7 +196,7 @@ export function SettingsView({
         {/* Names where the credential actually lives, which is the fact that lets someone go and
             revoke it. "Encrypted at rest" was true only by delegation and only on Windows. */}
         <p className="mt-4 text-xs leading-5 text-[var(--on-surface-variant)]">
-          API keys are held in Windows Credential Manager under <span className="font-mono">com.goatstare.vpn.phase1</span>,
+          API keys are held in Windows Credential Manager under <span className="font-mono">com.goatstare.vpn</span>,
           never in this app&apos;s database. They are used only for calls to your provider from this
           device, and are stripped from diagnostics exports.
         </p>
@@ -439,12 +440,9 @@ function KeyModal({
   const allFilled = (fields ?? []).length > 0 && (fields ?? []).every((field) => (values[field.key] ?? "").trim() !== "");
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]" onClick={onClose} aria-hidden="true">
-      <div
-        className="w-full max-w-[520px] rounded-[24px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(24,28,36,0.99),rgba(13,16,23,0.99))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.45)]"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <h2 className="text-xl font-semibold tracking-tight text-[var(--on-surface)]">
+    <Modal onClose={onClose} labelledBy="credential-modal-title">
+      <>
+        <h2 id="credential-modal-title" className="text-xl font-semibold tracking-tight text-[var(--on-surface)]">
           {provider.token_ref ? `Replace ${provider.name} key` : `Add ${provider.name} key`}
         </h2>
         <p className="mt-1 text-sm text-[var(--on-surface-variant)]">
@@ -529,7 +527,7 @@ function KeyModal({
             {busyAction === "save-token" ? "Saving" : busyAction === "validate-token" ? "Checking" : "Save & validate"}
           </Button>
         </div>
-      </div>
-    </div>
+      </>
+    </Modal>
   );
 }

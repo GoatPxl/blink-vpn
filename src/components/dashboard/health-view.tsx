@@ -144,7 +144,7 @@ export function HealthView({
             without a /0 route is exactly the case the banner above reports as unprotected. */}
         <Card
           title="Tunnel Configuration"
-          description="What the tunnel service was handed. The private key is redacted."
+          description="What the tunnel service was handed, in full."
           action={
             onCopyConfig ? (
               <Button tone="secondary" onClick={() => void onCopyConfig()}>Copy</Button>

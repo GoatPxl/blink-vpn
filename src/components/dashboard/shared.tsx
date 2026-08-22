@@ -33,6 +33,8 @@ export type DashboardBusyAction =
   | "copy-diagnostics"
   | "export-diagnostics"
   | "refresh-health"
+  | "claim-device"
+  | "export-device-config"
   | null;
 export type ErrorCategory = "provider" | "database" | "wireguard" | "state" | "unknown";
 export type ProviderAccessState = "missing" | "checking" | "ready" | "invalid" | "unknown";
@@ -275,6 +277,64 @@ export function AppIcon({ name, className = "h-4 w-4" }: { name: string; classNa
     default:
       return null;
   }
+}
+
+/**
+ * The one overlay in this app.
+ *
+ * There were two hand-rolled copies of this — the credential dialog and the node drawer — and
+ * adding a third for device configs is exactly the parallel implementation AGENTS.md §5 forbids.
+ * Both were folded into this on the way.
+ *
+ * Consolidating also fixed what both copies had wrong: `aria-hidden` sat on the element
+ * *containing* the dialog, which hides the dialog itself from assistive technology, and Escape
+ * did nothing.
+ */
+export function Modal({
+  children,
+  onClose,
+  labelledBy,
+  placement = "center",
+}: {
+  children: ReactNode;
+  onClose: () => void;
+  /** Id of the element naming this dialog, usually its heading. */
+  labelledBy: string;
+  placement?: "center" | "end";
+}) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  const isDrawer = placement === "end";
+
+  return (
+    <div
+      className={`fixed inset-0 z-50 flex ${isDrawer ? "justify-end bg-black/70" : "items-center justify-center bg-black/75 p-4"} backdrop-blur-[2px]`}
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={labelledBy}
+        className={
+          isDrawer
+            ? "flex h-full w-full max-w-[460px] flex-col overflow-y-auto border-l border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(24,28,36,0.99),rgba(13,16,23,0.99))] p-6 shadow-[-30px_0_90px_rgba(0,0,0,0.45)]"
+            : "max-h-full w-full max-w-[520px] overflow-y-auto rounded-[24px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(24,28,36,0.99),rgba(13,16,23,0.99))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.45)]"
+        }
+        onClick={(event) => event.stopPropagation()}
+      >
+        {children}
+      </div>
+    </div>
+  );
 }
 
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {

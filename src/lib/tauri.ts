@@ -170,6 +170,8 @@ export interface TunnelRecord {
   node_id: string;
   name: string;
   status: TunnelStatus;
+  /** The peer slot supplying this tunnel’s key and address. */
+  peer_id: string | null;
   interface_name: string | null;
   assigned_ipv4: string | null;
   last_handshake_age_seconds: number | null;
@@ -307,7 +309,7 @@ export interface DiagnosticsBundle {
   wireguard_debug?: {
     commands: string[];
     last_import_tunnel_name: string | null;
-    last_import_config_redacted: string | null;
+    last_import_config: string | null;
     last_import_config_temp_path: string | null;
   };
 }
@@ -324,7 +326,7 @@ export interface ActivityEvent {
   /** `info` | `success` | `error` */
   outcome: string;
   correlation_id: string | null;
-  /** Redacted by the backend before it was written. */
+  /** Provider credentials are redacted at the write boundary; WireGuard key material is not. */
   detail: string;
   created_at: string;
 }
@@ -533,7 +535,6 @@ export async function createAndActivateClientTunnel(params: {
   tunnelId: string;
   nodeId: string;
   tunnelName: string;
-  clientAddressCidr: string;
   dnsServer: string | null;
   allowedIps: string[];
 }): Promise<string> {
@@ -541,9 +542,79 @@ export async function createAndActivateClientTunnel(params: {
     tunnelId: params.tunnelId,
     nodeId: params.nodeId,
     tunnelName: params.tunnelName,
-    clientAddressCidr: params.clientAddressCidr,
     dnsServer: params.dnsServer,
     allowedIps: params.allowedIps,
+  });
+}
+
+/**
+ * One baked `[Peer]` slot on a provisioned server.
+ *
+ * A node is created with a fixed number of these and can never gain more: the app cannot reach
+ * a server after it exists, so the slot list it boots with is final. `label === null` means the
+ * slot is unclaimed and free to give to a device.
+ */
+export interface NodePeerRecord {
+  id: string;
+  node_id: string;
+  /** Position in the server’s peer list. Slot 0 is this PC. */
+  slot_index: number;
+  label: string | null;
+  client_public_key: string;
+  client_address_cidr: string;
+  claimed_at: string | null;
+  created_at: string;
+}
+
+/**
+ * A device configuration and the QR symbol encoding it.
+ *
+ * `config_text` carries its `PrivateKey`, which is what makes it importable by the official
+ * WireGuard app at all. WireGuard key material is not treated as a secret in this app — the
+ * server it belongs to lives for hours and is then destroyed.
+ */
+export interface PeerConfigPayload {
+  config_text: string;
+  /** Width and height of the QR symbol, in modules. */
+  qr_size: number;
+  /** Row-major dark/light modules, `qr_size * qr_size` of them. */
+  qr_modules: boolean[];
+}
+
+export async function listNodePeers(nodeId: string): Promise<NodePeerRecord[]> {
+  return invokeCommand<NodePeerRecord[]>("list_node_peers", { nodeId });
+}
+
+export async function claimNodePeer(params: {
+  nodeId: string;
+  peerId: string;
+  label: string;
+}): Promise<NodePeerRecord> {
+  return invokeCommand<NodePeerRecord>("claim_node_peer", {
+    nodeId: params.nodeId,
+    peerId: params.peerId,
+    label: params.label,
+  });
+}
+
+export async function getPeerConfig(params: {
+  nodeId: string;
+  peerId: string;
+}): Promise<PeerConfigPayload> {
+  return invokeCommand<PeerConfigPayload>("get_peer_config", {
+    nodeId: params.nodeId,
+    peerId: params.peerId,
+  });
+}
+
+/** Writes the config into the app data directory and resolves to the path it wrote. */
+export async function exportPeerConfig(params: {
+  nodeId: string;
+  peerId: string;
+}): Promise<string> {
+  return invokeCommand<string>("export_peer_config", {
+    nodeId: params.nodeId,
+    peerId: params.peerId,
   });
 }
 

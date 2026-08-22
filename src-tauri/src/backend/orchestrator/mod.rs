@@ -6,14 +6,44 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// The peer slot belonging to this Windows machine. Always index 0 of a node’s baked list.
+const DESKTOP_PEER_SLOT: i64 = 0;
+
+/// Label given to slot 0 at provisioning time, so the desktop reads as a device like any other.
+const DESKTOP_PEER_LABEL: &str = "This PC";
+
+/// Upper bound on a device name. Long enough for "Sam’s work phone", short enough that the
+/// device list stays readable.
+const MAX_PEER_LABEL_CHARS: usize = 40;
+
+/// A peer generated during provisioning, held only until its row is written.
+struct GeneratedPeer {
+  id: String,
+  public_key: String,
+  private_key_ref: String,
+  address_cidr: String,
+}
+
+/// Remove key material written for a provision that then failed.
+///
+/// Best-effort by design: the caller is already returning an error, and a vault that will not
+/// give a key back is not a reason to replace the real failure with a cleanup one.
+fn discard_generated_peers(secure_storage: &SecureStorage, generated: &[GeneratedPeer]) {
+  for peer in generated {
+    let _ = secure_storage.delete_client_private_key(&peer.private_key_ref);
+  }
+}
+
 use crate::backend::bootstrap::{
-  Bootstrap, BootstrapError, BootstrapParams, DEFAULT_CLIENT_CIDR, DEFAULT_INTERFACE_NAME,
-  DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_WIREGUARD_PORT,
+  allocate_peer_addresses, subnet_of, Bootstrap, BootstrapError, BootstrapParams,
+  BootstrapPeer, DEFAULT_INTERFACE_NAME, DEFAULT_PEER_SLOTS, DEFAULT_SERVER_INTERFACE_CIDR,
+  DEFAULT_WIREGUARD_PORT,
 };
 use crate::backend::crypto::keypair::{generate_client_keypair, generate_server_keypair, KeygenError};
 use crate::backend::db::Database;
 use crate::backend::db::{
-  DbError, NewActivityEvent, NodeLifecycleStatus, TunnelRecord, TunnelStatus,
+  DbError, NewActivityEvent, NewNodePeer, NodeLifecycleStatus, NodePeerRecord, TunnelRecord,
+  TunnelStatus,
 };
 use crate::backend::logging;
 use crate::backend::provider::{
@@ -157,7 +187,6 @@ pub struct CreateClientTunnelRequest {
   pub tunnel_id: String,
   pub node_id: String,
   pub tunnel_name: String,
-  pub client_address_cidr: String,
   pub dns_server: Option<String>,
   pub allowed_ips: Vec<String>,
 }
@@ -853,14 +882,25 @@ impl Orchestrator {
       source,
     })?;
 
+    let peers = allocate_peer_addresses(DEFAULT_SERVER_INTERFACE_CIDR, 1)
+      .map_err(|source| OrchestratorError::Bootstrap {
+        detail: "Could not allocate a peer address for droplet provisioning.".to_string(),
+        source,
+      })?
+      .into_iter()
+      .map(|address_cidr| BootstrapPeer {
+        public_key: client_keypair.public_key.clone(),
+        address_cidr,
+      })
+      .collect();
+
     let artifact = bootstrap
       .render_cloud_init(&BootstrapParams {
         server_endpoint_ip: "0.0.0.0".to_string(),
         listen_port: DEFAULT_WIREGUARD_PORT,
         server_interface_cidr: DEFAULT_SERVER_INTERFACE_CIDR.to_string(),
-        client_cidr: DEFAULT_CLIENT_CIDR.to_string(),
         interface_name: DEFAULT_INTERFACE_NAME.to_string(),
-        client_public_key: client_keypair.public_key.clone(),
+        peers,
       }, &server_keypair.private_key, &server_keypair.public_key)
       .map_err(|source| OrchestratorError::Bootstrap {
         detail: "Could not render bootstrap cloud-init for droplet create.".to_string(),
@@ -929,6 +969,170 @@ impl Orchestrator {
     Ok(())
   }
 
+  /// Every peer slot on a node, claimed and unclaimed, in slot order.
+  pub fn list_node_peers(
+    &self,
+    db: &Database,
+    node_id: &str,
+  ) -> Result<Vec<NodePeerRecord>, OrchestratorError> {
+    db.list_node_peers(node_id).map_err(|source| OrchestratorError::Database {
+      detail: "Failed listing the peer slots for this node.".to_string(),
+      source,
+    })
+  }
+
+  /// Name an unclaimed peer slot, turning it into a device.
+  ///
+  /// Purely local bookkeeping. The key was baked into the server when the node was created and
+  /// the server is never told a device has started using it — there is no channel to tell it
+  /// (AGENTS.md §2). Claiming only decides which slot this app will hand out next.
+  pub fn claim_node_peer(
+    &self,
+    db: &Database,
+    node_id: &str,
+    peer_id: &str,
+    label: &str,
+  ) -> Result<NodePeerRecord, OrchestratorError> {
+    let label = label.trim();
+
+    if label.is_empty() {
+      return Err(OrchestratorError::InvalidInput {
+        detail: "Give the device a name so it can be told apart from the others.".to_string(),
+      });
+    }
+
+    if label.chars().count() > MAX_PEER_LABEL_CHARS {
+      return Err(OrchestratorError::InvalidInput {
+        detail: format!("A device name can be at most {MAX_PEER_LABEL_CHARS} characters."),
+      });
+    }
+
+    let peer = self.load_node_peer(db, node_id, peer_id)?;
+
+    db.claim_node_peer(&peer.id, label).map_err(|source| OrchestratorError::Database {
+      detail: "Failed naming the peer slot.".to_string(),
+      source,
+    })?;
+
+    self.load_node_peer(db, node_id, peer_id)
+  }
+
+  /// The WireGuard client config for one peer slot, ready to import.
+  ///
+  /// Carries its `PrivateKey`, because a config without one cannot be imported by anything. That
+  /// is sanctioned: WireGuard key material is not a secret in this app (AGENTS.md §6). What the
+  /// caller must not do is route this through the activity log or a diagnostics bundle — not
+  /// because the key would leak, but because a config is bulk noise in a history meant to be read.
+  pub fn build_peer_client_config(
+    &self,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    node_id: &str,
+    peer_id: &str,
+  ) -> Result<String, OrchestratorError> {
+    let node = db
+      .get_vpn_node(node_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading the node before building a device config.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: node_id.to_string(),
+        detail: "This node no longer exists.".to_string(),
+      })?;
+
+    let server_public_key = node
+      .server_public_key
+      .clone()
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: node_id.to_string(),
+        detail: "This node has not finished provisioning, so its server key is not known yet."
+          .to_string(),
+      })?;
+
+    let endpoint_ip = resolve_server_endpoint_ip_for_connect(&node)?;
+
+    // A phone is not on this machine’s network. A Docker dev node publishes on 127.0.0.1, so a
+    // QR for one encodes an endpoint the phone can never reach — it would import cleanly and then
+    // never hand shake, which is the failure mode hardest to tell from a broken server.
+    if endpoint_is_locally_scoped(&endpoint_ip) {
+      return Err(OrchestratorError::InvalidInput {
+        detail: format!(
+          "This node’s endpoint ({endpoint_ip}) is only reachable from this machine, so another device cannot connect to it. Use a node on a production provider."
+        ),
+      });
+    }
+
+    let peer = self.load_node_peer(db, node_id, peer_id)?;
+
+    let private_key = secure_storage
+      .get_client_private_key(&peer.client_private_key_ref)
+      .map_err(|source| OrchestratorError::SecretStorage {
+        detail: "Could not read the device private key from secure storage.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: node_id.to_string(),
+        detail:
+          "This slot’s private key is missing from Windows Credential Manager. Its server peer can no longer be matched; destroy and recreate the node."
+            .to_string(),
+      })?;
+
+    let settings = self.get_tunnel_settings(db)?;
+
+    crate::backend::wireguard::build_client_config(&ClientConfigParams {
+      private_key,
+      client_address_cidr: peer.client_address_cidr.clone(),
+      dns_server: settings.dns_server.clone(),
+      server_public_key,
+      server_endpoint_ip: endpoint_ip,
+      server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
+      // Full tunnel, deliberately not narrowed. `scope_allowed_ips_for_endpoint` exists to keep a
+      // locally-scoped dev endpoint from capturing the default route, and that case is rejected
+      // above — so there is nothing left here to scope down.
+      allowed_ips: DEFAULT_CLIENT_ALLOWED_IPS
+        .iter()
+        .map(|entry| (*entry).to_string())
+        .collect(),
+      persistent_keepalive_seconds: settings.keepalive_seconds,
+    })
+    .map_err(|source| OrchestratorError::WireGuard {
+      detail: "Could not build the device configuration.".to_string(),
+      source,
+    })
+  }
+
+  /// One peer slot, checked against the node that is supposed to own it.
+  ///
+  /// The node id is not decoration: without it a caller could hand out any node’s device config
+  /// by guessing a peer id.
+  fn load_node_peer(
+    &self,
+    db: &Database,
+    node_id: &str,
+    peer_id: &str,
+  ) -> Result<NodePeerRecord, OrchestratorError> {
+    let peer = db
+      .get_node_peer(peer_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading the peer slot.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::InvalidState {
+        node_id: node_id.to_string(),
+        detail: "That device slot no longer exists.".to_string(),
+      })?;
+
+    if peer.node_id != node_id {
+      return Err(OrchestratorError::InvalidState {
+        node_id: node_id.to_string(),
+        detail: "That device slot belongs to a different node.".to_string(),
+      });
+    }
+
+    Ok(peer)
+  }
+
   pub fn force_cleanup_vpn_node(
     &self,
     providers: &ProviderRegistry,
@@ -980,11 +1184,18 @@ impl Orchestrator {
 
     let local_tunnels_removed = tunnels.len();
     for tunnel in tunnels {
-      if let Some(private_key_ref) = tunnel.client_private_key_ref.as_deref() {
-        let _ = secure_storage.delete_client_private_key(private_key_ref);
-      }
       let _ = db.delete_tunnel(&tunnel.id);
     }
+
+    // Every slot's key, not just whichever one a tunnel happened to reference. Four of a node's
+    // five slots are typically never claimed, and their keys sit in Credential Manager all the
+    // same. The single-peer version of this deleted tunnel keys only and left the node's behind.
+    if let Ok(peers) = db.list_node_peers(node_id) {
+      for peer in peers {
+        let _ = secure_storage.delete_client_private_key(&peer.client_private_key_ref);
+      }
+    }
+    let _ = db.delete_node_peers_for_node(node_id);
 
     let mut remote_droplet_delete_attempted = false;
     let mut remote_droplet_delete_succeeded = false;
@@ -1195,39 +1406,95 @@ impl Orchestrator {
       source,
     })?;
 
-    // The client keypair must exist before the payload is rendered: its public key ships inside
-    // the server's [Peer] block. Because the app never contacts the server after create, there is
-    // no later opportunity to register a peer.
-    let client_keypair = generate_client_keypair().map_err(|source| OrchestratorError::Keygen {
-      detail: "Failed to generate WireGuard client keypair for node provisioning.".to_string(),
-      source,
-    })?;
-
-    let client_private_key_ref = secure_storage
-      .store_client_private_key(&request.node_id, &client_keypair.private_key)
-      .map_err(|source| OrchestratorError::SecretStorage {
-        detail: "Could not persist client private key before provisioning.".to_string(),
+    // Every peer must exist before the payload is rendered: their public keys ship inside the
+    // server's [Peer] blocks. Because the app never contacts the server after create, a slot not
+    // baked here can never exist (AGENTS.md §12).
+    let peer_addresses = allocate_peer_addresses(DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_PEER_SLOTS)
+      .map_err(|source| OrchestratorError::Bootstrap {
+        detail: "Could not allocate peer addresses inside the server subnet.".to_string(),
         source,
       })?;
 
-    db
-      .update_vpn_node_client_key(
-        &request.node_id,
-        Some(&client_private_key_ref),
-        Some(&client_keypair.public_key),
-      )
-      .map_err(|source| OrchestratorError::Database {
-        detail: "Failed recording client key reference on node.".to_string(),
+    // Key references are collected as they are stored so a failure part-way can delete the ones
+    // already written. Without that, a failed provision strands secrets in Credential Manager
+    // with no row pointing at them and nothing left to clean them up.
+    let mut generated: Vec<GeneratedPeer> = Vec::with_capacity(peer_addresses.len());
+    let mut failure: Option<OrchestratorError> = None;
+
+    for address_cidr in peer_addresses {
+      let keypair = match generate_client_keypair() {
+        Ok(keypair) => keypair,
+        Err(source) => {
+          failure = Some(OrchestratorError::Keygen {
+            detail: "Failed to generate a WireGuard client keypair for node provisioning."
+              .to_string(),
+            source,
+          });
+          break;
+        }
+      };
+
+      match secure_storage.store_client_private_key(&request.node_id, &keypair.private_key) {
+        Ok(private_key_ref) => generated.push(GeneratedPeer {
+          id: Uuid::new_v4().to_string(),
+          public_key: keypair.public_key,
+          private_key_ref,
+          address_cidr,
+        }),
+        Err(source) => {
+          failure = Some(OrchestratorError::SecretStorage {
+            detail: "Could not persist a client private key before provisioning.".to_string(),
+            source,
+          });
+          break;
+        }
+      }
+    }
+
+    if let Some(error) = failure {
+      discard_generated_peers(secure_storage, &generated);
+      return Err(error);
+    }
+
+    let peer_rows: Vec<NewNodePeer> = generated
+      .iter()
+      .enumerate()
+      .map(|(slot_index, peer)| NewNodePeer {
+        id: &peer.id,
+        slot_index: slot_index as i64,
+        // Slot 0 is this machine, claimed on creation. The rest stay free until a device
+        // takes one.
+        label: if slot_index == DESKTOP_PEER_SLOT as usize {
+          Some(DESKTOP_PEER_LABEL)
+        } else {
+          None
+        },
+        client_public_key: &peer.public_key,
+        client_private_key_ref: &peer.private_key_ref,
+        client_address_cidr: &peer.address_cidr,
+      })
+      .collect();
+
+    if let Err(source) = db.insert_node_peers(&request.node_id, &peer_rows) {
+      discard_generated_peers(secure_storage, &generated);
+      return Err(OrchestratorError::Database {
+        detail: "Failed recording peer slots for the node.".to_string(),
         source,
-      })?;
+      });
+    }
 
     let bootstrap_params = BootstrapParams {
       server_endpoint_ip: "0.0.0.0".to_string(),
       listen_port: DEFAULT_WIREGUARD_PORT,
       server_interface_cidr: DEFAULT_SERVER_INTERFACE_CIDR.to_string(),
-      client_cidr: DEFAULT_CLIENT_CIDR.to_string(),
       interface_name: DEFAULT_INTERFACE_NAME.to_string(),
-      client_public_key: client_keypair.public_key.clone(),
+      peers: generated
+        .iter()
+        .map(|peer| BootstrapPeer {
+          public_key: peer.public_key.clone(),
+          address_cidr: peer.address_cidr.clone(),
+        })
+        .collect(),
     };
 
     // Both renderers receive the same key material and produce the same server state; only the
@@ -1470,6 +1737,15 @@ impl Orchestrator {
         }
       }
 
+      // The slots were written before the provider call, so a failed create leaves both the
+      // rows and their keys behind unless they are removed here.
+      if let Ok(peers) = db.list_node_peers(&request.node_id) {
+        for peer in peers {
+          let _ = secure_storage.delete_client_private_key(&peer.client_private_key_ref);
+        }
+      }
+      let _ = db.delete_node_peers_for_node(&request.node_id);
+
       record_init("create.error", "error", final_reason.clone());
 
       let _ = db.transition_vpn_node_status(
@@ -1576,14 +1852,19 @@ impl Orchestrator {
         detail: "Tunnel row is missing during secure key setup.".to_string(),
       })?;
 
-    // The server was provisioned with one specific client public key baked into its [Peer] block,
-    // and the app cannot reach the server to change it. Generating a fresh keypair here would
-    // therefore produce a tunnel that can never complete a handshake, so this resolves the
-    // existing key or fails — it must never mint a new one.
-    let client_private_key_ref = persisted_tunnel
-      .client_private_key_ref
-      .clone()
-      .or_else(|| node.client_private_key_ref.clone())
+    // The server was provisioned with a fixed set of client public keys baked into its [Peer]
+    // blocks, and the app cannot reach the server to change them. Generating a fresh keypair
+    // here would produce a tunnel that can never complete a handshake, so this resolves the
+    // desktop’s existing slot or fails — it must never mint a new one.
+    let _ = &persisted_tunnel;
+    let peer = db
+      .list_node_peers(&request.node_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed loading peer slots before secure key setup.".to_string(),
+        source,
+      })?
+      .into_iter()
+      .find(|peer| peer.slot_index == DESKTOP_PEER_SLOT)
       .ok_or_else(|| OrchestratorError::InvalidState {
         node_id: request.node_id.clone(),
         detail:
@@ -1592,7 +1873,7 @@ impl Orchestrator {
       })?;
 
     let private_key = secure_storage
-      .get_client_private_key(&client_private_key_ref)
+      .get_client_private_key(&peer.client_private_key_ref)
       .map_err(|source| OrchestratorError::SecretStorage {
         detail: "Could not load persisted client private key from secure storage.".to_string(),
         source,
@@ -1613,22 +1894,22 @@ impl Orchestrator {
 
     // Guard against a key that does not match what the server was built with. Without this the
     // failure surfaces as a silent no-handshake, which is very hard to diagnose.
-    if let Some(provisioned) = node.client_public_key.as_deref() {
-      if provisioned != public_key {
-        return Err(OrchestratorError::InvalidState {
-          node_id: request.node_id.clone(),
-          detail:
-            "The stored client key does not match the peer baked into this node's server. Destroy and recreate the node."
-              .to_string(),
-        });
-      }
+    if peer.client_public_key != public_key {
+      return Err(OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail:
+          "The stored client key does not match the peer baked into this node's server. Destroy and recreate the node."
+            .to_string(),
+      });
     }
 
     db
       .update_tunnel_client_config(
         &request.tunnel_id,
-        Some(&client_private_key_ref),
-        Some(&request.client_address_cidr),
+        Some(&peer.id),
+        // The address comes from the peer slot, never from the caller: the server only accepts
+        // this key at this address, so a caller-supplied value could only ever be wrong.
+        Some(&peer.client_address_cidr),
         request.dns_server.as_deref(),
         Some(&request.allowed_ips.join(",")),
       )
@@ -1847,7 +2128,7 @@ impl Orchestrator {
 
     let tunnel_settings = self.get_tunnel_settings(db)?;
     let connect_config =
-      load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, &tunnel, &tunnel_settings)?;
+      load_connect_config_for_tunnel(db, secure_storage, &provider.slug, &node, &tunnel, &tunnel_settings)?;
 
     // Always capture the latest connect config in diagnostics, even when connect is idempotent.
     wireguard.record_connect_trace_snapshot(&canonical_tunnel_name, &connect_config);
@@ -2262,7 +2543,7 @@ impl Orchestrator {
     if let Some(tunnel) = selected_tunnel.as_ref() {      if let Ok(provider) = db.get_provider(&node.provider_id) {
         if let Some(provider) = provider {
           let tunnel_settings = self.get_tunnel_settings(db).unwrap_or_default();
-          if let Ok(config) = load_connect_config_for_tunnel(secure_storage, &provider.slug, &node, tunnel, &tunnel_settings) {
+          if let Ok(config) = load_connect_config_for_tunnel(db, secure_storage, &provider.slug, &node, tunnel, &tunnel_settings) {
             // Populate diagnostics trace even when only health polling occurs.
             wireguard.record_connect_trace_snapshot(&tunnel.name, &config);
           } else {
@@ -2344,7 +2625,7 @@ impl Orchestrator {
           let routes = scope_allowed_ips_for_endpoint(
             parse_allowed_ips_csv(tunnel.allowed_ips.as_deref()),
             node.public_ipv4.as_deref().unwrap_or_default(),
-            tunnel.client_address_cidr.as_deref().unwrap_or(DEFAULT_CLIENT_CIDR),
+            tunnel.assigned_ipv4.as_deref().unwrap_or_default(),
           );
           derive_kill_switch_state(&routes, connected)
         }
@@ -2874,7 +3155,11 @@ fn tunnel_subnet_for_client(client_address_cidr: &str) -> String {
       let octets = ipv4.octets();
       format!("{}.{}.{}.0/24", octets[0], octets[1], octets[2])
     }
-    Err(_) => DEFAULT_CLIENT_CIDR.to_string(),
+    // An unparseable address cannot be narrowed to its own /24. Fall back to the server’s own
+    // subnet, which is the range every peer of this app sits in — never to a /0, which is
+    // exactly what this scoping exists to avoid.
+    Err(_) => subnet_of(DEFAULT_SERVER_INTERFACE_CIDR)
+      .unwrap_or_else(|_| DEFAULT_SERVER_INTERFACE_CIDR.to_string()),
   }
 }
 
@@ -2898,6 +3183,7 @@ fn parse_allowed_ips_csv(raw: Option<&str>) -> Vec<String> {
 }
 
 fn load_connect_config_for_tunnel(
+  db: &Database,
   secure_storage: &SecureStorage,
   _provider_slug: &str,
   node: &crate::backend::db::VpnNodeRecord,
@@ -2914,17 +3200,29 @@ fn load_connect_config_for_tunnel(
 
   let endpoint_ip = resolve_server_endpoint_ip_for_connect(node)?;
 
-  let private_key_ref = tunnel
-    .client_private_key_ref
+  let peer_id = tunnel
+    .peer_id
     .as_deref()
     .ok_or_else(|| OrchestratorError::InvalidState {
       node_id: node.id.clone(),
-      detail: "Tunnel is unconfigured (missing secure private-key reference). Configure tunnel first."
+      detail: "Tunnel is unconfigured (no peer slot assigned). Configure tunnel first."
+        .to_string(),
+    })?;
+
+  let peer = db
+    .get_node_peer(peer_id)
+    .map_err(|source| OrchestratorError::Database {
+      detail: "Failed loading the peer slot this tunnel uses.".to_string(),
+      source,
+    })?
+    .ok_or_else(|| OrchestratorError::InvalidState {
+      node_id: node.id.clone(),
+      detail: "The peer slot this tunnel points at no longer exists. Recreate the tunnel."
         .to_string(),
     })?;
 
   let private_key = secure_storage
-    .get_client_private_key(private_key_ref)
+    .get_client_private_key(&peer.client_private_key_ref)
     .map_err(|source| OrchestratorError::SecretStorage {
       detail: "Could not read tunnel private key from secure storage during connect.".to_string(),
       source,
@@ -2935,11 +3233,7 @@ fn load_connect_config_for_tunnel(
         .to_string(),
     })?;
 
-  let client_address_cidr = tunnel
-    .client_address_cidr
-    .clone()
-    .filter(|value| !value.trim().is_empty())
-    .unwrap_or_else(|| DEFAULT_CLIENT_CIDR.to_string());
+  let client_address_cidr = peer.client_address_cidr.clone();
 
   let allowed_ips = scope_allowed_ips_for_endpoint(
     parse_allowed_ips_csv(tunnel.allowed_ips.as_deref()),
@@ -3412,6 +3706,46 @@ mod tests {
       .expect("node should transition to connected");
   }
 
+  /// The address slot 0 gets from the default subnet, which is what the fixtures below assume.
+  const TEST_CLIENT_CIDR: &str = "10.66.0.2/32";
+
+  /// Give a node the one peer slot its fixtures need, standing in for what provisioning bakes.
+  fn seed_desktop_peer(
+    db: &Database,
+    secure_storage: &SecureStorage,
+    node_id: &str,
+    private_key: &str,
+  ) -> String {
+    let key_ref = secure_storage
+      .store_client_private_key(node_id, private_key)
+      .expect("client private key should persist");
+    let peer_id = format!("peer-{node_id}-0");
+
+    db
+      .insert_node_peers(
+        node_id,
+        &[NewNodePeer {
+          id: &peer_id,
+          slot_index: DESKTOP_PEER_SLOT,
+          label: Some(DESKTOP_PEER_LABEL),
+          client_public_key: "client-public-key",
+          client_private_key_ref: &key_ref,
+          client_address_cidr: TEST_CLIENT_CIDR,
+        }],
+      )
+      .expect("peer slot should insert");
+
+    peer_id
+  }
+
+  /// The desktop slot of a node, for the lanes that drive a real provider.
+  fn desktop_peer(db: &Database, node_id: &str) -> Option<NodePeerRecord> {
+    db.list_node_peers(node_id)
+      .ok()?
+      .into_iter()
+      .find(|peer| peer.slot_index == DESKTOP_PEER_SLOT)
+  }
+
   fn setup_ready_node_and_tunnel(db: &Database, secure_storage: &SecureStorage) {
     db
       .create_vpn_node("node-ready", TEST_PROVIDER_ID, "Node Ready", "nyc1")
@@ -3437,14 +3771,12 @@ mod tests {
     db
       .create_tunnel("tunnel-ready", "node-ready", "Primary-Node-wg", Some("Primary-Node-wg"))
       .expect("tunnel should insert");
-    let key_ref = secure_storage
-      .store_client_private_key("node-ready", "client-private-key")
-      .expect("client private key should persist");
+    let peer_id = seed_desktop_peer(db, secure_storage, "node-ready", "client-private-key");
     db
       .update_tunnel_client_config(
         "tunnel-ready",
-        Some(&key_ref),
-        Some(DEFAULT_CLIENT_CIDR),
+        Some(&peer_id),
+        Some(TEST_CLIENT_CIDR),
         Some("1.1.1.1"),
         Some("0.0.0.0/0,::/0"),
       )
@@ -3789,8 +4121,6 @@ mod tests {
       error_reason: None,
       created_at: "now".to_string(),
       updated_at: "now".to_string(),
-      client_private_key_ref: None,
-      client_public_key: None,
       endpoint_port: Some(49154),
     };
 
@@ -3867,8 +4197,9 @@ mod tests {
   fn tunnel_subnet_is_derived_from_the_configured_client_address() {
     assert_eq!(tunnel_subnet_for_client("10.66.0.2/32"), "10.66.0.0/24");
     assert_eq!(tunnel_subnet_for_client("192.168.240.7/32"), "192.168.240.0/24");
-    // Unparseable input falls back to the documented default rather than inventing a route.
-    assert_eq!(tunnel_subnet_for_client("not-an-address"), DEFAULT_CLIENT_CIDR);
+    // Unparseable input falls back to the server's own subnet rather than inventing a route,
+    // and never to a /0 — which is exactly what this scoping exists to prevent.
+    assert_eq!(tunnel_subnet_for_client("not-an-address"), "10.66.0.0/24");
   }
 
   #[test]
@@ -3892,8 +4223,6 @@ mod tests {
       error_reason: None,
       created_at: "now".to_string(),
       updated_at: "now".to_string(),
-      client_private_key_ref: None,
-      client_public_key: None,
       endpoint_port: None,
     };
 
@@ -5141,14 +5470,22 @@ mod tests {
         .flatten()
         .expect("node row should exist");
 
-      let client_config = node
-        .client_private_key_ref
-        .as_deref()
-        .and_then(|key_ref| secure_storage.get_client_private_key(key_ref).ok().flatten())
+      let desktop = desktop_peer(&db, &node_id);
+      let client_config = desktop
+        .as_ref()
+        .and_then(|peer| {
+          secure_storage
+            .get_client_private_key(&peer.client_private_key_ref)
+            .ok()
+            .flatten()
+        })
         .and_then(|private_key| {
           build_client_config(&ClientConfigParams {
             private_key,
-            client_address_cidr: DEFAULT_CLIENT_CIDR.to_string(),
+            client_address_cidr: desktop
+              .as_ref()
+              .map(|peer| peer.client_address_cidr.clone())
+              .unwrap_or_default(),
             dns_server: None,
             server_public_key: created.server_public_key.clone(),
             server_endpoint_ip: node.public_ipv4.clone().unwrap_or_default(),
@@ -5290,14 +5627,22 @@ mod tests {
         .flatten()
         .expect("node row should exist");
 
-      let client_config = node
-        .client_private_key_ref
-        .as_deref()
-        .and_then(|key_ref| secure_storage.get_client_private_key(key_ref).ok().flatten())
+      let desktop = desktop_peer(&db, &node_id);
+      let client_config = desktop
+        .as_ref()
+        .and_then(|peer| {
+          secure_storage
+            .get_client_private_key(&peer.client_private_key_ref)
+            .ok()
+            .flatten()
+        })
         .and_then(|private_key| {
           build_client_config(&ClientConfigParams {
             private_key,
-            client_address_cidr: DEFAULT_CLIENT_CIDR.to_string(),
+            client_address_cidr: desktop
+              .as_ref()
+              .map(|peer| peer.client_address_cidr.clone())
+              .unwrap_or_default(),
             dns_server: None,
             server_public_key: created.server_public_key.clone(),
             server_endpoint_ip: node.public_ipv4.clone().unwrap_or_default(),
@@ -5444,9 +5789,10 @@ mod tests {
         .clone()
         .ok_or_else(|| "a public IPv4 should be recorded".to_string())?;
 
-      let private_key = node
-        .client_private_key_ref
-        .as_deref()
+      let desktop = desktop_peer(&db, &node_id)
+        .ok_or_else(|| "the node should have a desktop peer slot".to_string())?;
+
+      let private_key = Some(desktop.client_private_key_ref.as_str())
         .ok_or_else(|| "client key reference should be recorded".to_string())
         .and_then(|key_ref| {
           secure_storage
@@ -5459,7 +5805,7 @@ mod tests {
       // container's default route.
       let config = build_client_config(&ClientConfigParams {
         private_key,
-        client_address_cidr: DEFAULT_CLIENT_CIDR.to_string(),
+        client_address_cidr: desktop.client_address_cidr.clone(),
         dns_server: None,
         server_public_key: created.server_public_key.clone(),
         server_endpoint_ip: endpoint.clone(),
@@ -5632,12 +5978,11 @@ mod tests {
         .map_err(|error| format!("node lookup failed: {error:?}"))?
         .ok_or_else(|| "node row should exist".to_string())?;
 
-      // The client key was generated at provision time and recorded against the node.
-      let client_public_key = node
-        .client_public_key
-        .clone()
-        .ok_or_else(|| "node should record the client public key".to_string())?;
-      if node.client_private_key_ref.is_none() {
+      // The peer slots were generated at provision time and recorded against the node.
+      let desktop = desktop_peer(&db, &node_id)
+        .ok_or_else(|| "node should record a desktop peer slot".to_string())?;
+      let client_public_key = desktop.client_public_key.clone();
+      if desktop.client_private_key_ref.is_empty() {
         return Err("node should record the client private key reference".to_string());
       }
 
@@ -5661,7 +6006,6 @@ mod tests {
             tunnel_id: tunnel_id.clone(),
             node_id: node_id.clone(),
             tunnel_name: format!("wg-e2e-{suffix}"),
-            client_address_cidr: DEFAULT_CLIENT_CIDR.to_string(),
             dns_server: None,
             // Ask for a full tunnel, as the dashboard does.
             allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
@@ -5676,15 +6020,19 @@ mod tests {
 
       // Tunnel creation must reuse the provisioned key, not mint a new one the server has never
       // heard of.
+      let tunnel_peer_id = tunnel
+        .peer_id
+        .as_deref()
+        .ok_or_else(|| "tunnel should name a peer slot".to_string())?;
+      let tunnel_peer = db
+        .get_node_peer(tunnel_peer_id)
+        .map_err(|error| format!("peer lookup failed: {error:?}"))?
+        .ok_or_else(|| "the peer slot the tunnel names should exist".to_string())?;
+
       let derived = wireguard
         .derive_public_key(
           &secure_storage
-            .get_client_private_key(
-              tunnel
-                .client_private_key_ref
-                .as_deref()
-                .ok_or_else(|| "tunnel should carry a key reference".to_string())?,
-            )
+            .get_client_private_key(&tunnel_peer.client_private_key_ref)
             .map_err(|error| format!("key lookup failed: {error:?}"))?
             .ok_or_else(|| "client private key should be readable".to_string())?,
         )
@@ -5694,7 +6042,7 @@ mod tests {
         return Err("tunnel key must match the peer baked into the server".to_string());
       }
 
-      load_connect_config_for_tunnel(&secure_storage, "docker", &node, &tunnel, &TunnelSettings::default())
+      load_connect_config_for_tunnel(&db, &secure_storage, "docker", &node, &tunnel, &TunnelSettings::default())
         .map_err(|error| format!("connect config should render: {error:?}"))
     })();
 
@@ -5714,6 +6062,306 @@ mod tests {
       "a default route to a loopback endpoint must be scoped to the tunnel subnet: {config}"
     );
     assert!(!config.contains("0.0.0.0/0"), "full tunnel must not survive: {config}");
+  }
+  // --- device peers ---------------------------------------------------------------------------
+
+  /// Provisioning bakes a whole slate of slots, not one.
+  ///
+  /// Every slot a node will ever have is created here, because AGENTS.md §2 leaves no channel to
+  /// register one on a running server. A node that came up with fewer slots than intended can
+  /// never gain them.
+  #[test]
+  fn provisioning_bakes_a_full_slate_of_peer_slots() {
+    let db = Database::new(test_db_path("peer_slots_created"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    let providers = ProviderRegistry::from_adapter(Arc::new(MockProviderAdapter::new(false)));
+
+    Orchestrator::new()
+      .create_vpn_node_to_ready(
+        &providers,
+        &Bootstrap::new(),
+        &db,
+        &secure_storage,
+        &CreateVpnNodeRequest {
+          node_id: "node-slots".to_string(),
+          provider_id: TEST_PROVIDER_ID.to_string(),
+          node_name: "node-main".to_string(),
+          region: "nyc1".to_string(),
+          plan_key: "s-1vcpu-1gb".to_string(),
+        },
+      )
+      .expect("create flow should succeed");
+
+    let peers = db.list_node_peers("node-slots").expect("query should succeed");
+    assert_eq!(peers.len(), DEFAULT_PEER_SLOTS);
+
+    // Slot 0 is this machine and arrives claimed; the rest are free for devices.
+    assert_eq!(peers[0].slot_index, DESKTOP_PEER_SLOT);
+    assert_eq!(peers[0].label.as_deref(), Some(DESKTOP_PEER_LABEL));
+    assert!(peers[0].claimed_at.is_some());
+    assert!(peers[1..].iter().all(|peer| peer.label.is_none()));
+    assert!(peers[1..].iter().all(|peer| peer.claimed_at.is_none()));
+
+    // Distinct keys and addresses, or two devices would collide on the server.
+    let addresses: std::collections::HashSet<&str> =
+      peers.iter().map(|peer| peer.client_address_cidr.as_str()).collect();
+    let keys: std::collections::HashSet<&str> =
+      peers.iter().map(|peer| peer.client_public_key.as_str()).collect();
+    assert_eq!(addresses.len(), DEFAULT_PEER_SLOTS);
+    assert_eq!(keys.len(), DEFAULT_PEER_SLOTS);
+
+    // Every private key must be resolvable, or the slot is a slot nothing can use.
+    for peer in &peers {
+      assert!(
+        secure_storage
+          .get_client_private_key(&peer.client_private_key_ref)
+          .expect("vault read should succeed")
+          .is_some(),
+        "slot {} has no readable private key",
+        peer.slot_index
+      );
+    }
+  }
+
+  /// A failed provision must not leave key material behind.
+  ///
+  /// Five keys are written to Credential Manager before the provider is ever called. If the
+  /// create then fails, nothing points at them any more — so the rollback has to remove them or
+  /// they are unreachable litter for the life of the machine.
+  #[test]
+  fn a_failed_provision_removes_the_peer_slots_it_created() {
+    let db = Database::new(test_db_path("peer_slots_rolled_back"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    let providers = ProviderRegistry::from_adapter(Arc::new(MockProviderAdapter::new(true)));
+
+    let result = Orchestrator::new().create_vpn_node_to_ready(
+      &providers,
+      &Bootstrap::new(),
+      &db,
+      &secure_storage,
+      &CreateVpnNodeRequest {
+        node_id: "node-rollback".to_string(),
+        provider_id: TEST_PROVIDER_ID.to_string(),
+        node_name: "node-main".to_string(),
+        region: "nyc1".to_string(),
+        plan_key: "s-1vcpu-1gb".to_string(),
+      },
+    );
+
+    assert!(result.is_err(), "the mock adapter fails bootstrap wait");
+
+    let peers = db.list_node_peers("node-rollback").expect("query should succeed");
+    assert!(peers.is_empty(), "peer rows should not survive a failed create: {peers:?}");
+  }
+
+  /// Teardown must clear every slot, not just the one a tunnel referenced.
+  ///
+  /// Four of a node’s five slots are typically never claimed. The single-peer version of this
+  /// deleted tunnel keys only and left the node’s own key in Credential Manager on every destroy.
+  #[test]
+  fn cleanup_deletes_every_peer_key_not_just_the_tunnels() {
+    let db = Database::new(test_db_path("cleanup_peer_keys"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    let providers = ProviderRegistry::from_adapter(Arc::new(MockProviderAdapter::new(false)));
+    let orchestrator = Orchestrator::new();
+
+    orchestrator
+      .create_vpn_node_to_ready(
+        &providers,
+        &Bootstrap::new(),
+        &db,
+        &secure_storage,
+        &CreateVpnNodeRequest {
+          node_id: "node-teardown".to_string(),
+          provider_id: TEST_PROVIDER_ID.to_string(),
+          node_name: "node-main".to_string(),
+          region: "nyc1".to_string(),
+          plan_key: "s-1vcpu-1gb".to_string(),
+        },
+      )
+      .expect("create flow should succeed");
+
+    let key_refs: Vec<String> = db
+      .list_node_peers("node-teardown")
+      .expect("query should succeed")
+      .into_iter()
+      .map(|peer| peer.client_private_key_ref)
+      .collect();
+    assert_eq!(key_refs.len(), DEFAULT_PEER_SLOTS);
+
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+    orchestrator
+      .force_cleanup_vpn_node(&providers, &wireguard, &db, &secure_storage, "node-teardown")
+      .expect("cleanup should succeed");
+
+    for key_ref in &key_refs {
+      assert!(
+        secure_storage
+          .get_client_private_key(key_ref)
+          .expect("vault read should succeed")
+          .is_none(),
+        "{key_ref} survived teardown"
+      );
+    }
+
+    assert!(db
+      .list_node_peers("node-teardown")
+      .expect("query should succeed")
+      .is_empty());
+  }
+
+  /// A device config is only useful if it carries the key and address of *that* slot.
+  #[test]
+  fn a_device_config_carries_the_slots_own_key_and_address() {
+    let db = Database::new(test_db_path("device_config"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_ready_node_and_tunnel(&db, &secure_storage);
+
+    let peers = db.list_node_peers("node-ready").expect("query should succeed");
+    let peer = peers.first().expect("the fixture seeds one slot");
+
+    let config = Orchestrator::new()
+      .build_peer_client_config(&db, &secure_storage, "node-ready", &peer.id)
+      .expect("a ready node should produce a device config");
+
+    // The private key is present on purpose: a config without one cannot be imported at all,
+    // and WireGuard key material is not a secret here (AGENTS.md §6).
+    assert!(config.contains("PrivateKey = client-private-key"), "got: {config}");
+    assert!(config.contains("Address = 10.66.0.2/32"), "got: {config}");
+    assert!(config.contains("PublicKey = server-pub-key-123"), "got: {config}");
+    assert!(config.contains("Endpoint = 203.0.113.10:51820"), "got: {config}");
+    assert!(config.contains("AllowedIPs = 0.0.0.0/0, ::/0"), "got: {config}");
+  }
+
+  /// A phone is not on this machine’s network.
+  ///
+  /// A Docker dev node publishes on 127.0.0.1, so a config for it would import cleanly and then
+  /// never hand shake — the failure hardest to tell apart from a broken server.
+  #[test]
+  fn a_device_config_is_refused_for_an_endpoint_only_this_machine_can_reach() {
+    let db = Database::new(test_db_path("device_config_local"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_ready_node_and_tunnel(&db, &secure_storage);
+    db
+      .update_vpn_node_runtime_details(
+        "node-ready",
+        Some("42"),
+        Some("127.0.0.1"),
+        Some("server-pub-key-123"),
+        Some(51820),
+      )
+      .expect("runtime details should persist");
+
+    let peers = db.list_node_peers("node-ready").expect("query should succeed");
+    let peer = peers.first().expect("the fixture seeds one slot");
+
+    let error = Orchestrator::new()
+      .build_peer_client_config(&db, &secure_storage, "node-ready", &peer.id)
+      .expect_err("a loopback endpoint cannot be handed to another device");
+
+    assert!(matches!(error, OrchestratorError::InvalidInput { .. }), "got: {error:?}");
+  }
+
+  /// A slot belongs to one node. Without that check, any node’s device config could be fetched by
+  /// guessing a peer id.
+  #[test]
+  fn a_slot_cannot_be_read_through_a_different_node() {
+    let db = Database::new(test_db_path("peer_wrong_node"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_ready_node_and_tunnel(&db, &secure_storage);
+    db
+      .create_vpn_node("node-other", TEST_PROVIDER_ID, "Other", "nyc1")
+      .expect("second node should insert");
+
+    let peers = db.list_node_peers("node-ready").expect("query should succeed");
+    let peer = peers.first().expect("the fixture seeds one slot");
+
+    let error = Orchestrator::new()
+      .claim_node_peer(&db, "node-other", &peer.id, "Phone")
+      .expect_err("a slot must not be reachable through another node");
+
+    assert!(matches!(error, OrchestratorError::InvalidState { .. }), "got: {error:?}");
+  }
+
+  #[test]
+  fn claiming_a_slot_names_it_and_rejects_an_unusable_name() {
+    let db = Database::new(test_db_path("peer_claim"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_ready_node_and_tunnel(&db, &secure_storage);
+    let orchestrator = Orchestrator::new();
+
+    let peers = db.list_node_peers("node-ready").expect("query should succeed");
+    let peer_id = peers.first().expect("the fixture seeds one slot").id.clone();
+
+    let claimed = orchestrator
+      .claim_node_peer(&db, "node-ready", &peer_id, "  Pixel 9  ")
+      .expect("naming a slot should succeed");
+    assert_eq!(claimed.label.as_deref(), Some("Pixel 9"), "the name should be trimmed");
+    assert!(claimed.claimed_at.is_some());
+
+    let error = orchestrator
+      .claim_node_peer(&db, "node-ready", &peer_id, "   ")
+      .expect_err("a blank name is not a name");
+    assert!(matches!(error, OrchestratorError::InvalidInput { .. }), "got: {error:?}");
+
+    let error = orchestrator
+      .claim_node_peer(&db, "node-ready", &peer_id, &"n".repeat(MAX_PEER_LABEL_CHARS + 1))
+      .expect_err("an unbounded name would wreck the device list");
+    assert!(matches!(error, OrchestratorError::InvalidInput { .. }), "got: {error:?}");
+  }
+
+  /// Building a device config must not spill it into the places people read.
+  ///
+  /// Not because the key is a secret — it is not (AGENTS.md §6) — but because a whole config is
+  /// bulk noise in a history meant to be scanned, and the provider credential travelling nearby
+  /// genuinely must never appear.
+  #[test]
+  fn building_a_device_config_leaves_the_activity_history_alone() {
+    let db = Database::new(test_db_path("device_config_activity"));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    setup_ready_node_and_tunnel(&db, &secure_storage);
+
+    let peers = db.list_node_peers("node-ready").expect("query should succeed");
+    let peer = peers.first().expect("the fixture seeds one slot");
+
+    let config = Orchestrator::new()
+      .build_peer_client_config(&db, &secure_storage, "node-ready", &peer.id)
+      .expect("a ready node should produce a device config");
+    assert!(config.contains("PrivateKey = client-private-key"));
+
+    let events = db.list_activity_events(100).expect("query should succeed");
+    for event in &events {
+      assert!(
+        !event.detail.contains("client-private-key"),
+        "a device config reached the activity history: {}",
+        event.detail
+      );
+      assert!(
+        !event.detail.contains("token-abc"),
+        "a provider credential reached the activity history: {}",
+        event.detail
+      );
+    }
   }
 }
 
@@ -5952,5 +6600,6 @@ fn canonical_tunnel_name_for_node(node_name: &str) -> String {
   } else {
     name
   }
+
 }
 

@@ -13,7 +13,7 @@ non-obvious reason, that reason is stated — read it before deciding the rule d
 A Windows desktop app that provisions a user's own WireGuard VPN server on a cloud provider and
 connects to it. Rust backend + Tauri v2 + Next.js frontend + SQLite + Windows Credential Manager.
 
-**Phase 1 scope lock. Do not expand without explicit approval.**
+**Current scope.** This table describes what the code actually supports, not a lock.
 
 | Axis | In scope |
 |---|---|
@@ -21,10 +21,14 @@ connects to it. Rust backend + Tauri v2 + Next.js frontend + SQLite + Windows Cr
 | Protocol | WireGuard only |
 | Production providers | DigitalOcean, Amazon EC2 |
 | Dev provider | Docker, behind feature flags, local emulation only |
-| Workflows | provision, connect, disconnect, destroy, force-cleanup |
+| Workflows | provision, connect, disconnect, destroy, force-cleanup, add device |
 
-Multi-provider *architecture* is in scope now. Additional provider *implementations* are not,
-until asked for.
+Multi-provider *architecture* is in scope. Additional provider *implementations* are not, until
+asked for.
+
+Platform expansion is **not** in scope and nothing here moves toward it. Android and iOS are served
+instead by handing out a device peer for the official WireGuard app (§13) — the app provisions the
+server, the phone runs a client someone else audits.
 
 ---
 
@@ -172,23 +176,41 @@ only way to learn which path executed was to trace four levels of dispatch.
 
 ## 6. Secrets
 
+One thing in this app is a secret: the **provider API credential**. Everything else follows from
+that distinction, so make it before reaching for redaction.
+
+**Provider credentials — DigitalOcean tokens, AWS access keys.** Long-lived, account-wide, and able
+to create billable resources. A leaked one costs the user money and outlives any server it made.
+
 - **Never** in SQLite, logs, error messages, diagnostics bundles, test fixtures, snapshots, or any
   committed file. SQLite stores a `*_ref` pointer; the secret lives in Windows Credential Manager.
-- Redact at the log boundary: API tokens, `Authorization` headers, and **private keys — the
-  `PrivateKey` value in a WireGuard config, not the whole `[Interface]` section.** The rest of a
-  config (`Address`, `DNS`, `AllowedIPs`, `PublicKey`, `Endpoint`, `PersistentKeepalive`) is not
-  secret, and it is the only way a user can confirm that a settings change reached the running
-  tunnel or that the kill switch has a `/0` route. This rule previously said "any `[Interface]`
-  section"; the code never did that, and blanking the section would have removed a real diagnostic
-  for no security gain. Redaction is applied at the **write** boundary — `ActivityRecorder::record`,
-  `record_last_import_snapshot` — so nothing has to remember to redact on read.
+- Redacted at the **write** boundary — `ActivityRecorder::record`, `CommandError::new` — so nothing
+  downstream has to remember to redact on read. The list lives in `redact_sensitive_text`:
+  `api_token`, `secret_access_key`, `session_token`, `token_ref`, `Authorization`, bearer tokens.
+- `access_key_id` is deliberately **not** redacted. It identifies which key is in use, which is a
+  real diagnostic, and it is not a secret.
 - **A live DigitalOcean API token was previously committed** to `tests/e2e/fixtures/tauri-mocks.ts`,
   disguised as a fake `token_ref`. It was removed from the tree but remains in git history. Fake
   credentials in fixtures must be *obviously* fake (`dop_v1_EXAMPLE_NOT_A_REAL_TOKEN`), never a
   real value with the label changed.
+
+**WireGuard key material is not a secret here.** Server and client private keys, and whole client
+configs, may be written to files, shown on screen, encoded into QR codes, copied to the clipboard,
+and included in diagnostics. Do not add redaction for them, and do not treat their appearance in
+output as a defect.
+
+The reason is lifetime. A GoatStare server is provisioned on demand, lives for hours, and is
+destroyed; its keys are worthless the moment it is gone, and they grant access to nothing except
+that one ephemeral box. Against that, redaction cost real things: it blanked the `PrivateKey` line
+in the config snapshot — the one line that says *which peer is actually loaded* — and a client
+config that a phone can import must carry its key, so device peers (§13) would be impossible.
+
+What stays true regardless: private keys still live in Windows Credential Manager rather than
+SQLite, because a `*_ref` indirection is how the schema is built, not because of a threat model.
+
 - Treat all external input as untrusted, including Docker CLI output and provider API responses.
 
-If a change risks exposing a secret, stop and propose a safer alternative.
+If a change risks exposing a **provider credential**, stop and propose a safer alternative.
 
 ---
 
@@ -310,7 +332,35 @@ being set in your shell. Docker is **never** a production security boundary.
 
 ---
 
-## 12. Reference
+## 12. Device peers
+
+A server serves more than one device. This is the only reason multi-peer support exists, and it is
+shaped entirely by §2: **provisioning is write-only, so every peer a server will ever have must be
+baked into its cloud-init payload at create time.** There is no channel to register one afterwards,
+and adding one is not a feature request — it is a request to break the contract in §2.
+
+The consequences follow directly:
+
+- Node create generates `DEFAULT_PEER_SLOTS` keypairs, not one, and bakes every public key into the
+  server config. Slot 0 is the Windows desktop; the rest are spare.
+- "Add a device" is a **local claim** against an already-baked slot. It contacts nothing.
+- A node provisioned before multi-peer support has one peer and cannot gain more. It must be
+  destroyed and recreated. The UI hides the device section for such a node rather than offering
+  something that cannot work.
+- Running out of slots is a destroy-and-recreate, by design. Raising `DEFAULT_PEER_SLOTS` only
+  affects servers created afterwards.
+
+The server NAT rule must masquerade the **tunnel subnet**, not one `/32`. It was `-s ${CLIENT_CIDR}`
+while only one peer existed; a second peer under that rule completes a handshake and then has no
+internet, which looks like a client bug and is not one.
+
+Mobile devices run the **official WireGuard app**, imported by QR code. The app does not implement a
+tunnel for any platform other than Windows (§4) and there is no plan to — see §1. A client config is
+only importable if it carries its `PrivateKey`, which is why §6 declassifies WireGuard key material.
+
+---
+
+## 13. Reference
 
 **Project docs:** [README.md](README.md) ·
 [ARCHITECTURE.md](docs/ARCHITECTURE.md) ·

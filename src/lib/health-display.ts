@@ -163,7 +163,8 @@ export function buildConnectivityChecks(input: {
 /**
  * What the tunnel service was actually handed, for the Tunnel Configuration card.
  *
- * The private key is already replaced with a redaction marker by the backend. Everything else —
+ * The whole config is shown, key included: WireGuard key material is not a secret in this app,
+ * and the key is how a user confirms which peer is loaded. Everything else —
  * `Address`, `DNS`, `AllowedIPs`, `Endpoint`, `PersistentKeepalive` — is shown, because verifying
  * that a settings change reached the running tunnel is the entire point of the card.
  */
@@ -175,7 +176,7 @@ export function describeTunnelConfig(diagnostics: DiagnosticsBundle | null): {
   emptyReason: string;
 } {
   const debug = diagnostics?.wireguard_debug;
-  const configText = debug?.last_import_config_redacted ?? null;
+  const configText = debug?.last_import_config ?? null;
 
   return {
     available: Boolean(configText),

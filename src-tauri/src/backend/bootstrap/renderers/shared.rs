@@ -1,22 +1,66 @@
-use super::super::contract::{BootstrapParams, READINESS_MARKER_PATH};
+use super::super::contract::{
+  subnet_of, BootstrapError, BootstrapParams, BootstrapPeer, READINESS_MARKER_PATH,
+};
 
-/// Server `wg0.conf`, including the client `[Peer]` block.
+/// The `[Interface]` half of the server's `wg0.conf`.
 ///
-/// The peer ships in the payload because the app never contacts the server after create — there
-/// is no second round-trip in which to register the client. `${CLIENT_PUBLIC_KEY}` is set as a
-/// shell variable in the script body from `BootstrapParams::client_public_key`.
-pub(super) const WG_INTERFACE_CONFIG_FRAGMENT: &str = r#"[Interface]
+/// `${...}` are *shell* variables, expanded by the unquoted heredoc that writes this file on the
+/// server — not Rust format arguments. Only the `[Peer]` blocks are substituted here, by
+/// `render_wg_interface_config`.
+///
+/// The NAT rule masquerades `${NAT_SOURCE_CIDR}`, the whole tunnel subnet. It masqueraded a single
+/// client `/32` while only one peer existed; under that rule a second peer completes a handshake
+/// and then has no internet at all, which looks like a client fault and is not one.
+const WG_INTERFACE_HEADER_FRAGMENT: &str = r#"[Interface]
 Address = ${SERVER_CIDR}
 ListenPort = ${WG_PORT}
 PrivateKey = ${SERVER_PRIVATE_KEY}
 SaveConfig = false
 
-PostUp = iptables -A FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -A FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -A POSTROUTING -s ${CLIENT_CIDR} -j MASQUERADE
-PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -D FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -D POSTROUTING -s ${CLIENT_CIDR} -j MASQUERADE
+PostUp = iptables -A FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -A FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -A POSTROUTING -s ${NAT_SOURCE_CIDR} -j MASQUERADE
+PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -D FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -D POSTROUTING -s ${NAT_SOURCE_CIDR} -j MASQUERADE"#;
 
-[Peer]
-PublicKey = ${CLIENT_PUBLIC_KEY}
-AllowedIPs = ${CLIENT_CIDR}"#;
+/// Server `wg0.conf`, including one `[Peer]` block per baked peer.
+///
+/// Every peer ships in the payload because the app never contacts the server after create — there
+/// is no second round-trip in which to register one (AGENTS.md §2, §12).
+///
+/// Peer keys and addresses are written by Rust directly into the heredoc. Both are validated as
+/// WireGuard key material and IPv4 CIDRs by `validate_bootstrap_params` before this runs, so
+/// nothing shell-significant can reach the generated file.
+pub(super) fn render_wg_interface_config(peers: &[BootstrapPeer]) -> String {
+  let mut config = String::from(WG_INTERFACE_HEADER_FRAGMENT);
+
+  for peer in peers {
+    config.push_str("\n\n[Peer]\nPublicKey = ");
+    config.push_str(&peer.public_key);
+    config.push_str("\nAllowedIPs = ");
+    config.push_str(&peer.address_cidr);
+  }
+
+  config
+}
+
+/// Space-separated peer public keys, for the shell loops that verify each one landed.
+pub(super) fn peer_public_keys_shell_list(peers: &[BootstrapPeer]) -> String {
+  peers
+    .iter()
+    .map(|peer| peer.public_key.as_str())
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+/// Space-separated `publickey|address` pairs, for the Docker path's manual `wg set` fallback.
+///
+/// `|` cannot occur in base64 key material or in a CIDR, so it is unambiguous as a separator and
+/// the shell can split each pair with `%%` / `##` expansions.
+pub(super) fn peer_specs_shell_list(peers: &[BootstrapPeer]) -> String {
+  peers
+    .iter()
+    .map(|peer| format!("{}|{}", peer.public_key, peer.address_cidr))
+    .collect::<Vec<_>>()
+    .join(" ")
+}
 
 pub(super) const FIREWALL_RULES_FRAGMENT: &str = r#"iptables -N GOATSTARE-INPUT 2>/dev/null || true
 iptables -F GOATSTARE-INPUT
@@ -37,20 +81,26 @@ pub(super) fn indent_for_yaml_block(content: &str, spaces: usize) -> String {
     .join("\n")
 }
 
-pub(super) fn render_cloud_bootstrap_script(params: &BootstrapParams) -> String {
-  let script_body = render_cloud_bootstrap_body(params);
+pub(super) fn render_cloud_bootstrap_script(
+  params: &BootstrapParams,
+) -> Result<String, BootstrapError> {
+  let script_body = render_cloud_bootstrap_body(params)?;
 
-  format!(
+  Ok(format!(
     r#"#!/usr/bin/env bash
 set -euo pipefail
 
 {script_body}
 "#
-  )
+  ))
 }
 
-fn render_cloud_bootstrap_body(params: &BootstrapParams) -> String {
-  format!(
+fn render_cloud_bootstrap_body(params: &BootstrapParams) -> Result<String, BootstrapError> {
+  // Never fails in practice — the CIDR is validated before any renderer runs — but propagated
+  // rather than unwrapped so a future caller that skips validation gets an error, not a panic.
+  let nat_source_cidr = subnet_of(&params.server_interface_cidr)?;
+
+  Ok(format!(
     r#"
 log_stage() {{
   local stage="$1"
@@ -63,8 +113,8 @@ trap 'log_stage "failed" "line=${{LINENO}} exit_status=$?"' ERR
 WG_IFACE="{iface}"
 WG_PORT="{port}"
 SERVER_CIDR="{server_cidr}"
-CLIENT_CIDR="{client_cidr}"
-CLIENT_PUBLIC_KEY="{client_public_key}"
+NAT_SOURCE_CIDR="{nat_source_cidr}"
+PEER_PUBLIC_KEYS="{peer_public_keys}"
 MARKER_PATH="{marker}"
 
 umask 077
@@ -84,18 +134,20 @@ fi
 SERVER_PRIVATE_KEY=$(tr -d '\r\n' < /etc/wireguard/server_private.key)
 SERVER_PUBLIC_KEY=$(tr -d '\r\n' < /etc/wireguard/server_public.key)
 
-log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf with baked client peer"
+log_stage "write-config" "writing /etc/wireguard/${{WG_IFACE}}.conf with baked client peers"
 
 cat > /etc/wireguard/${{WG_IFACE}}.conf <<EOF
 {interface_config_fragment}
 EOF
 chmod 600 /etc/wireguard/${{WG_IFACE}}.conf
 
-log_stage "verify-peer" "confirming client peer is present in ${{WG_IFACE}}.conf"
-grep -q "^PublicKey = ${{CLIENT_PUBLIC_KEY}}$" /etc/wireguard/${{WG_IFACE}}.conf || {{
-  log_stage "verify-peer" "client peer missing from generated config"
-  exit 65
-}}
+log_stage "verify-peer" "confirming every baked peer is present in ${{WG_IFACE}}.conf"
+for peer_key in ${{PEER_PUBLIC_KEYS}}; do
+  grep -q "^PublicKey = ${{peer_key}}$" /etc/wireguard/${{WG_IFACE}}.conf || {{
+    log_stage "verify-peer" "peer ${{peer_key}} missing from generated config"
+    exit 65
+  }}
+done
 
 log_stage "sysctl" "enabling IPv4 forwarding"
 sysctl --system
@@ -125,11 +177,11 @@ log_stage "complete" "bootstrap finished"
     iface = params.interface_name,
     port = params.listen_port,
     server_cidr = params.server_interface_cidr,
-    client_cidr = params.client_cidr,
-    client_public_key = params.client_public_key,
+    nat_source_cidr = nat_source_cidr,
+    peer_public_keys = peer_public_keys_shell_list(&params.peers),
     marker = READINESS_MARKER_PATH,
     endpoint = params.server_endpoint_ip,
-    interface_config_fragment = WG_INTERFACE_CONFIG_FRAGMENT,
+    interface_config_fragment = render_wg_interface_config(&params.peers),
     firewall_rules_fragment = FIREWALL_RULES_FRAGMENT,
-  )
+  ))
 }

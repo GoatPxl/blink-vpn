@@ -133,11 +133,11 @@ Confirm nothing is left over if a run is interrupted:
 
 ```bash
 aws ec2 describe-instances --region us-east-1 \
-  --filters "Name=tag:goatstare,Values=phase1" "Name=instance-state-name,Values=pending,running,stopping,stopped"
-aws ec2 describe-security-groups --region us-east-1 --filters "Name=tag:goatstare,Values=phase1"
+  --filters "Name=tag:goatstare,Values=managed" "Name=instance-state-name,Values=pending,running,stopping,stopped"
+aws ec2 describe-security-groups --region us-east-1 --filters "Name=tag:goatstare,Values=managed"
 ```
 
-Every resource this app creates carries the `goatstare=phase1` tag, which is what makes that sweep
+Every resource this app creates carries the `goatstare=managed` tag, which is what makes that sweep
 possible.
 
 The lane asserts an instance reaches ready with an endpoint and a locally-generated server key, that

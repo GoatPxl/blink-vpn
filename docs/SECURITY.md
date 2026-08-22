@@ -10,7 +10,7 @@
 ## Where Credentials Live
 
 Provider API keys are stored in **Windows Credential Manager**, under the service name
-`com.goatstare.vpn.phase1`, written as a generic credential. SQLite holds only a non-secret
+`com.goatstare.vpn`, written as a generic credential. SQLite holds only a non-secret
 `token_ref` handle pointing at that entry — never the key.
 
 A credential is a **set of named fields**, serialized to a JSON object inside that single entry:
@@ -103,14 +103,23 @@ Always redact:
 - bearer tokens
 - authorization headers
 - provider token references
-- API token fields
-- private keys
+- API token fields (`api_token`, `secret_access_key`, `session_token`)
+
+Never redacted:
+
+- `access_key_id` — an identifier, not a secret, and knowing which key is in use is a real
+  diagnostic.
+- **WireGuard key material.** A server exists for hours and is then destroyed, and its keys die
+  with it. Client configs, including `PrivateKey`, may be written to files, shown on screen,
+  encoded into QR codes and included in diagnostics. Redacting the key removed the one line most
+  worth reading when a tunnel came up wrong, and a config a phone can import has to carry it.
 
 Rules:
 
-- Never emit raw credential material in logs.
-- Never include secret fields in diagnostics export.
-- Keep redaction logic in backend serialization and logging helpers.
+- Never emit provider credential material in logs.
+- Never include provider credential fields in a diagnostics export.
+- Keep redaction logic in backend serialization and logging helpers, applied at the **write**
+  boundary so nothing downstream has to remember to redact on read.
 
 ## Secure Coding Requirements
 

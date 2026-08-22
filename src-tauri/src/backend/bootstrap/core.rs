@@ -24,7 +24,8 @@ impl Bootstrap {
   ) -> Result<BootstrapArtifact, BootstrapError> {
     super::contract::validate_bootstrap_params(params)?;
 
-    let init_payload = cloud_init::build_cloud_init_user_data(params, server_private_key, server_public_key);
+    let init_payload =
+      cloud_init::build_cloud_init_user_data(params, server_private_key, server_public_key)?;
     let output_contract_preview = BootstrapOutputContract {
       server_endpoint_ip: params.server_endpoint_ip.clone(),
       server_public_key: server_public_key.to_string(),
@@ -47,7 +48,7 @@ impl Bootstrap {
     super::contract::validate_bootstrap_params(params)?;
 
     let init_payload =
-      docker_init::build_docker_init_script(params, server_private_key, server_public_key);
+      docker_init::build_docker_init_script(params, server_private_key, server_public_key)?;
     // The server public key is known locally at render time, so this is the real value rather
     // than a placeholder resolved from a readiness marker the app would have to read back.
     let output_contract_preview = BootstrapOutputContract {

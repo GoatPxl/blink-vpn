@@ -18,7 +18,6 @@ use defguard_wireguard_rs::key::Key as WireguardKey;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::backend::logging;
 
 pub const DEFAULT_CLIENT_ALLOWED_IPS: &[&str] = &["0.0.0.0/0", "::/0"];
 pub const DEFAULT_CLIENT_KEEPALIVE_SECONDS: u16 = 25;
@@ -59,7 +58,7 @@ impl WireGuardManager {
     WireGuardDebugSnapshot {
       commands: guard.commands.iter().cloned().collect(),
       last_import_tunnel_name: guard.last_import_tunnel_name.clone(),
-      last_import_config_redacted: guard.last_import_config_redacted.clone(),
+      last_import_config: guard.last_import_config.clone(),
       last_import_config_temp_path: guard.last_import_config_temp_path.clone(),
     }
   }
@@ -89,7 +88,9 @@ impl WireGuardManager {
       .expect("wireguard debug trace lock should work");
     guard.last_import_tunnel_name = Some(tunnel_name.to_string());
     guard.last_import_config_temp_path = Some(temp_path.to_string());
-    guard.last_import_config_redacted = Some(logging::redact_sensitive_text(config_text));
+    // Stored verbatim. WireGuard key material is not a secret in this app (AGENTS.md §6), and the
+    // redacted form blanked the one line most worth reading when a tunnel came up wrong.
+    guard.last_import_config = Some(config_text.to_string());
   }
 
   pub fn record_connect_trace_snapshot(&self, tunnel_name: &str, config_text: &str) {
@@ -134,7 +135,7 @@ impl WireGuardManager {
   pub fn ensure_installed(&self) -> Result<(), WireGuardError> {
     if !cfg!(target_os = "windows") {
       return Err(WireGuardError::UnsupportedPlatform {
-        detail: "Phase 1 WireGuard integration is supported on Windows only.".to_string(),
+        detail: "WireGuard integration is supported on Windows only.".to_string(),
       });
     }
 
@@ -663,7 +664,7 @@ impl WireGuardManager {
 struct WireGuardDebugTrace {
   commands: VecDeque<String>,
   last_import_tunnel_name: Option<String>,
-  last_import_config_redacted: Option<String>,
+  last_import_config: Option<String>,
   last_import_config_temp_path: Option<String>,
 }
 
@@ -671,7 +672,7 @@ struct WireGuardDebugTrace {
 pub struct WireGuardDebugSnapshot {
   pub commands: Vec<String>,
   pub last_import_tunnel_name: Option<String>,
-  pub last_import_config_redacted: Option<String>,
+  pub last_import_config: Option<String>,
   pub last_import_config_temp_path: Option<String>,
 }
 
@@ -1871,15 +1872,14 @@ mod tests {
   /// `/installtunnelservice` records the path in the service command line and reads it on every
   /// start; it does not copy the file. Deleting it after import — which this used to do — created
   /// services that imported cleanly and then failed every start, because the file was gone.
-  /// The config snapshot is shown to the user on the Kill Switch page, so what it hides and what it
-  /// keeps is a security decision, not a formatting one.
+  /// The config snapshot is shown to the user on the Kill Switch page, and it is recorded whole.
   ///
-  /// AGENTS.md §6 requires the private key to be redacted. It deliberately does **not** require
-  /// blanking the whole `[Interface]` section: `Address`, `DNS`, `AllowedIPs` and
-  /// `PersistentKeepalive` are not secret, and they are the only way a user can confirm a settings
-  /// change reached the running tunnel or that the kill switch has a `/0` route.
+  /// WireGuard key material is not a secret in this app (AGENTS.md §6), so the snapshot keeps the
+  /// entire config. Every field has to survive: `Address`, `DNS`, `AllowedIPs` and
+  /// `PersistentKeepalive` are how a user confirms a settings change reached the running tunnel
+  /// or that the kill switch has a `/0` route, and the key is which peer is actually loaded.
   #[test]
-  fn the_config_snapshot_hides_the_private_key_and_keeps_every_verifiable_setting() {
+  fn the_config_snapshot_keeps_the_whole_config_including_the_private_key() {
     let wireguard = WireGuardManager::with_runner(Arc::new(MockImportRunner::with_service_exists(false)));
 
     wireguard.record_connect_trace_snapshot(
@@ -1889,14 +1889,14 @@ mod tests {
 
     let config = wireguard
       .debug_snapshot()
-      .last_import_config_redacted
+      .last_import_config
       .expect("the connect trace should record a config");
 
     assert!(
-      !config.contains("uP7xK2mQvR4tY6wA9sD1fG3hJ5kL8nB0cV2xZ4aQ6eE="),
-      "the private key must not survive into anything the user can see: {config}"
+      config.contains("uP7xK2mQvR4tY6wA9sD1fG3hJ5kL8nB0cV2xZ4aQ6eE="),
+      "the key identifies which peer is loaded and must stay readable: {config}"
     );
-    assert!(config.contains("[REDACTED]"), "the redaction must be visible: {config}");
+    assert!(!config.contains("[REDACTED]"), "nothing in a client config is redacted: {config}");
 
     for setting in [
       "Address = 10.66.0.2/32",
@@ -2350,7 +2350,7 @@ mod tests {
       Some("runtime://wg_show_dump")
     );
     assert!(snapshot
-      .last_import_config_redacted
+      .last_import_config
       .as_deref()
       .is_some_and(|value| value.contains("peerpub")));
     assert!(snapshot

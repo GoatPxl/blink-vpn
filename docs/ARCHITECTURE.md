@@ -214,12 +214,30 @@ State changes are validated in backend transition guards.
 
 ## Key Generation And Bootstrap Requirements
 
-- Key generation location: WireGuard key generation must happen on the same machine where the app runs. Both keypairs — server and client — are generated before the node is created.
+- Key generation location: WireGuard key generation must happen on the same machine where the app runs. Every keypair — the server’s and one per device slot — is generated before the node is created.
 - Host dependency: the app host must have WireGuard for Windows installed. No driver DLL is bundled or downloaded.
 - Private key handling: private key material remains local to the app host and secure storage boundary. The server's private key is written into the payload; the client's never leaves the machine.
-- Public key propagation: the client's public key is baked into the server's `[Peer]` block at render time, so the node boots already knowing its peer. There is no second round-trip to register it.
+- Public key propagation: every device slot's public key is baked into a `[Peer]` block at render time, so the node boots already knowing all of them. There is no second round-trip to register one.
 - Node bootstrap contract: the init script applies the supplied keys during first boot and never generates its own.
 - Verification: the node writes a readiness marker as a self-check and debugging aid. The app never reads it — doing so would require a channel into the node that the contract forbids.
+
+### Device slots are fixed when the node is created
+
+A server is provisioned with `DEFAULT_PEER_SLOTS` peers rather than one. Slot 0 is the Windows
+desktop; the rest are spare, and "adding a device" names one of them locally — nothing is sent to
+the server, because nothing can be.
+
+That shape is forced by the write-only contract above. A peer cannot be registered on a running
+server, so the only way to have one later is to bake it up front. Running out of slots means
+recreating the node, and raising the constant only affects servers created afterwards.
+
+Two consequences worth knowing:
+
+- The server NAT rule masquerades the **tunnel subnet**, not one `/32`. Scoped to a single peer,
+  every device but the first completes a handshake and then has no internet at all.
+- Mobile devices run the official WireGuard app, imported by QR code. This app implements a tunnel
+  for Windows only, and a config is only importable if it carries its `PrivateKey` — which is why
+  WireGuard key material is not treated as a secret here (AGENTS.md §6).
 
 ### Readiness is provider-observable only
 

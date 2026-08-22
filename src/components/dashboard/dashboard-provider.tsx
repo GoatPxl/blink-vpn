@@ -21,7 +21,13 @@ import {
   getTunnelPhase,
   listAppLocations,
   listProviders,
+  listNodePeers,
   listTunnelsForNode,
+  claimNodePeer,
+  getPeerConfig,
+  exportPeerConfig,
+  type NodePeerRecord,
+  type PeerConfigPayload,
   listVpnNodes,
   registerProviderCredential,
   resumeProvider as resumeProviderCommand,
@@ -116,6 +122,11 @@ type DashboardContextValue = {
   nodes: VpnNodeRecord[];
   providers: ProviderRecord[];
   tunnels: TunnelRecord[];
+  /** Baked device slots for the selected node. Empty for a node provisioned before them. */
+  nodePeers: NodePeerRecord[];
+  claimDevice: (nodeId: string, peerId: string, label: string) => Promise<boolean>;
+  loadDeviceConfig: (nodeId: string, peerId: string) => Promise<PeerConfigPayload | null>;
+  exportDeviceConfig: (nodeId: string, peerId: string) => Promise<void>;
   selectedNodeId: string;
   setSelectedNodeId: (value: string) => void;
   selectedTunnelId: string;
@@ -205,6 +216,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [nodes, setNodes] = useState<VpnNodeRecord[]>([]);
   const [providers, setProviders] = useState<ProviderRecord[]>([]);
   const [tunnels, setTunnels] = useState<TunnelRecord[]>([]);
+  const [nodePeers, setNodePeers] = useState<NodePeerRecord[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [selectedTunnelId, setSelectedTunnelId] = useState("");
   const [health, setHealth] = useState<HealthPanelData | null>(null);
@@ -553,11 +565,64 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, refreshProviderAccessStatus, refreshWireGuardReadiness]);
 
+  /// Name an unclaimed slot so it becomes a device.
+  const claimDevice = useCallback(
+    async (nodeIdValue: string, peerId: string, label: string): Promise<boolean> => {
+      setBusyAction("claim-device");
+      try {
+        const claimed = await claimNodePeer({ nodeId: nodeIdValue, peerId, label });
+        setNodePeers((current) =>
+          current.map((peer) => (peer.id === claimed.id ? claimed : peer)),
+        );
+        pushToast("success", "Device added", `${claimed.label} can now use this server.`);
+        return true;
+      } catch (error) {
+        handleError(error);
+        return false;
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [handleError, pushToast],
+  );
+
+  /// The config and QR for one slot.
+  ///
+  /// Deliberately not held in context state: it carries the slot’s key, and there is no reason for
+  /// it to outlive the dialog showing it.
+  const loadDeviceConfig = useCallback(
+    async (nodeIdValue: string, peerId: string): Promise<PeerConfigPayload | null> => {
+      try {
+        return await getPeerConfig({ nodeId: nodeIdValue, peerId });
+      } catch (error) {
+        handleError(error);
+        return null;
+      }
+    },
+    [handleError],
+  );
+
+  const exportDeviceConfig = useCallback(
+    async (nodeIdValue: string, peerId: string) => {
+      setBusyAction("export-device-config");
+      try {
+        const path = await exportPeerConfig({ nodeId: nodeIdValue, peerId });
+        pushToast("success", "Configuration saved", path);
+      } catch (error) {
+        handleError(error);
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [handleError, pushToast],
+  );
+
   const loadNodeDetails = useCallback(async (nodeIdValue: string) => {
     if (!nodeIdValue) {
       setTunnels([]);
       setSelectedTunnelId("");
       setHealth(null);
+      setNodePeers([]);
       clearThroughputSamples();
       return;
     }
@@ -565,6 +630,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     try {
       const loadedTunnels = await listTunnelsForNode(nodeIdValue);
       setTunnels(loadedTunnels);
+
+      // Device slots are informational, so a node that predates them must not break the panel
+      // the tunnel and health data also live in.
+      try {
+        setNodePeers(await listNodePeers(nodeIdValue));
+      } catch {
+        setNodePeers([]);
+      }
 
       if (loadedTunnels.length > 0) {
         const selectedExists = loadedTunnels.some((tunnel) => tunnel.id === selectedTunnelIdRef.current);
@@ -857,7 +930,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           tunnelId: canonicalTunnelId,
           nodeId: node.id,
           tunnelName: canonicalTunnelName,
-          clientAddressCidr: "10.66.0.2/32",
           dnsServer: "1.1.1.1",
           allowedIps: ["0.0.0.0/0", "::/0"],
         });
@@ -909,7 +981,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
               tunnelId: recoverableTunnel.id,
               nodeId: recoverableTunnel.node_id,
               tunnelName: canonicalTunnelName,
-              clientAddressCidr: "10.66.0.2/32",
               dnsServer: "1.1.1.1",
               allowedIps: ["0.0.0.0/0", "::/0"],
             });
@@ -980,7 +1051,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
               .replace(/-{2,}/g, "-")
               .replace(/^-|-$/g, "")
               .slice(0, 56) || "primary"}-wg`,
-            clientAddressCidr: "10.66.0.2/32",
             dnsServer: "1.1.1.1",
             allowedIps: ["0.0.0.0/0", "::/0"],
           });
@@ -1415,6 +1485,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     nodes,
     providers,
     tunnels,
+    nodePeers,
+    claimDevice,
+    loadDeviceConfig,
+    exportDeviceConfig,
     selectedNodeId,
     setSelectedNodeId,
     selectedTunnelId,

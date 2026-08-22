@@ -882,7 +882,7 @@ mod tests {
     DOCKER_INIT_SCRIPT_PATH,
     DOCKER_REGION, DOCKER_WIREGUARD_PUBLISH,
   };
-  use crate::backend::bootstrap::{Bootstrap, BootstrapParams, READINESS_MARKER_PATH};
+  use crate::backend::bootstrap::{Bootstrap, BootstrapParams, BootstrapPeer, READINESS_MARKER_PATH};
   use crate::backend::crypto::keypair::{
     generate_client_keypair, generate_server_keypair, WireGuardKeypair,
   };
@@ -897,7 +897,10 @@ mod tests {
     let client = generate_client_keypair().expect("client keypair should generate for real test");
 
     let params = BootstrapParams {
-      client_public_key: client.public_key.clone(),
+      peers: vec![BootstrapPeer {
+        public_key: client.public_key.clone(),
+        address_cidr: "10.66.0.2/32".to_string(),
+      }],
       ..BootstrapParams::default()
     };
 
@@ -949,7 +952,10 @@ mod tests {
     let client = generate_client_keypair().expect("client keypair should generate");
     let server = generate_server_keypair().expect("server keypair should generate");
     let params = BootstrapParams {
-      client_public_key: client.public_key,
+      peers: vec![BootstrapPeer {
+        public_key: client.public_key.clone(),
+        address_cidr: "10.66.0.2/32".to_string(),
+      }],
       ..BootstrapParams::default()
     };
 

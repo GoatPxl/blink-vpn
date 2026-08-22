@@ -50,8 +50,10 @@ pub fn redact_sensitive_text(input: &str) -> String {
   // secret, and seeing which key is in use is a real diagnostic (AGENTS.md §6).
   output = redact_assignment_like(&output, "secret_access_key");
   output = redact_assignment_like(&output, "session_token");
-  output = redact_assignment_like(&output, "private_key");
-  output = redact_assignment_like(&output, "PrivateKey");
+  // WireGuard key material is deliberately absent from this list. A server lives for hours and is
+  // then destroyed, and its keys die with it, so a client config is not a secret here (AGENTS.md
+  // §6). Redacting the key blanked the one line most worth reading when a tunnel came up wrong,
+  // and a config a phone can import has to carry it.
   output = redact_assignment_like(&output, "Authorization");
   output = redact_assignment_like(&output, "Token");
 
@@ -129,13 +131,21 @@ fn redact_assignment_like(input: &str, key: &str) -> String {
 mod tests {
   use super::{default_level_filter, redact_sensitive_text};
 
+  /// Provider credentials are redacted; WireGuard key material is not.
+  ///
+  /// They are different classes of thing. A provider token is long-lived and grants
+  /// account-wide access to create billable resources. A WireGuard key belongs to a server
+  /// that exists for hours and is then destroyed (AGENTS.md §6).
   #[test]
-  fn redacts_tokens_private_keys_and_authorization_headers() {
+  fn redacts_provider_credentials_but_keeps_wireguard_key_material() {
     let input = "Authorization: Bearer secret-token\nPrivateKey = very-secret-key\napi_token=abc123\n";
     let output = redact_sensitive_text(input);
 
     assert!(!output.contains("secret-token"));
-    assert!(!output.contains("very-secret-key"));
+    assert!(
+      output.contains("very-secret-key"),
+      "the WireGuard key is not a secret and must stay readable: {output}"
+    );
     assert!(!output.contains("abc123"));
     assert!(output.contains("[REDACTED]"));
   }
@@ -177,12 +187,13 @@ mod tests {
     assert!(output.contains("nyc1"));
   }
 
+  /// The serialized shape a keypair reaches a diagnostics bundle in. Nothing here is redacted.
   #[test]
-  fn redacts_private_key_json_values_without_swallowing_the_rest_of_the_document() {
+  fn keeps_wireguard_key_material_in_a_serialized_document() {
     let input = r#"{"private_key": "aGVsbG8gd29ybGQ=", "listen_port": 51820}"#;
     let output = redact_sensitive_text(input);
 
-    assert!(!output.contains("aGVsbG8gd29ybGQ="));
+    assert!(output.contains("aGVsbG8gd29ybGQ="), "the key must survive: {output}");
     assert!(output.contains("51820"), "unrelated fields must not be swallowed: {output}");
   }
 

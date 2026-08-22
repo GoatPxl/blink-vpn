@@ -17,7 +17,7 @@ use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
   ForceCleanupResult, KillSwitchState, TunnelPhase, TunnelSettings, UnexpectedDrop,
 };
-use crate::backend::db::{TunnelRecord, VpnNodeRecord};
+use crate::backend::db::{NodePeerRecord, TunnelRecord, VpnNodeRecord};
 use crate::backend::secure_storage::SecureStorage;
 use crate::backend::wireguard::{TunnelServiceState, WireGuardReadiness};
 
@@ -61,6 +61,8 @@ const BUILTIN_DOCKER_PROVIDER_NAME: &str = "Docker";
 const BUILTIN_DOCKER_PROVIDER_SLUG: &str = "docker";
 /// Subdirectory of the app data directory that exported bundles are written to.
 const DIAGNOSTICS_DIR_NAME: &str = "diagnostics";
+/// Subdirectory that exported device configurations are written to.
+const PEER_CONFIG_DIR_NAME: &str = "peer-configs";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthPanelData {
@@ -746,7 +748,6 @@ pub async fn create_and_activate_client_tunnel(
   tunnel_id: String,
   node_id: String,
   tunnel_name: String,
-  client_address_cidr: String,
   dns_server: Option<String>,
   allowed_ips: Vec<String>,
   backend: State<'_, Backend>,
@@ -765,7 +766,6 @@ pub async fn create_and_activate_client_tunnel(
         tunnel_id,
         node_id,
         tunnel_name,
-        client_address_cidr,
         dns_server,
         allowed_ips,
       },
@@ -933,6 +933,169 @@ pub async fn connect_tunnel(
       })
     .await
   }
+
+/// A device config plus the QR symbol that encodes it.
+///
+/// The config carries its `PrivateKey`, which is what makes it importable at all. That is
+/// sanctioned here — WireGuard key material is not a secret in this app (AGENTS.md §6) — but it
+/// still must not be written into the activity log or a diagnostics bundle, where it would be
+/// bulk noise in a history meant to be read.
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerConfigPayload {
+  pub config_text: String,
+  /// Width and height of the QR symbol, in modules.
+  pub qr_size: usize,
+  /// Row-major dark/light modules, `qr_size * qr_size` of them.
+  pub qr_modules: Vec<bool>,
+}
+
+#[tauri::command]
+pub async fn list_node_peers(
+  node_id: String,
+  backend: State<'_, Backend>,
+) -> Result<Vec<NodePeerRecord>, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+  backend
+    .orchestrator
+    .list_node_peers(&backend.db, &node_id)
+    .map_err(CommandError::from)
+  })
+  .await
+}
+
+#[tauri::command]
+pub async fn claim_node_peer(
+  node_id: String,
+  peer_id: String,
+  label: String,
+  backend: State<'_, Backend>,
+) -> Result<NodePeerRecord, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+  backend
+    .orchestrator
+    .claim_node_peer(&backend.db, &node_id, &peer_id, &label)
+    .map_err(CommandError::from)
+  })
+  .await
+}
+
+#[tauri::command]
+pub async fn get_peer_config(
+  node_id: String,
+  peer_id: String,
+  backend: State<'_, Backend>,
+) -> Result<PeerConfigPayload, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+  let config_text = backend
+    .orchestrator
+    .build_peer_client_config(&backend.db, &backend.secure_storage, &node_id, &peer_id)
+    .map_err(CommandError::from)?;
+
+  let matrix = crate::backend::qr::encode(&config_text).map_err(|source| {
+    CommandError::new(
+      CommandErrorKind::Unknown,
+      format!("Could not build a QR code for this device: {source}"),
+      "Copy the configuration text instead, or export it to a file.",
+    )
+  })?;
+
+  Ok(PeerConfigPayload {
+    config_text,
+    qr_size: matrix.size,
+    qr_modules: matrix.modules,
+  })
+  })
+  .await
+}
+
+/// Write a device config to disk and return where it went.
+///
+/// Follows `export_diagnostics_bundle`: the app picks the location and returns the path, rather
+/// than taking one from the caller. `reveal_app_location` then opens it by key — that command
+/// takes a key and never a path precisely so nothing running in the webview can aim the shell.
+#[tauri::command]
+pub async fn export_peer_config(
+  node_id: String,
+  peer_id: String,
+  app: AppHandle,
+  backend: State<'_, Backend>,
+) -> Result<String, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+  let config_text = backend
+    .orchestrator
+    .build_peer_client_config(&backend.db, &backend.secure_storage, &node_id, &peer_id)
+    .map_err(CommandError::from)?;
+
+  let peers = backend
+    .orchestrator
+    .list_node_peers(&backend.db, &node_id)
+    .map_err(CommandError::from)?;
+
+  let peer = peers
+    .into_iter()
+    .find(|peer| peer.id == peer_id)
+    .ok_or_else(|| CommandError::invalid_input(
+      "That device slot no longer exists.",
+      "Refresh the node and try again.",
+    ))?;
+
+  let peer_config_dir = app
+    .path()
+    .app_data_dir()
+    .map_err(CommandError::from)?
+    .join(PEER_CONFIG_DIR_NAME);
+
+  std::fs::create_dir_all(&peer_config_dir).map_err(CommandError::from)?;
+
+  // WireGuard for Windows and the mobile apps derive the tunnel name from the file name, and
+  // both restrict it to the same character set a tunnel name uses.
+  let file_path = peer_config_dir.join(format!(
+    "{}.conf",
+    sanitize_config_file_stem(peer.label.as_deref().unwrap_or("device"), peer.slot_index)
+  ));
+
+  std::fs::write(&file_path, config_text).map_err(CommandError::from)?;
+
+  Ok(file_path.display().to_string())
+  })
+  .await
+}
+
+/// A file stem WireGuard will accept, with the slot index appended so two devices sharing a name
+/// cannot overwrite each other.
+fn sanitize_config_file_stem(label: &str, slot_index: i64) -> String {
+  let mut cleaned = String::new();
+  let mut last_was_separator = false;
+
+  for character in label.trim().chars() {
+    if character.is_ascii_alphanumeric() {
+      cleaned.push(character);
+      last_was_separator = false;
+    } else if !last_was_separator && !cleaned.is_empty() {
+      cleaned.push('-');
+      last_was_separator = true;
+    }
+  }
+
+  let stem = cleaned.trim_matches('-');
+  let stem = if stem.is_empty() { "device" } else { stem };
+
+  // 32 leaves room for the suffix inside the 63-character limit a tunnel name has.
+  let stem: String = stem.chars().take(32).collect();
+  format!("{stem}-{slot_index}")
+}
 
 #[tauri::command]
 pub async fn export_diagnostics_bundle(
@@ -1132,7 +1295,8 @@ pub async fn check_docker_readiness(
 ///
 /// The two commands share this list so a location can never be shown without being openable, or
 /// openable without being shown.
-const APP_LOCATION_KEYS: [&str; 4] = ["diagnostics", "logs", "tunnels", "database"];
+const APP_LOCATION_KEYS: [&str; 5] =
+  ["diagnostics", "peer-configs", "logs", "tunnels", "database"];
 
 /// Takes the base directories rather than an `AppHandle` so the catalog can be tested without a
 /// running Tauri app — an unknown key must be rejected, and that is worth proving.
@@ -1146,6 +1310,11 @@ fn resolve_app_location(
       "Diagnostics exports",
       "Redacted bundles written by Export.",
       app_data_dir.join(DIAGNOSTICS_DIR_NAME),
+    ),
+    "peer-configs" => (
+      "Device configurations",
+      "WireGuard .conf files exported for phones and other devices.",
+      app_data_dir.join(PEER_CONFIG_DIR_NAME),
     ),
     "logs" => (
       "Application log",
@@ -1202,7 +1371,7 @@ pub async fn reveal_app_location(key: String, app: AppHandle) -> Result<(), Comm
   run_blocking(move || {
   if !cfg!(target_os = "windows") {
     return Err(CommandError::dependency(
-      "Opening a folder is supported on Windows only in Phase 1.",
+      "Opening a folder is supported on Windows only.",
       "Open the path shown next to the location manually.",
     ));
   }
@@ -1234,7 +1403,7 @@ pub async fn open_wireguard_install_page() -> Result<(), CommandError> {
   run_blocking(move || {
   if !cfg!(target_os = "windows") {
     return Err(CommandError::dependency(
-      "WireGuard install shortcut is supported on Windows only in Phase 1.",
+      "WireGuard install shortcut is supported on Windows only.",
       "Install WireGuard manually from wireguard.com/install.",
     ));
   }
@@ -1254,7 +1423,7 @@ pub async fn install_wireguard_with_prerequisites() -> Result<WireGuardInstallRe
   run_blocking(move || {
   if !cfg!(target_os = "windows") {
     return Err(CommandError::dependency(
-      "WireGuard installation is supported on Windows only for Phase 1.",
+      "WireGuard installation is supported on Windows only.",
       "Install WireGuard manually from wireguard.com/install.",
     ));
   }

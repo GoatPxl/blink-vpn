@@ -194,7 +194,7 @@ describe("describeTunnelConfig", () => {
       wireguard_debug: {
         commands: [],
         last_import_tunnel_name: "wg-primary",
-        last_import_config_redacted: CONFIG,
+        last_import_config: CONFIG,
         last_import_config_temp_path: "C:\\Users\\me\\AppData\\Local\\GoatStare\\tunnels\\wg-primary.conf",
         ...overrides,
       },
@@ -210,7 +210,7 @@ describe("describeTunnelConfig", () => {
 
   // Distinct from "not loaded yet": the app is running and simply has not built a config.
   it("distinguishes a loaded bundle with no config from an unloaded one", () => {
-    const result = describeTunnelConfig(bundle({ last_import_config_redacted: null }));
+    const result = describeTunnelConfig(bundle({ last_import_config: null }));
     assert.equal(result.available, false);
     assert.match(result.emptyReason, /connect to a server/i);
   });

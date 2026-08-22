@@ -51,7 +51,7 @@ pub struct Ec2Config {
 }
 
 impl Ec2Config {
-  pub fn phase1_defaults() -> Self {
+  pub fn defaults() -> Self {
     Self {
       poll_interval: Duration::from_secs(4),
       poll_max_attempts: 60,

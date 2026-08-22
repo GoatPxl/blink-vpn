@@ -58,5 +58,16 @@ aws-credential-types = "1.2.10"
 # provider responses are untrusted input (AGENTS.md §6).
 quick-xml = { version = "0.39.4", features = ["serialize"] }
 
+# QR encoding for device peer configs. A QR is the only import path the official WireGuard mobile
+# apps offer, so this is what makes a phone able to use a provisioned server at all.
+#
+# Pure Rust, no C dependencies, and default features are off because only the module matrix is
+# wanted — no image backend, no font, no PNG writer. Alternatives considered: the npm qrcode
+# package (rejected — a runtime dependency on a deliberately four-dependency frontend, for logic
+# that has to exist on this side anyway), and hand-rolling (rejected — Reed-Solomon ECC, version
+# selection and mask evaluation are intricate enough that a subtly wrong encoder produces a code
+# that scans on one phone and fails on another).
+qrcode = { version = "0.14", default-features = false }
+
 [dev-dependencies]
 mockito = "1"
