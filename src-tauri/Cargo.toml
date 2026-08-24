@@ -53,10 +53,21 @@ aws-sigv4 = "1.3.6"
 # Supplies the `Credentials` type that `aws-sigv4`'s signing params require. Not a separate design
 # decision — it is how the crate above takes a key pair.
 aws-credential-types = "1.2.10"
-# The EC2 Query API answers in XML and offers no JSON protocol. SSM and STS are JSON and use the
-# `serde_json` already present. Manual string extraction was the alternative, rejected because
-# provider responses are untrusted input (AGENTS.md §6).
-quick-xml = { version = "0.39.4", features = ["serialize"] }
+# Google service-account authentication for the GCE adapter, and nothing else.
+#
+# GCE has no static-credential scheme: the app must self-sign a JWT with the service account's RSA
+# key and exchange it for a short-lived access token. RS256 means PKCS#8/PEM parsing plus RSA
+# PKCS#1 v1.5 signing over SHA-256.
+#
+# Deliberately *not* an async Google SDK (`google-cloud-*`): those are async-only, and every
+# command runs on the blocking pool — driving one from there reintroduces the "cannot drop a
+# runtime" panic described above. Signing is pure computation and composes with the blocking client.
+#
+# Hand-rolling over `rsa`/`sha2`/`pkcs8` was the alternative, rejected on the same grounds as
+# hand-rolled SigV4: a signing mistake surfaces only as an opaque `invalid_grant`, and it would
+# still add three crates instead of one. Pinned to 9.x, which respects this crate's MSRV and signs
+# through `ring` 0.17 — already in the tree via `reqwest`'s rustls, so no second crypto backend.
+jsonwebtoken = "9.3"
 
 # QR encoding for device peer configs. A QR is the only import path the official WireGuard mobile
 # apps offer, so this is what makes a phone able to use a provisioned server at all.

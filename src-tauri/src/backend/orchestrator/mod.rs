@@ -5963,6 +5963,193 @@ mod tests {
     println!("=== instance destroyed; this config is kept only as a record ===\n");
   }
 
+  /// The full backend path against a real Google Compute Engine instance.
+  ///
+  /// **Creates billable resources** — an instance *and* its external IPv4, billed hourly since
+  /// February 2024 — destroyed on every exit path, with the assertions running only after teardown
+  /// so a failure cannot strand them. Needs `GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE`, a **path**
+  /// to the downloaded JSON key file rather than its contents: a multi-KB JSON blob in an
+  /// environment variable is hostile to quote on Windows. `GOATSTARE_GCE_TEST_ZONE` overrides the
+  /// default zone.
+  ///
+  /// Like EC2, GCE leaves *two* resources behind rather than one: the instance and the firewall
+  /// rule opened for it. The boot disk is `autoDelete`, so it goes with the instance — a disk left
+  /// behind is the classic way a "deleted" GCE node keeps costing money.
+  #[test]
+  #[ignore = "Creates a real, billable GCE instance; needs GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE"]
+  fn real_gce_full_backend_path_produces_a_connect_config() {
+    use crate::backend::provider::{GceProviderAdapter, ProviderCredential};
+    use crate::backend::wireguard::{build_client_config, ClientConfigParams};
+
+    let key_path = match std::env::var("GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE") {
+      Ok(path) if !path.trim().is_empty() => path,
+      _ => {
+        eprintln!("GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE is not set; skipping.");
+        return;
+      }
+    };
+
+    let service_account_json = match std::fs::read_to_string(&key_path) {
+      Ok(contents) if !contents.trim().is_empty() => contents,
+      _ => {
+        eprintln!("Could not read a service account key from {key_path}; skipping.");
+        return;
+      }
+    };
+
+    let zone = std::env::var("GOATSTARE_GCE_TEST_ZONE")
+      .ok()
+      .filter(|value| !value.trim().is_empty())
+      .unwrap_or_else(|| "us-central1-a".to_string());
+
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_secs())
+      .unwrap_or(0);
+
+    let db = Database::new(test_db_path(&format!("real_gce_{suffix}")));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    // Migration 0023 seeds this provider row.
+    const GCE_PROVIDER_ID: &str = "provider-gce";
+    let credential = ProviderCredential::from_fields([(
+      "service_account_json".to_string(),
+      service_account_json,
+    )]);
+    let token_ref = secure_storage
+      .store_provider_credential(GCE_PROVIDER_ID, &credential.to_stored_value())
+      .expect("credential should store");
+    db.update_provider_token_ref(GCE_PROVIDER_ID, Some(&token_ref))
+      .expect("token ref should persist");
+
+    let providers = ProviderRegistry::from_adapter(Arc::new(GceProviderAdapter::new()));
+    let orchestrator = Orchestrator::new();
+    let bootstrap = Bootstrap::new();
+    let wireguard = WireGuardManager::new();
+
+    let node_id = format!("node-gce-{suffix}");
+    let created = orchestrator.create_vpn_node_to_ready(
+      &providers,
+      &bootstrap,
+      &db,
+      &secure_storage,
+      &CreateVpnNodeRequest {
+        node_id: node_id.clone(),
+        provider_id: GCE_PROVIDER_ID.to_string(),
+        node_name: format!("goatstare-e2e-{suffix}"),
+        region: zone.clone(),
+        plan_key: "e2-micro".to_string(),
+      },
+    );
+
+    // Everything needed for assertions is gathered while the node still exists, then teardown runs
+    // before anything is asserted. A panic in between would leave an instance billing.
+    let findings = created.as_ref().ok().map(|created| {
+      let node = db
+        .get_vpn_node(&node_id)
+        .ok()
+        .flatten()
+        .expect("node row should exist");
+
+      let desktop = desktop_peer(&db, &node_id);
+      let client_config = desktop
+        .as_ref()
+        .and_then(|peer| {
+          secure_storage
+            .get_client_private_key(&peer.client_private_key_ref)
+            .ok()
+            .flatten()
+        })
+        .and_then(|private_key| {
+          build_client_config(&ClientConfigParams {
+            private_key,
+            client_address_cidr: desktop
+              .as_ref()
+              .map(|peer| peer.client_address_cidr.clone())
+              .unwrap_or_default(),
+            dns_server: None,
+            server_public_key: created.server_public_key.clone(),
+            server_endpoint_ip: node.public_ipv4.clone().unwrap_or_default(),
+            server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
+            allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+            persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+            preshared_key: desktop.as_ref().and_then(|peer| peer.preshared_key.clone()),
+            mtu: node.client_mtu,
+          })
+          .ok()
+        });
+
+      (node, created.server_public_key.clone(), client_config)
+    });
+
+    // Teardown first, unconditionally. This also removes the firewall rule.
+    let cleanup = orchestrator.force_cleanup_vpn_node(
+      &providers,
+      &wireguard,
+      &db,
+      &secure_storage,
+      &node_id,
+    );
+
+    let created =
+      created.unwrap_or_else(|error| panic!("node creation should reach Ready: {error:?}"));
+    let (node, server_public_key, client_config) =
+      findings.expect("findings should exist when creation succeeded");
+
+    let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
+    assert!(
+      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      "the instance and its firewall rule must be destroyed, or they keep billing: {cleanup:?}"
+    );
+
+    assert_eq!(node.lifecycle_status, NodeLifecycleStatus::Ready);
+    assert!(!created.server_public_key.trim().is_empty());
+
+    // The node id carries the zone, because status, exists and delete need it to address the
+    // instance and the trait does not pass one.
+    let external_ref = node.external_ref.clone().expect("an external_ref should be recorded");
+    assert!(
+      external_ref.starts_with(&format!("{zone}/")),
+      "the external_ref should be '<zone>/<instance-name>', got {external_ref}"
+    );
+
+    let endpoint = node.public_ipv4.clone().expect("a public IPv4 should be recorded");
+    assert!(
+      !endpoint_is_locally_scoped(&endpoint),
+      "a GCE endpoint should be publicly routable, got {endpoint}"
+    );
+    assert_eq!(node.endpoint_port, Some(DEFAULT_WIREGUARD_PORT));
+
+    // GCE NICs run at 1460, so the adapter's MTU hint must reach the node row — without it a
+    // tunnel here connects and then stalls on large transfers.
+    assert_eq!(
+      node.client_mtu,
+      Some(1380),
+      "the GCE MTU hint must be captured at provision time"
+    );
+
+    let config = client_config.expect("a client config should render");
+    assert!(config.contains("[Peer]"));
+    assert!(config.contains(&format!("PublicKey = {server_public_key}")));
+    assert!(config.contains(&format!("Endpoint = {endpoint}:{DEFAULT_WIREGUARD_PORT}")));
+    assert!(config.contains("MTU = 1380"), "the MTU must reach the config: {config}");
+    assert!(
+      config.contains("AllowedIPs = 0.0.0.0/0"),
+      "full tunnel must survive for a public endpoint: {config}"
+    );
+    assert!(
+      config.contains("PresharedKey = "),
+      "the desktop peer's preshared key must reach the config: {config}"
+    );
+
+    let path = std::env::temp_dir().join(format!("goatstare-gce-{suffix}.conf"));
+    std::fs::write(&path, config.replace("\r\n", "\n")).expect("config should be writable");
+    println!("\n=== GCE client config: {} ===", path.display());
+    println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
+    println!("=== instance and firewall rule destroyed; this config is kept only as a record ===\n");
+  }
+
   /// The production path, proven by an actual handshake against a real droplet.
   ///
   /// **Creates a billable resource**, destroyed on every exit path. Needs

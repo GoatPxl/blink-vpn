@@ -3,6 +3,8 @@ pub mod digitalocean_regions;
 pub mod docker;
 pub mod ec2;
 pub mod ec2_regions;
+pub mod gce;
+pub mod gce_regions;
 pub mod linode;
 pub mod linode_regions;
 pub mod retry;
@@ -28,6 +30,10 @@ pub use digitalocean::{
 use digitalocean::{DigitalOceanApiClient, DigitalOceanError};
 use docker::DockerProviderAdapter;
 use ec2::{AwsCredentials, DEFAULT_EC2_REGION, Ec2ApiClient, Ec2Config};
+use gce::{
+  GceApiClient, GceConfig, GceError, ServiceAccountKey, GCE_CLIENT_MTU, GCE_TOKEN_URL,
+  GCE_USER_DATA_LIMIT_BYTES,
+};
 use linode::{
   CreateLinodeRequest, LinodeApiClient, LinodeConfig, LinodeError, LinodeMetadata,
   LINODE_USER_DATA_LIMIT_BYTES,
@@ -1054,6 +1060,587 @@ impl ProviderAdapter for LinodeProviderAdapter {
   }
 }
 
+/// Machine types offered for a GoatStare node on GCE, cheapest first.
+///
+/// Google's Cloud Billing Catalog API prices compute by SKU — a large catalogue that has to be
+/// reassembled into a per-machine-type figure, which is a heavyweight dependency for three rows.
+/// These are on-demand Linux list prices in `us-central1`, reported with `estimated: true` — what
+/// that flag exists for. Availability is still checked live per zone, so a type a zone cannot
+/// launch is never offered.
+///
+/// `monthly_usd` includes the external IPv4 charge (~$2.90/mo at $0.004/hour, billed since
+/// February 2024), because an instance without one is unreachable and quoting the machine alone
+/// would understate the real bill.
+const GCE_PLAN_SPECS: &[GcePlanSpec] = &[
+  GcePlanSpec {
+    machine_type: "e2-micro",
+    label: "e2-micro (2 shared vCPU, 1 GB)",
+    memory_mb: 1024,
+    vcpus: 2,
+    monthly_usd: 9.75,
+    hourly_usd: 0.013,
+  },
+  GcePlanSpec {
+    machine_type: "e2-small",
+    label: "e2-small (2 shared vCPU, 2 GB)",
+    memory_mb: 2048,
+    vcpus: 2,
+    monthly_usd: 16.55,
+    hourly_usd: 0.0227,
+  },
+  GcePlanSpec {
+    machine_type: "e2-medium",
+    label: "e2-medium (2 shared vCPU, 4 GB)",
+    memory_mb: 4096,
+    vcpus: 2,
+    monthly_usd: 30.14,
+    hourly_usd: 0.0413,
+  },
+];
+
+struct GcePlanSpec {
+  machine_type: &'static str,
+  label: &'static str,
+  memory_mb: u64,
+  vcpus: u64,
+  monthly_usd: f64,
+  hourly_usd: f64,
+}
+
+/// GCE instance names: lowercase, `[a-z]([-a-z0-9]{0,61}[a-z0-9])?`.
+///
+/// A uuid suffix is appended because the name *is* the instance's identity within a project and
+/// zone — two nodes a user calls "Primary Node" must not collide, and GCE rejects the second
+/// rather than disambiguating it.
+fn sanitize_gce_instance_name(raw: &str) -> String {
+  let mut sanitized = String::new();
+  let mut last_was_separator = false;
+
+  for character in raw.trim().chars() {
+    if character.is_ascii_alphanumeric() {
+      sanitized.push(character.to_ascii_lowercase());
+      last_was_separator = false;
+    } else if !last_was_separator {
+      sanitized.push('-');
+      last_was_separator = true;
+    }
+  }
+
+  let trimmed = sanitized.trim_matches('-');
+  // A name must start with a letter, so a leading digit gets a stem rather than being dropped.
+  let stem = if trimmed.is_empty() || trimmed.starts_with(|c: char| c.is_ascii_digit()) {
+    format!("goatstare-{trimmed}")
+  } else {
+    trimmed.to_string()
+  };
+
+  let suffix = uuid::Uuid::new_v4().simple().to_string();
+  // 63 total, less the 9 the suffix and its separator take.
+  let bounded: String = stem.chars().take(54).collect();
+
+  format!("{}-{}", bounded.trim_end_matches('-'), &suffix[..8])
+}
+
+/// The per-node firewall rule name, derived from the instance name so teardown can find it without
+/// storing a second identifier.
+fn gce_firewall_rule_name(instance_name: &str) -> String {
+  let bounded: String = instance_name.chars().take(59).collect();
+  format!("{bounded}-wg")
+}
+
+pub struct GceProviderAdapter {
+  client: GceApiClient,
+  config: GceConfig,
+}
+
+impl GceProviderAdapter {
+  /// Infallible by construction, following the EC2 and Linode adapters.
+  pub fn new() -> Self {
+    Self::for_base_urls("https://compute.googleapis.com", GCE_TOKEN_URL)
+  }
+
+  /// Construct against specific base URLs so tests can point both the compute API and the token
+  /// endpoint at one mock server.
+  #[cfg(test)]
+  fn with_base_url(base_url: &str) -> Self {
+    Self::for_base_urls(base_url, &format!("{}/token", base_url.trim_end_matches('/')))
+  }
+
+  fn for_base_urls(compute_base_url: &str, token_url: &str) -> Self {
+    let config = GceConfig::defaults();
+    let client = GceApiClient::new_with_timeout(
+      compute_base_url,
+      token_url,
+      RetryPolicy::cloud_default(),
+      config.request_timeout,
+    )
+    .unwrap_or_else(|_| {
+      GceApiClient::new_with_timeout(
+        compute_base_url,
+        token_url,
+        RetryPolicy::cloud_default(),
+        Duration::from_secs(20),
+      )
+      .expect("gce client should build with default timeout")
+    });
+
+    Self { client, config }
+  }
+
+  /// The service account key out of the stored credential.
+  ///
+  /// One field holds the whole downloaded JSON key file, and everything else — project id, client
+  /// email, the signing key — is read out of it. Asking separately for a project id that is
+  /// already in the file invites a mismatch that surfaces as a 404 on a project that does exist.
+  fn service_account(stored: &str) -> Result<ServiceAccountKey, ProviderAdapterError> {
+    let credential = ProviderCredential::parse(stored);
+    let raw = credential.require(GCE_CREDENTIAL_KEY)?;
+
+    ServiceAccountKey::parse(raw).map_err(|source| ProviderAdapterError::Unsupported {
+      detail: format!("{source} Re-save the credential in Settings."),
+    })
+  }
+
+  /// GCE addresses an instance by zone and name, and the trait's status, exists and delete methods
+  /// carry no zone — so it travels inside the node id, as EC2 does with its region.
+  fn join_node_id(zone: &str, instance_name: &str) -> String {
+    format!("{zone}/{instance_name}")
+  }
+
+  fn split_node_id(node_id: &str) -> Result<(String, String), ProviderAdapterError> {
+    node_id
+      .trim()
+      .split_once('/')
+      .filter(|(zone, name)| !zone.trim().is_empty() && !name.trim().is_empty())
+      .map(|(zone, name)| (zone.trim().to_string(), name.trim().to_string()))
+      .ok_or_else(|| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "'{node_id}' is not a Google Compute Engine node reference. Expected '<zone>/<instance-name>'; the node record may belong to another provider."
+        ),
+      })
+  }
+
+  /// Remove resources this call created but can no longer return, folding every outcome into the
+  /// error the caller sees.
+  ///
+  /// Two resources, so two ways to leak. A failed delete is never swallowed (AGENTS.md §8): what
+  /// survives is named, so the user can remove it rather than paying for something invisible.
+  fn abandon_instance(
+    &self,
+    key: &ServiceAccountKey,
+    zone: &str,
+    instance_name: &str,
+    firewall_rule: &str,
+    detail: &str,
+    cause: GceError,
+  ) -> ProviderAdapterError {
+    let mut leftovers = Vec::new();
+
+    if let Err(error) = self.client.delete_instance(key, zone, instance_name) {
+      leftovers.push(format!(
+        "instance '{instance_name}' in {zone} could NOT be deleted and may still be billing ({error})"
+      ));
+    }
+
+    if let Err(error) = self.client.delete_firewall_rule(key, firewall_rule) {
+      leftovers.push(format!("firewall rule '{firewall_rule}' could NOT be removed ({error})"));
+    }
+
+    if leftovers.is_empty() {
+      ProviderAdapterError::api(
+        format!("{detail} The instance and its firewall rule were removed, so nothing is still billing."),
+        cause,
+      )
+    } else {
+      ProviderAdapterError::api(
+        format!(
+          "{detail} Clean up in the Google Cloud console: {}.",
+          leftovers.join("; ")
+        ),
+        cause,
+      )
+    }
+  }
+}
+
+/// The single credential field: the whole service account key file.
+const GCE_CREDENTIAL_KEY: &str = "service_account_json";
+
+impl ProviderAdapter for GceProviderAdapter {
+  fn provider_name(&self) -> &'static str {
+    "gce"
+  }
+
+  fn credential_fields(&self) -> Vec<CredentialField> {
+    vec![CredentialField {
+      key: GCE_CREDENTIAL_KEY.to_string(),
+      label: "Service account key (JSON)".to_string(),
+      placeholder: "{\"type\": \"service_account\", ...}".to_string(),
+      secret: true,
+      help: Some(
+        "Paste the whole JSON key file for a service account with the Compute Admin role. The project is read from the file. The project needs billing enabled and the Compute Engine API turned on."
+          .to_string(),
+      ),
+    }]
+  }
+
+  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
+    let key = Self::service_account(token)?;
+
+    // Reading the project proves three things at once: the key signs, the Compute Engine API is
+    // enabled, and the service account can actually see the project it names.
+    self
+      .client
+      .get_project(&key)
+      .map_err(|source| ProviderAdapterError::api("Google project lookup failed.", source))?;
+
+    // `Account` is DigitalOcean-shaped and reused as the neutral validation result; the fields are
+    // filled with the closest GCE equivalent. Replacing this type is tracked separately.
+    Ok(Account {
+      uuid: key.project_id.clone(),
+      email: key.client_email.clone(),
+      status: "active".to_string(),
+    })
+  }
+
+  fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError> {
+    let key = Self::service_account(token)?;
+    let zones = self
+      .client
+      .list_zones(&key)
+      .map_err(|source| ProviderAdapterError::api("Google zone catalog request failed.", source))?;
+
+    // The trait's "region" is a GCE *zone*: an instance is created in one, and mapping regions here
+    // would leave the adapter picking a zone on the user's behalf.
+    let mut slugs = BTreeSet::new();
+    for zone in zones
+      .into_iter()
+      .filter(|zone| zone.status.eq_ignore_ascii_case("UP") && !zone.name.trim().is_empty())
+    {
+      slugs.insert(zone.name);
+    }
+
+    Ok(slugs.iter().map(|slug| self.describe_region(slug)).collect())
+  }
+
+  fn describe_region(&self, slug: &str) -> ProviderRegion {
+    gce_regions::describe_region(slug)
+  }
+
+  fn list_plan_pricing(
+    &self,
+    token: &str,
+    region: &str,
+  ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError> {
+    let key = Self::service_account(token)?;
+    let zone = if region.trim().is_empty() {
+      self.config.zone.to_string()
+    } else {
+      region.trim().to_string()
+    };
+
+    // Prices are curated, but availability is not: a zone that cannot launch a type must never
+    // offer it, and which types a zone has is genuinely per-zone.
+    let offered = self
+      .client
+      .list_machine_types(&key, &zone)
+      .map_err(|source| {
+        ProviderAdapterError::api("Google machine type availability request failed.", source)
+      })?
+      .into_iter()
+      .map(|machine_type| machine_type.name)
+      .collect::<BTreeSet<_>>();
+
+    let fetched_at_epoch_seconds =
+      match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(value) => value.as_secs().to_string(),
+        Err(_) => "0".to_string(),
+      };
+
+    Ok(
+      GCE_PLAN_SPECS
+        .iter()
+        .filter(|spec| offered.contains(spec.machine_type))
+        .map(|spec| ProviderPlanPricing {
+          plan_key: spec.machine_type.to_string(),
+          plan_label: spec.label.to_string(),
+          size_slug: spec.machine_type.to_string(),
+          region: zone.clone(),
+          memory_mb: spec.memory_mb,
+          vcpus: spec.vcpus,
+          disk_gb: self.config.boot_disk_gb,
+          // Google bills egress per GB with no bundled allowance, so there is no transfer figure
+          // to quote. Reporting 0 rather than inventing one keeps the note the honest part.
+          transfer_tb: 0.0,
+          transfer_note:
+            "Egress is billed per GB with no included allowance, and the external IPv4 is billed hourly. Both are already in this estimate's monthly figure."
+              .to_string(),
+          monthly_usd: spec.monthly_usd,
+          hourly_usd: spec.hourly_usd,
+          estimated: true,
+          source_timestamp: fetched_at_epoch_seconds.clone(),
+        })
+        .collect(),
+    )
+  }
+
+  fn init_delivery(&self) -> InitDelivery {
+    InitDelivery::CloudInit
+  }
+
+  fn client_mtu_hint(&self) -> Option<u16> {
+    // GCE NICs run at 1460, so WireGuard's default 1420 tunnel MTU is 40 bytes too large.
+    Some(GCE_CLIENT_MTU)
+  }
+
+  fn create_node(
+    &self,
+    token: &str,
+    node_name: &str,
+    region: &str,
+    size_slug: &str,
+    init_payload: &str,
+  ) -> Result<ProvisionedNode, ProviderAdapterError> {
+    // GCE takes metadata values verbatim — no base64 step — so the limit applies to the rendered
+    // script as it stands.
+    if init_payload.len() > GCE_USER_DATA_LIMIT_BYTES {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "The bootstrap payload is {} bytes, over Google's {GCE_USER_DATA_LIMIT_BYTES}-byte metadata value limit.",
+          init_payload.len()
+        ),
+      });
+    }
+
+    let key = Self::service_account(token)?;
+    let zone = if region.trim().is_empty() {
+      self.config.zone.to_string()
+    } else {
+      region.trim().to_string()
+    };
+    let machine_type = if size_slug.trim().is_empty() {
+      self.config.machine_type.to_string()
+    } else {
+      size_slug.trim().to_string()
+    };
+
+    // A project whose default network was deleted cannot launch into one. Finding that out from a
+    // failed insert produces a far worse message than saying so here.
+    if !self
+      .client
+      .default_network_exists(&key)
+      .map_err(|source| ProviderAdapterError::api("Google default network lookup failed.", source))?
+    {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Project '{}' has no 'default' VPC network, so this app cannot launch an instance into it. Recreate the default network, or use a different project.",
+          key.project_id
+        ),
+      });
+    }
+
+    let instance_name = sanitize_gce_instance_name(node_name);
+    let firewall_rule = gce_firewall_rule_name(&instance_name);
+
+    // The default network passes no UDP 51820, so without this rule the instance boots, bootstraps
+    // correctly, and refuses every handshake. Created first: nothing is billing yet if it fails.
+    self
+      .client
+      .create_firewall_rule(&key, &firewall_rule, &instance_name, DEFAULT_WIREGUARD_PORT)
+      .map_err(|source| {
+        ProviderAdapterError::api("Google firewall rule create call failed.", source)
+      })?;
+
+    let inserted = self.client.insert_instance(
+      &key,
+      &zone,
+      &instance_name,
+      &machine_type,
+      self.config.image_family,
+      self.config.boot_disk_gb,
+      &instance_name,
+      init_payload,
+    );
+
+    if let Err(source) = inserted {
+      // Nothing is billing yet, but the rule would linger and block a retry using the same name.
+      let cleanup = self.client.delete_firewall_rule(&key, &firewall_rule);
+      return Err(match cleanup {
+        Ok(()) => ProviderAdapterError::api("Google instance insert call failed.", source),
+        Err(error) => ProviderAdapterError::api(
+          format!(
+            "Google instance insert call failed, and firewall rule '{firewall_rule}' could NOT be removed — delete it in the Google Cloud console. Cleanup failure: {error}"
+          ),
+          source,
+        ),
+      });
+    }
+
+    // Past this line a billable instance exists. The orchestrator's rollback only fires once
+    // `create_node` has *returned* a node id, so a failure from here on must clean up itself.
+    let running = match self.client.wait_for_instance_running(
+      &key,
+      &zone,
+      &instance_name,
+      self.config.poll_interval,
+      self.config.poll_max_attempts,
+      self.config.instance_ready_timeout,
+    ) {
+      Ok(running) => running,
+      Err(source) => {
+        return Err(self.abandon_instance(
+          &key,
+          &zone,
+          &instance_name,
+          &firewall_rule,
+          "Google instance never reached RUNNING with an external address.",
+          source,
+        ));
+      }
+    };
+
+    let public_ipv4 = match running.external_ipv4() {
+      Some(public_ipv4) => public_ipv4,
+      None => {
+        return Err(self.abandon_instance(
+          &key,
+          &zone,
+          &instance_name,
+          &firewall_rule,
+          "Running Google instance exposed no external IPv4.",
+          GceError::NotFound {
+            action: "create_node",
+            detail: "The instance's access config carried no natIP.".to_string(),
+          },
+        ));
+      }
+    };
+
+    Ok(ProvisionedNode {
+      node_id: Self::join_node_id(&zone, &instance_name),
+      public_ipv4,
+      endpoint_port: DEFAULT_WIREGUARD_PORT,
+    })
+  }
+
+  /// Readiness is "the instance is RUNNING and has an external IPv4".
+  ///
+  /// Nothing is read off the server: the server keypair was generated locally and baked into the
+  /// payload, so its public key is already known here (AGENTS.md §2).
+  fn wait_for_bootstrap_ready(
+    &self,
+    token: &str,
+    request: &BootstrapWaitRequest,
+  ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
+    let key = Self::service_account(token)?;
+    let (zone, instance_name) = Self::split_node_id(&request.node_id)?;
+
+    let instance = self
+      .client
+      .get_instance(&key, &zone, &instance_name)
+      .map_err(|source| {
+        ProviderAdapterError::api(
+          "Could not confirm Google instance state before completing provisioning.",
+          source,
+        )
+      })?;
+
+    if !instance.status.eq_ignore_ascii_case("RUNNING") {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Google instance is '{}' rather than RUNNING; provisioning cannot complete.",
+          instance.status
+        ),
+      });
+    }
+
+    let public_ipv4 = if request.endpoint_ip.trim().is_empty() {
+      instance
+        .external_ipv4()
+        .ok_or_else(|| ProviderAdapterError::Unsupported {
+          detail: "Running Google instance exposed no external IPv4.".to_string(),
+        })?
+    } else {
+      request.endpoint_ip.clone()
+    };
+
+    Ok(BootstrapOutputContract {
+      server_endpoint_ip: public_ipv4,
+      // Echoed from what the caller generated and baked into the payload, not read back.
+      server_public_key: request.server_keypair.public_key.clone(),
+      listen_port: DEFAULT_WIREGUARD_PORT,
+    })
+  }
+
+  fn node_status(
+    &self,
+    token: &str,
+    node_id: &str,
+  ) -> Result<ProviderNodeStatus, ProviderAdapterError> {
+    let key = Self::service_account(token)?;
+    let (zone, instance_name) = Self::split_node_id(node_id)?;
+
+    match self.client.get_instance(&key, &zone, &instance_name) {
+      Ok(instance) => Ok(match instance.status.to_ascii_uppercase().as_str() {
+        "PROVISIONING" | "STAGING" => ProviderNodeStatus::New,
+        "RUNNING" => ProviderNodeStatus::Active,
+        "STOPPING" | "STOPPED" | "TERMINATED" | "SUSPENDING" | "SUSPENDED" => {
+          ProviderNodeStatus::Off
+        }
+        _ => ProviderNodeStatus::Unknown,
+      }),
+      Err(GceError::NotFound { .. }) => Ok(ProviderNodeStatus::Deleted),
+      Err(source) => Err(ProviderAdapterError::api(
+        "Google instance status check failed.",
+        source,
+      )),
+    }
+  }
+
+  fn node_exists(&self, token: &str, node_id: &str) -> Result<bool, ProviderAdapterError> {
+    let key = Self::service_account(token)?;
+    let (zone, instance_name) = Self::split_node_id(node_id)?;
+
+    match self.client.get_instance(&key, &zone, &instance_name) {
+      Ok(_) => Ok(true),
+      Err(GceError::NotFound { .. }) => Ok(false),
+      Err(source) => Err(ProviderAdapterError::api(
+        "Google instance existence check failed.",
+        source,
+      )),
+    }
+  }
+
+  /// Delete the instance, then its firewall rule.
+  ///
+  /// The boot disk is `autoDelete`, so it goes with the instance — a disk left behind is the
+  /// classic way a "deleted" GCE node keeps costing money. A rule that cannot be removed is
+  /// reported rather than swallowed; unlike the instance it is not billable, but leaving it silently
+  /// blocks a later node from reusing the name.
+  fn delete_node(&self, token: &str, node_id: &str) -> Result<(), ProviderAdapterError> {
+    let key = Self::service_account(token)?;
+    let (zone, instance_name) = Self::split_node_id(node_id)?;
+
+    self
+      .client
+      .delete_instance(&key, &zone, &instance_name)
+      .map_err(|source| ProviderAdapterError::api("Google instance delete call failed.", source))?;
+
+    let firewall_rule = gce_firewall_rule_name(&instance_name);
+    self
+      .client
+      .delete_firewall_rule(&key, &firewall_rule)
+      .map_err(|source| {
+        ProviderAdapterError::api(
+          format!(
+            "The instance was deleted, but firewall rule '{firewall_rule}' could NOT be removed — delete it in the Google Cloud console."
+          ),
+          source,
+        )
+      })
+  }
+}
+
 /// Instance types offered for a GoatStare node, cheapest first.
 ///
 /// AWS publishes prices through the Pricing API, which is a large region-limited catalogue and a
@@ -1939,6 +2526,7 @@ impl ProviderRegistry {
       Arc::new(digitalocean),
       Arc::new(Ec2ProviderAdapter::new()),
       Arc::new(LinodeProviderAdapter::new()),
+      Arc::new(GceProviderAdapter::new()),
       Arc::new(DockerProviderAdapter::new()),
     ];
 
@@ -2419,11 +3007,12 @@ mod tests {
 
   use super::{
     Account, BootstrapWaitRequest, CredentialField, EC2_USER_DATA_LIMIT_BYTES, Ec2ProviderAdapter,
-    InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY, LINODE_USER_DATA_LIMIT_BYTES,
-    LinodeProviderAdapter, NodeInitRequest, ProviderAdapter, ProviderAdapterError,
-    ProviderCredential, ProviderNodeStatus, ProviderPlanPricing, ProviderRegion, ProviderRegistry,
-    ProvisionedNode, base64_encode, ec2_security_group_name, sanitize_droplet_name,
-    sanitize_ec2_tag_value, sanitize_linode_label,
+    GCE_USER_DATA_LIMIT_BYTES, GceProviderAdapter, InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY,
+    LINODE_USER_DATA_LIMIT_BYTES, LinodeProviderAdapter, NodeInitRequest, ProviderAdapter,
+    ProviderAdapterError, ProviderCredential, ProviderNodeStatus, ProviderPlanPricing,
+    ProviderRegion, ProviderRegistry, ProvisionedNode, base64_encode, ec2_security_group_name,
+    sanitize_droplet_name, sanitize_ec2_tag_value, sanitize_gce_instance_name,
+    sanitize_linode_label,
   };
 
   fn test_db_path(test_name: &str) -> PathBuf {
@@ -3061,6 +3650,375 @@ mod tests {
     );
   }
 
+  /// The GCE credential is one field holding a whole service account key file.
+  fn gce_credential() -> String {
+    ProviderCredential::from_fields([(
+      "service_account_json".to_string(),
+      super::gce::tests::test_service_account_json(),
+    )])
+    .to_stored_value()
+  }
+
+  /// Both the token endpoint and the compute API are served by one mock, the way the EC2 tests
+  /// serve STS, SSM and EC2 from a single server.
+  fn mock_gce_token(server: &mut mockito::Server) -> mockito::Mock {
+    server
+      .mock("POST", "/token")
+      .with_status(200)
+      .with_body(r#"{"access_token":"ya29.test-token","expires_in":3600,"token_type":"Bearer"}"#)
+      .expect_at_least(1)
+      .create()
+  }
+
+  fn mock_gce(
+    server: &mut mockito::Server,
+    method: &str,
+    path: &str,
+    body: &str,
+  ) -> mockito::Mock {
+    server
+      .mock(method, path)
+      .match_header("authorization", mockito::Matcher::Regex("^Bearer .+".to_string()))
+      .with_status(200)
+      .with_body(body)
+      .expect_at_least(1)
+      .create()
+  }
+
+  const GCE_PROJECT_PATH: &str = "/compute/v1/projects/goatstare-test";
+
+  #[test]
+  fn gce_create_node_opens_the_port_and_reports_its_endpoint() {
+    let mut server = mockito::Server::new();
+    let token = mock_gce_token(&mut server);
+    let network = mock_gce(
+      &mut server,
+      "GET",
+      &format!("{GCE_PROJECT_PATH}/global/networks/default"),
+      r#"{"name":"default"}"#,
+    );
+    // The default network passes no UDP 51820, so this rule is what makes the server reachable.
+    let firewall = mock_gce(
+      &mut server,
+      "POST",
+      &format!("{GCE_PROJECT_PATH}/global/firewalls"),
+      r#"{"name":"op-1","status":"RUNNING"}"#,
+    );
+    let insert = server
+      .mock("POST", mockito::Matcher::Regex(format!("{GCE_PROJECT_PATH}/zones/.+/instances$")))
+      .with_status(200)
+      .with_body(r#"{"name":"op-2","status":"RUNNING"}"#)
+      .expect_at_least(1)
+      .create();
+    let get = server
+      .mock("GET", mockito::Matcher::Regex(format!("{GCE_PROJECT_PATH}/zones/.+/instances/.+")))
+      .with_status(200)
+      .with_body(
+        r#"{"status":"RUNNING","networkInterfaces":[{"networkIP":"10.128.0.2",
+          "accessConfigs":[{"type":"ONE_TO_ONE_NAT","natIP":"203.0.113.90"}]}]}"#,
+      )
+      .expect_at_least(1)
+      .create();
+
+    let adapter = GceProviderAdapter::with_base_url(&server.url());
+    let provisioned = adapter
+      .create_node(
+        &gce_credential(),
+        "Primary Node",
+        "europe-west2-a",
+        "e2-micro",
+        "#cloud-config\npackages: [wireguard]\n",
+      )
+      .expect("provisioning should succeed against the mocked Google API");
+
+    token.assert();
+    network.assert();
+    firewall.assert();
+    insert.assert();
+    get.assert();
+
+    // The external address comes from the access config; `networkIP` would be an unreachable
+    // internal 10.x.
+    assert_eq!(provisioned.public_ipv4, "203.0.113.90");
+    assert_eq!(provisioned.endpoint_port, DEFAULT_WIREGUARD_PORT);
+    // The zone travels with the node id, because status, exists and delete need it to address the
+    // instance and the trait does not pass one.
+    assert!(
+      provisioned.node_id.starts_with("europe-west2-a/"),
+      "the node id should carry its zone, got {}",
+      provisioned.node_id
+    );
+  }
+
+  /// A project whose default network was deleted cannot launch, and saying so beats a failed
+  /// insert whose message never mentions the network.
+  #[test]
+  fn gce_create_node_reports_a_missing_default_network_as_a_capability_error() {
+    let mut server = mockito::Server::new();
+    let _token = mock_gce_token(&mut server);
+    let _network = server
+      .mock("GET", &*format!("{GCE_PROJECT_PATH}/global/networks/default"))
+      .with_status(404)
+      .with_body(r#"{"error":{"code":404,"message":"not found"}}"#)
+      .expect_at_least(1)
+      .create();
+
+    let adapter = GceProviderAdapter::with_base_url(&server.url());
+    let error = adapter
+      .create_node(&gce_credential(), "Primary Node", "us-central1-a", "e2-micro", "#cloud-config\n")
+      .expect_err("a missing default network must fail");
+
+    assert!(matches!(error, ProviderAdapterError::Unsupported { .. }));
+    assert!(error.to_string().contains("default"), "was: {error}");
+  }
+
+  /// A failed insert leaves nothing billing, but the firewall rule would linger and block a retry
+  /// that reuses the name.
+  #[test]
+  fn gce_create_node_removes_the_firewall_rule_when_the_insert_fails() {
+    let mut server = mockito::Server::new();
+    let _token = mock_gce_token(&mut server);
+    let _network = mock_gce(
+      &mut server,
+      "GET",
+      &format!("{GCE_PROJECT_PATH}/global/networks/default"),
+      r#"{"name":"default"}"#,
+    );
+    let _firewall = mock_gce(
+      &mut server,
+      "POST",
+      &format!("{GCE_PROJECT_PATH}/global/firewalls"),
+      r#"{"name":"op-1"}"#,
+    );
+    let _insert = server
+      .mock("POST", mockito::Matcher::Regex(format!("{GCE_PROJECT_PATH}/zones/.+/instances$")))
+      .with_status(400)
+      .with_body(r#"{"error":{"code":400,"message":"Invalid machine type"}}"#)
+      .expect_at_least(1)
+      .create();
+    let firewall_delete = server
+      .mock("DELETE", mockito::Matcher::Regex(format!("{GCE_PROJECT_PATH}/global/firewalls/.+")))
+      .with_status(200)
+      .with_body("{}")
+      .expect_at_least(1)
+      .create();
+
+    let adapter = GceProviderAdapter::with_base_url(&server.url());
+    let error = adapter
+      .create_node(&gce_credential(), "Primary Node", "us-central1-a", "e2-micro", "#cloud-config\n")
+      .expect_err("a failed insert must surface");
+
+    // The rule is gone, so a retry can reuse the name.
+    firewall_delete.assert();
+    assert!(error.to_string().contains("insert call failed"), "was: {error}");
+    // Google's own explanation travels in the source chain, which is what diagnostics render.
+    assert!(
+      error_chain_text(&error).contains("Invalid machine type"),
+      "the provider's reason must survive: {}",
+      error_chain_text(&error)
+    );
+  }
+
+  /// The full `Display` text of an error and everything it was caused by. Mirrors what the
+  /// orchestrator's `describe_error_chain` puts in front of a user.
+  fn error_chain_text(error: &dyn std::error::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+      parts.push(cause.to_string());
+      source = cause.source();
+    }
+    parts.join(" | ")
+  }
+
+  /// Delete removes the instance and then its rule. The boot disk is `autoDelete`, so it goes with
+  /// the instance — a disk left behind is the classic way a "deleted" GCE node keeps billing.
+  #[test]
+  fn gce_delete_node_removes_the_instance_and_its_firewall_rule() {
+    let mut server = mockito::Server::new();
+    let _token = mock_gce_token(&mut server);
+    let instance_delete = server
+      .mock("DELETE", mockito::Matcher::Regex(format!("{GCE_PROJECT_PATH}/zones/.+/instances/.+")))
+      .with_status(200)
+      .with_body("{}")
+      .expect_at_least(1)
+      .create();
+    let firewall_delete = server
+      .mock("DELETE", mockito::Matcher::Regex(format!("{GCE_PROJECT_PATH}/global/firewalls/.+")))
+      .with_status(200)
+      .with_body("{}")
+      .expect_at_least(1)
+      .create();
+
+    let adapter = GceProviderAdapter::with_base_url(&server.url());
+    adapter
+      .delete_node(&gce_credential(), "us-central1-a/goatstare-node-abc12345")
+      .expect("delete should succeed");
+
+    instance_delete.assert();
+    firewall_delete.assert();
+  }
+
+  /// A rule that cannot be removed is reported rather than swallowed — it is not billable, but
+  /// leaving it silently blocks a later node from reusing the name.
+  #[test]
+  fn gce_reports_a_firewall_rule_it_could_not_remove() {
+    let mut server = mockito::Server::new();
+    let _token = mock_gce_token(&mut server);
+    let _instance_delete = server
+      .mock("DELETE", mockito::Matcher::Regex(format!("{GCE_PROJECT_PATH}/zones/.+/instances/.+")))
+      .with_status(200)
+      .with_body("{}")
+      .expect_at_least(1)
+      .create();
+    let _firewall_delete = server
+      .mock("DELETE", mockito::Matcher::Regex(format!("{GCE_PROJECT_PATH}/global/firewalls/.+")))
+      .with_status(500)
+      .with_body(r#"{"error":{"code":500,"message":"backend error"}}"#)
+      .expect_at_least(1)
+      .create();
+
+    let adapter = GceProviderAdapter::with_base_url(&server.url());
+    let error = adapter
+      .delete_node(&gce_credential(), "us-central1-a/goatstare-node-abc12345")
+      .expect_err("a failed rule delete must surface");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("could NOT be removed"), "was: {rendered}");
+    assert!(rendered.contains("goatstare-node-abc12345-wg"), "the rule must be named: {rendered}");
+  }
+
+  /// Minting a token per API call would triple every request, so it is cached until it nears
+  /// expiry.
+  #[test]
+  fn gce_reuses_one_access_token_across_calls() {
+    let mut server = mockito::Server::new();
+    // Exactly one mint, however many API calls follow.
+    let token = server
+      .mock("POST", "/token")
+      .with_status(200)
+      .with_body(r#"{"access_token":"ya29.test-token","expires_in":3600}"#)
+      .expect(1)
+      .create();
+    let _project = mock_gce(&mut server, "GET", GCE_PROJECT_PATH, r#"{"name":"goatstare-test"}"#);
+
+    let adapter = GceProviderAdapter::with_base_url(&server.url());
+    let credential = gce_credential();
+    adapter.validate_token(&credential).expect("first call should succeed");
+    adapter.validate_token(&credential).expect("second call should succeed");
+
+    token.assert();
+  }
+
+  #[test]
+  fn gce_validate_token_reports_the_project_and_service_account() {
+    let mut server = mockito::Server::new();
+    let _token = mock_gce_token(&mut server);
+    let _project = mock_gce(&mut server, "GET", GCE_PROJECT_PATH, r#"{"name":"goatstare-test"}"#);
+
+    let adapter = GceProviderAdapter::with_base_url(&server.url());
+    let account = adapter.validate_token(&gce_credential()).expect("validation should succeed");
+
+    assert_eq!(account.uuid, "goatstare-test");
+    assert_eq!(account.email, "goatstare@goatstare-test.iam.gserviceaccount.com");
+  }
+
+  /// A pasted excerpt, or a key for a project the account cannot see, must be named as a
+  /// credential problem rather than surfacing later as a puzzling 404.
+  #[test]
+  fn gce_rejects_a_credential_that_is_not_a_service_account_key() {
+    let credential =
+      ProviderCredential::from_fields([("service_account_json".to_string(), "not json".to_string())])
+        .to_stored_value();
+
+    let error = GceProviderAdapter::new()
+      .validate_token(&credential)
+      .expect_err("garbage must be rejected");
+
+    assert!(matches!(error, ProviderAdapterError::Unsupported { .. }));
+    assert!(error.to_string().contains("Re-save"), "was: {error}");
+  }
+
+  #[test]
+  fn gce_rejects_a_node_reference_that_is_not_its_own() {
+    let error = GceProviderAdapter::new()
+      .delete_node(&gce_credential(), "12345")
+      .expect_err("a bare Linode id must not be accepted");
+
+    assert!(matches!(error, ProviderAdapterError::Unsupported { .. }));
+    assert!(error.to_string().contains("<zone>/<instance-name>"), "was: {error}");
+  }
+
+  #[test]
+  fn gce_sanitizes_instance_names_to_what_the_api_accepts() {
+    let name = sanitize_gce_instance_name("Primary Node");
+    assert!(name.starts_with("primary-node-"), "was: {name}");
+    assert!(name.len() <= 63, "GCE caps instance names at 63 characters: {name}");
+
+    // A name must start with a letter.
+    assert!(sanitize_gce_instance_name("2nd node").starts_with("goatstare-"));
+    assert!(sanitize_gce_instance_name("***").starts_with("goatstare-"));
+    assert!(sanitize_gce_instance_name(&"x".repeat(200)).len() <= 63);
+
+    // The name is the instance's identity within a project and zone, so two nodes the user calls
+    // the same thing must not collide — GCE rejects the second rather than disambiguating it.
+    assert_ne!(
+      sanitize_gce_instance_name("Primary Node"),
+      sanitize_gce_instance_name("Primary Node")
+    );
+  }
+
+  /// GCE NICs run at 1460, so the default 1420 tunnel MTU is 40 bytes too large. The hint is what
+  /// keeps a GCE tunnel from connecting and then stalling on large transfers.
+  #[test]
+  fn gce_asks_client_configs_for_a_smaller_mtu_and_other_providers_do_not() {
+    assert_eq!(GceProviderAdapter::new().client_mtu_hint(), Some(1380));
+    assert_eq!(LinodeProviderAdapter::new().client_mtu_hint(), None);
+    assert_eq!(Ec2ProviderAdapter::new().client_mtu_hint(), None);
+  }
+
+  /// GCE takes metadata verbatim, so its limit applies to the rendered script as it stands.
+  #[test]
+  fn the_rendered_cloud_init_fits_inside_the_gce_metadata_limit() {
+    use crate::backend::bootstrap::{
+      allocate_peer_addresses, Bootstrap, BootstrapParams, BootstrapPeer, DEFAULT_PEER_SLOTS,
+      DEFAULT_SERVER_INTERFACE_CIDR,
+    };
+    use crate::backend::crypto::keypair::{
+      generate_client_keypair, generate_preshared_key, generate_server_keypair,
+    };
+
+    let server = generate_server_keypair().expect("server keypair should generate");
+    let peers = allocate_peer_addresses(DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_PEER_SLOTS)
+      .expect("the default subnet has room for a full slot complement")
+      .into_iter()
+      .map(|address_cidr| BootstrapPeer {
+        public_key: generate_client_keypair()
+          .expect("client keypair should generate")
+          .public_key,
+        address_cidr,
+        preshared_key: generate_preshared_key().expect("preshared key should generate"),
+      })
+      .collect();
+
+    let artifact = Bootstrap
+      .render_cloud_init(
+        &BootstrapParams {
+          peers,
+          ..BootstrapParams::default()
+        },
+        &server.private_key,
+        &server.public_key,
+      )
+      .expect("cloud-init should render");
+
+    assert!(
+      artifact.init_payload.len() <= GCE_USER_DATA_LIMIT_BYTES,
+      "payload is {} bytes, over Google's {GCE_USER_DATA_LIMIT_BYTES}-byte metadata limit",
+      artifact.init_payload.len()
+    );
+  }
+
   /// An account with no default VPC gets a capability error naming the problem, not a failed launch.
   #[test]
   fn ec2_create_node_reports_a_missing_default_vpc_as_a_capability_error() {
@@ -3550,6 +4508,7 @@ mod tests {
     assert!(registry.node_provider_for_slug("digitalocean").is_some());
     assert!(registry.node_provider_for_slug("aws-ec2").is_some());
     assert!(registry.node_provider_for_slug("linode").is_some());
+    assert!(registry.node_provider_for_slug("gce").is_some());
     assert!(registry.node_provider_for_slug("nimbus-cloud").is_none());
   }
 

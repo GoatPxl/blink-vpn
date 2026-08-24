@@ -259,6 +259,7 @@ Current migration sequence in [src-tauri/migrations](src-tauri/migrations):
 20. Node peer slots *(replaces the single-peer columns on `vpn_nodes` and `tunnels`)*
 21. Peer preshared keys and per-node client MTU
 22. Linode provider seed
+23. Google Compute Engine provider seed
 
 Migration rules:
 

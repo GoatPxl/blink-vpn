@@ -18,6 +18,7 @@ Included provider adapters:
 - DigitalOcean adapter for cloud VPS lifecycle
 - Amazon EC2 adapter for cloud VPS lifecycle
 - Linode adapter for cloud VPS lifecycle
+- Google Compute Engine adapter for cloud VPS lifecycle
 - Docker adapter for local container-backed development workflows
 
 ## System Diagram
@@ -31,6 +32,7 @@ flowchart LR
   NP --> DO[DigitalOcean adapter]
   NP --> EC2[Amazon EC2 adapter]
   NP --> LIN[Linode adapter]
+  NP --> GCE[Google Compute Engine adapter]
   NP --> DKR[Docker adapter]
   ORCH --> DB[(SQLite)]
   ORCH --> SEC[Credential Manager]
@@ -38,6 +40,7 @@ flowchart LR
   DO --> DOAPI[DigitalOcean API]
   EC2 --> AWSAPI[AWS EC2 / SSM / STS APIs]
   LIN --> LINAPI[Linode API v4]
+  GCE --> GCEAPI[Google Compute / OAuth2 APIs]
   DKR --> DKRCLI[Docker CLI]
 ```
 

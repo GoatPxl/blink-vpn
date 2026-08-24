@@ -25,6 +25,7 @@ them down before asserting anything, so a failed assertion cannot strand a dropl
 | Real DigitalOcean | the production path against a live droplet | **billable** |
 | Real Amazon EC2 | the production path against a live instance | **billable** |
 | Real Linode | the production path against a live instance | **billable** |
+| Real Google Compute Engine | the production path against a live instance | **billable** |
 
 ## Required Verification Matrix
 
@@ -39,6 +40,7 @@ them down before asserting anything, so a failed assertion cannot strand a dropl
 | DigitalOcean adapter or cloud-init | `npm run backend:test:do:real` (**billable**) |
 | Amazon EC2 adapter or cloud-init | `npm run backend:test:ec2:real` (**billable**) |
 | Linode adapter or cloud-init | `npm run backend:test:linode:real` (**billable**) |
+| Google Compute Engine adapter or cloud-init | `npm run backend:test:gce:real` (**billable**) |
 
 ## Frontend unit lane
 
@@ -182,6 +184,46 @@ curl -s -H "Authorization: Bearer $GOATSTARE_LINODE_TEST_TOKEN" \
 ```
 
 Every instance this app creates carries the `goatstare` tag.
+
+### Google Compute Engine
+
+```bash
+GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE=/path/to/key.json npm run backend:test:gce:real
+```
+
+`GOATSTARE_GCE_TEST_ZONE` overrides the default `us-central1-a`. The variable holds a **path**, not
+the key itself: a multi-KB JSON blob in an environment variable is hostile to quote on Windows.
+
+The service account needs the Compute Admin role, and the project needs billing enabled and the
+Compute Engine API turned on. Organisation-managed Google accounts often block service-account key
+creation outright (`iam.disableServiceAccountKeyCreation`), in which case this lane cannot run
+without a personal project.
+
+**Creates real, billable resources** — an `e2-micro` *and* its external IPv4, which Google has
+billed hourly since February 2024. The test destroys both on every exit path, including panics, and
+asserts only after teardown.
+
+GCE leaves **two** resources behind rather than one: the instance and the firewall rule opened for
+it. The boot disk is created with `autoDelete`, so it goes with the instance — a disk left behind is
+the classic way a "deleted" GCE node keeps costing money. The adapter reports a rule it could not
+remove rather than swallowing it; a leftover rule is not billable, but it blocks a later node from
+reusing the name.
+
+The lane also asserts the **MTU hint** reaches the node row and the rendered config. GCE instance
+NICs run at 1460 rather than 1500, so the default 1420 tunnel MTU is 40 bytes too large — a tunnel
+without the hint connects and then stalls on large transfers, which is the failure mode hardest to
+tell from a slow network.
+
+Confirm nothing is left over if a run is interrupted:
+
+```bash
+gcloud compute instances list --filter="labels.goatstare=managed"
+gcloud compute firewall-rules list --filter="name~'-wg$'"
+```
+
+Expect the exit IP's geolocation to disagree with the zone. Google's published region is where the
+hardware is; geo-IP databases frequently place GCE addresses elsewhere. That is a property of the
+provider, not a bug in the adapter.
 
 ## Environment Notes
 

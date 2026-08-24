@@ -43,6 +43,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (20, include_str!("../../../migrations/0020_node_peers.sql")),
   (21, include_str!("../../../migrations/0021_peer_psk_and_client_mtu.sql")),
   (22, include_str!("../../../migrations/0022_seed_linode_provider.sql")),
+  (23, include_str!("../../../migrations/0023_seed_gce_provider.sql")),
 ];
 
 

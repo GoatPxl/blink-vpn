@@ -50,6 +50,19 @@ pub fn redact_sensitive_text(input: &str) -> String {
   // secret, and seeing which key is in use is a real diagnostic (AGENTS.md §6).
   output = redact_assignment_like(&output, "secret_access_key");
   output = redact_assignment_like(&output, "session_token");
+  // Google's credential is a whole service account key file, so the blob needs covering, as does
+  // the signed JWT sent to the token endpoint. `client_email` and `project_id` are deliberately
+  // left readable for the same reason as `access_key_id`: they name which credential is in use,
+  // which is a diagnostic rather than a secret.
+  output = redact_assignment_like(&output, "service_account_json");
+  output = redact_assignment_like(&output, "assertion");
+  // The RSA key inside that file is matched by *content*, not by field name.
+  //
+  // Google names it `private_key` — the same key WireGuard client configs use for material this
+  // app deliberately does not redact (§6). Redacting that name would blank the one line worth
+  // reading when a tunnel comes up wrong. The two are unambiguous by shape instead: a service
+  // account key is PEM, a WireGuard key is a bare base64 blob and never carries PEM markers.
+  output = redact_pem_private_keys(&output);
   // WireGuard key material is deliberately absent from this list. A server lives for hours and is
   // then destroyed, and its keys die with it, so a client config is not a secret here (AGENTS.md
   // §6). Redacting the key blanked the one line most worth reading when a tunnel came up wrong,
@@ -82,6 +95,66 @@ fn redact_bearer_tokens(input: &str) -> String {
     output
   } else {
     output.trim_end_matches('\n').to_string()
+  }
+}
+
+/// Replace the body of any PEM private key block, keeping the markers so the reader can see that
+/// something was removed and what kind of thing it was.
+///
+/// Matched on the `BEGIN`/`END` markers rather than a field name because the same field name
+/// (`private_key`) carries WireGuard material this app declassifies on purpose. Handles the
+/// escaped form too — a key file stored as a JSON *string* has its newlines written `\n`, and the
+/// markers survive that intact.
+fn redact_pem_private_keys(input: &str) -> String {
+  const BEGIN: &str = "-----BEGIN";
+  const END: &str = "-----END";
+  const DASHES: &str = "-----";
+
+  let mut output = String::with_capacity(input.len());
+  let mut rest = input;
+
+  loop {
+    let Some(begin) = rest.find(BEGIN) else {
+      output.push_str(rest);
+      return output;
+    };
+
+    let after_begin = &rest[begin..];
+    // The header runs from `-----BEGIN` to the dashes that close it.
+    let Some(header_end) = after_begin[BEGIN.len()..]
+      .find(DASHES)
+      .map(|offset| BEGIN.len() + offset + DASHES.len())
+    else {
+      output.push_str(rest);
+      return output;
+    };
+
+    // Only private-key blocks are secrets; `-----BEGIN CERTIFICATE-----` is a real diagnostic.
+    if !after_begin[..header_end].contains("PRIVATE KEY") {
+      let consumed = begin + header_end;
+      output.push_str(&rest[..consumed]);
+      rest = &rest[consumed..];
+      continue;
+    }
+
+    output.push_str(&rest[..begin]);
+    output.push_str("[REDACTED PRIVATE KEY]");
+
+    // Search for the terminator *past* the header — `-----BEGIN PRIVATE KEY-----` itself ends in
+    // the same dashes, so scanning from the start of the block matches its own opening marker and
+    // leaves the key body in the output.
+    let body = &after_begin[header_end..];
+    let terminated = body.find(END).and_then(|end| {
+      body[end + END.len()..]
+        .find(DASHES)
+        .map(|offset| header_end + end + END.len() + offset + DASHES.len())
+    });
+
+    match terminated {
+      Some(block_end) => rest = &after_begin[block_end..],
+      // An unterminated block is still a key: drop the remainder rather than emitting it.
+      None => return output,
+    }
   }
 }
 
@@ -195,6 +268,59 @@ mod tests {
 
     assert!(output.contains("aGVsbG8gd29ybGQ="), "the key must survive: {output}");
     assert!(output.contains("51820"), "unrelated fields must not be swallowed: {output}");
+  }
+
+  /// A Google service account key is a long-lived credential that can create billable resources,
+  /// so no part of it may reach a log or a diagnostics bundle.
+  #[test]
+  fn redacts_a_google_service_account_key_but_keeps_its_identity() {
+    let input = r#"{"service_account_json": "{\"project_id\": \"goatstare-test\"}", "client_email": "vpn@goatstare-test.iam.gserviceaccount.com", "project_id": "goatstare-test"}"#;
+    let output = redact_sensitive_text(input);
+
+    assert!(!output.contains("\\\"project_id\\\""), "the key blob leaked: {output}");
+    assert!(output.contains("[REDACTED]"));
+    // Which credential is in use is a diagnostic, not a secret — the `access_key_id` precedent.
+    assert!(
+      output.contains("vpn@goatstare-test.iam.gserviceaccount.com"),
+      "the service account identity should survive: {output}"
+    );
+    assert!(
+      output.contains("\"project_id\": \"goatstare-test\""),
+      "the project id should survive: {output}"
+    );
+  }
+
+  /// The RSA key inside a service account file, in the escaped form a JSON-serialized key uses.
+  #[test]
+  fn redacts_a_pem_private_key_in_either_escaped_or_literal_form() {
+    let escaped = r#"{"private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqSECRETBODY\n-----END PRIVATE KEY-----\n"}"#;
+    let output = redact_sensitive_text(escaped);
+    assert!(!output.contains("SECRETBODY"), "the RSA key leaked: {output}");
+    assert!(output.contains("[REDACTED PRIVATE KEY]"), "was: {output}");
+
+    let literal = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKSECRETBODY\n-----END RSA PRIVATE KEY-----";
+    let output = redact_sensitive_text(literal);
+    assert!(!output.contains("SECRETBODY"), "the RSA key leaked: {output}");
+    assert!(output.contains("[REDACTED PRIVATE KEY]"), "was: {output}");
+  }
+
+  /// The signed assertion is a bearer credential for the token endpoint until it expires.
+  #[test]
+  fn redacts_the_google_token_assertion() {
+    let input = "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=eyJhbGciOiSECRETJWT";
+    let output = redact_sensitive_text(input);
+
+    assert!(!output.contains("SECRETJWT"), "the assertion leaked: {output}");
+    assert!(output.contains("[REDACTED]"));
+  }
+
+  /// Not every PEM block is a secret, and blanking a certificate would remove a real diagnostic.
+  #[test]
+  fn leaves_a_non_private_pem_block_alone() {
+    let input = "-----BEGIN CERTIFICATE-----\nMIIDPUBLICCERT\n-----END CERTIFICATE-----";
+    let output = redact_sensitive_text(input);
+
+    assert!(output.contains("MIIDPUBLICCERT"), "a certificate is not a secret: {output}");
   }
 
   #[test]

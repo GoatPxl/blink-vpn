@@ -15,14 +15,25 @@ Provider API keys are stored in **Windows Credential Manager**, under the servic
 
 A credential is a **set of named fields**, serialized to a JSON object inside that single entry:
 DigitalOcean and Linode store `api_token`, Amazon EC2 stores `access_key_id` and
-`secret_access_key`. Only the
+`secret_access_key`, and Google Compute Engine stores `service_account_json` — the whole downloaded
+key file as one field, from which the adapter reads the project id, the service account address and
+the RSA signing key. Asking separately for a project id that is already in the file only invites a
+mismatch that surfaces later as a 404 on a project that does exist. Only the
 provider's own adapter interprets them, so the schema never learns that some providers need two
 values. A stored value that is not a JSON object is read as a single `api_token` field, which is how
 credentials saved by earlier versions keep working.
 
-Redaction covers `secret_access_key` and `session_token` alongside `api_token`. `access_key_id` is
-deliberately left readable: it identifies which key is in use, which is a real diagnostic, and it is
-not a secret.
+Redaction covers `secret_access_key`, `session_token`, `service_account_json` and `assertion` (the
+signed JWT sent to Google's token endpoint) alongside `api_token`. `access_key_id`, `client_email`
+and `project_id` are deliberately left readable: they identify which credential is in use, which is
+a real diagnostic, and none of them is a secret.
+
+**The RSA key inside a Google key file is matched by shape, not by field name.** Google calls it
+`private_key` — the same name WireGuard client configs use for material this app deliberately does
+not redact (see below). Redacting that name would blank the one line most worth reading when a
+tunnel comes up wrong. The two are unambiguous by content instead: a service account key is PEM, a
+WireGuard key is a bare base64 blob that never carries PEM markers, so any `BEGIN…PRIVATE KEY`
+block is replaced wherever it appears. Certificates are left intact.
 
 Two qualifications worth stating rather than glossing:
 

@@ -59,6 +59,9 @@ const BUILTIN_EC2_PROVIDER_SLUG: &str = "aws-ec2";
 const BUILTIN_LINODE_PROVIDER_ID: &str = "provider-linode";
 const BUILTIN_LINODE_PROVIDER_NAME: &str = "Linode";
 const BUILTIN_LINODE_PROVIDER_SLUG: &str = "linode";
+const BUILTIN_GCE_PROVIDER_ID: &str = "provider-gce";
+const BUILTIN_GCE_PROVIDER_NAME: &str = "Google Compute Engine";
+const BUILTIN_GCE_PROVIDER_SLUG: &str = "gce";
 const BUILTIN_DOCKER_PROVIDER_ID: &str = "provider-docker";
 const BUILTIN_DOCKER_PROVIDER_NAME: &str = "Docker";
 const BUILTIN_DOCKER_PROVIDER_SLUG: &str = "docker";
@@ -222,6 +225,13 @@ fn ensure_builtin_providers(db: &Database, docker_dev_enabled: bool) -> Result<(
     BUILTIN_LINODE_PROVIDER_ID,
     BUILTIN_LINODE_PROVIDER_NAME,
     BUILTIN_LINODE_PROVIDER_SLUG,
+  )?;
+
+  ensure_provider_present(
+    db,
+    BUILTIN_GCE_PROVIDER_ID,
+    BUILTIN_GCE_PROVIDER_NAME,
+    BUILTIN_GCE_PROVIDER_SLUG,
   )?;
 
   if docker_dev_enabled {
