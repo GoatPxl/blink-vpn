@@ -349,10 +349,18 @@ pub struct AccountEnvelope {
   pub account: Account,
 }
 
+/// DigitalOcean's `GET /v2/account` response.
+///
+/// A wire type, and only that. It was once used as the neutral result of every provider's
+/// credential check, which forced later adapters to lie — an ARN in `email`, an invented
+/// `status: "active"`. The adapter now maps it onto `ProviderIdentity` at its own boundary, which
+/// is where a vendor's field names should stop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
   pub uuid: String,
   pub email: String,
+  /// `active`, `warning` or `locked`. A locked account accepts a valid token and then refuses to
+  /// create a droplet, so this is worth surfacing rather than assuming.
   pub status: String,
 }
 

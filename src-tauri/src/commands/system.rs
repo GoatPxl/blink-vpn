@@ -315,15 +315,12 @@ pub async fn validate_provider_token(provider_id: String, backend: State<'_, Bac
   // Every field is an Arc or a PathBuf, so this is cheap.
   let backend = backend.inner().clone();
   run_blocking(move || {
-  let account = backend
+  let identity = backend
     .provider
     .validate_provider_token(&backend.db, &backend.secure_storage, &provider_id)
     .map_err(CommandError::from)?;
 
-  Ok(format!(
-    "Provider token valid for account {} ({})",
-    account.uuid, account.status
-  ))
+  Ok(format!("Credential valid for {}", identity.describe()))
   })
   .await
 }
@@ -340,7 +337,7 @@ pub async fn provision_provider_node(
   run_blocking(move || {
   let provisioned = backend
     .orchestrator
-    .provision_droplet_for_provider(
+    .provision_node_for_provider(
       &backend.provider,
       &backend.bootstrap,
       &backend.db,

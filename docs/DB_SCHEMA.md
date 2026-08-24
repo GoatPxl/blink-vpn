@@ -165,7 +165,7 @@ belongs to the app, not to any one node.
 
 `detail` is redacted at the **write** boundary, in `ActivityRecorder::record` — nothing redacts on
 read. An `error` outcome records `describe_error_chain`, the flattened `#[source]` chain, rather
-than the outermost message: a droplet rejected for a bad name used to record only "Node creation or
+than the outermost message: a server rejected for a bad name used to record only "Node creation or
 bootstrap setup failed", with the provider's actual complaint attached to the error and printed
 nowhere.
 

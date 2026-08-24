@@ -201,14 +201,36 @@ pub struct CreateClientTunnelResult {
   pub client_public_key: String,
 }
 
+/// What a force-cleanup actually managed to remove.
+///
+/// The two `remote_node_delete_*` booleans are the ones that matter, and they must be read
+/// together: `attempted && !succeeded` means the local row is gone while the server is not, so the
+/// user is still being billed for something the app can no longer see or clean up. Callers must
+/// not report that as success.
+///
+/// These were `remote_droplet_delete_*` — DigitalOcean's word for a virtual machine — which said
+/// "droplet" while deleting EC2 instances, GCE instances and OpenStack servers.
 #[derive(Debug, Clone, Serialize)]
 pub struct ForceCleanupResult {
   pub node_id: String,
   pub correlation_id: String,
   pub local_tunnels_removed: usize,
-  pub remote_droplet_delete_attempted: bool,
-  pub remote_droplet_delete_succeeded: bool,
+  /// Whether the node had a provider reference worth deleting at all.
+  pub remote_node_delete_attempted: bool,
+  /// Whether that delete came back clean. Meaningless unless `attempted`.
+  pub remote_node_delete_succeeded: bool,
   pub node_record_removed: bool,
+}
+
+impl ForceCleanupResult {
+  /// Whether a billable resource survived this cleanup.
+  ///
+  /// The one outcome of this flow that must never render as success: the node row is gone, so
+  /// nothing in the app points at the server any more, and it keeps costing money until the user
+  /// removes it by hand in the provider's console.
+  pub fn remote_resource_may_still_bill(&self) -> bool {
+    self.remote_node_delete_attempted && !self.remote_node_delete_succeeded
+  }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,7 +248,7 @@ pub struct DisconnectTunnelRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ReconcileIssueKind {
   StaleTunnelStatusRepaired,
-  MissingDroplet,
+  MissingProviderNode,
   MissingNodeRuntimeData,
   StartupDependencyUnavailable,
   ProviderCheckFailed,
@@ -447,7 +469,7 @@ impl<'a> ActivityRecorder<'a> {
 
   /// Records the flattened `#[source]` chain rather than the outermost message.
   ///
-  /// A provider rejecting a droplet name used to be stored as only "Node creation or bootstrap
+  /// A provider rejecting a server name used to be stored as only "Node creation or bootstrap
   /// setup failed", with the actual complaint attached to the error and never printed. The whole
   /// point of keeping this history is that the recorded reason is the one you can act on.
   fn failure(&self, stage: &str, error: &dyn std::error::Error) {
@@ -863,36 +885,36 @@ impl Orchestrator {
     })
   }
 
-  pub fn provision_droplet_for_provider(
+  pub fn provision_node_for_provider(
     &self,
     providers: &ProviderRegistry,
     bootstrap: &Bootstrap,
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
-    droplet_name: &str,
+    node_name: &str,
   ) -> Result<ProvisionedNode, OrchestratorError> {
     let server_keypair = generate_server_keypair().map_err(|source| OrchestratorError::Keygen {
-      detail: "Failed to generate WireGuard server keypair for droplet provisioning.".to_string(),
+      detail: "Failed to generate WireGuard server keypair for node provisioning.".to_string(),
       source,
     })?;
 
-    // This lower-level helper provisions a bare droplet without an associated node/tunnel record,
+    // This lower-level helper provisions a bare server without an associated node/tunnel record,
     // so there is nowhere to persist a client private key. Generate a throwaway peer to keep the
     // payload well-formed; real connectable nodes come from `create_vpn_node_to_ready`.
     let client_keypair = generate_client_keypair().map_err(|source| OrchestratorError::Keygen {
-      detail: "Failed to generate WireGuard client keypair for droplet provisioning.".to_string(),
+      detail: "Failed to generate WireGuard client keypair for node provisioning.".to_string(),
       source,
     })?;
 
     let preshared_key = generate_preshared_key().map_err(|source| OrchestratorError::Keygen {
-      detail: "Failed to generate WireGuard preshared key for droplet provisioning.".to_string(),
+      detail: "Failed to generate WireGuard preshared key for node provisioning.".to_string(),
       source,
     })?;
 
     let peers = allocate_peer_addresses(DEFAULT_SERVER_INTERFACE_CIDR, 1)
       .map_err(|source| OrchestratorError::Bootstrap {
-        detail: "Could not allocate a peer address for droplet provisioning.".to_string(),
+        detail: "Could not allocate a peer address for node provisioning.".to_string(),
         source,
       })?
       .into_iter()
@@ -912,7 +934,7 @@ impl Orchestrator {
         peers,
       }, &server_keypair.private_key, &server_keypair.public_key)
       .map_err(|source| OrchestratorError::Bootstrap {
-        detail: "Could not render bootstrap cloud-init for droplet create.".to_string(),
+        detail: "Could not render bootstrap cloud-init for node create.".to_string(),
         source,
       })?;
 
@@ -931,7 +953,7 @@ impl Orchestrator {
       })?;
 
     let request = NodeInitRequest {
-      node_name: droplet_name.to_string(),
+      node_name: node_name.to_string(),
       region: DEFAULT_REGION.to_string(),
       size_slug: DEFAULT_SIZE.to_string(),
       init_payload: artifact.init_payload,
@@ -940,7 +962,7 @@ impl Orchestrator {
     let init_result = node_provider
       .init(&token, &request)
       .map_err(|source| OrchestratorError::Provider {
-        detail: "Provisioning flow failed while creating or activating droplet.".to_string(),
+        detail: "Provisioning flow failed while creating or activating the node.".to_string(),
         source: ProviderFlowError::Adapter {
           detail: "Provider adapter init call failed.".to_string(),
           source,
@@ -1208,16 +1230,16 @@ impl Orchestrator {
     }
     let _ = db.delete_node_peers_for_node(node_id);
 
-    let mut remote_droplet_delete_attempted = false;
-    let mut remote_droplet_delete_succeeded = false;
+    let mut remote_node_delete_attempted = false;
+    let mut remote_node_delete_succeeded = false;
     if let Some(node) = node.as_ref() {
       if let Some(external_ref) = node.external_ref.as_deref() {
         // Every stored external_ref is attempted. This used to be guarded by a `u64` parse, so a
         // node whose provider does not use numeric ids would skip the remote delete *and* report
         // cleanup as successful — leaving a billable resource behind with nothing on screen to
         // say so (AGENTS.md §8).
-        remote_droplet_delete_attempted = true;
-        remote_droplet_delete_succeeded = providers
+        remote_node_delete_attempted = true;
+        remote_node_delete_succeeded = providers
           .delete_provider_node(db, secure_storage, &node.provider_id, external_ref)
           .is_ok();
       }
@@ -1239,21 +1261,34 @@ impl Orchestrator {
     }
 
     log::warn!(
-      "event=vpn_node.force_cleanup.completed correlation_id={} node_id={} local_tunnels_removed={} remote_droplet_delete_attempted={} remote_droplet_delete_succeeded={} node_record_removed={}",
+      "event=vpn_node.force_cleanup.completed correlation_id={} node_id={} local_tunnels_removed={} remote_node_delete_attempted={} remote_node_delete_succeeded={} node_record_removed={}",
       correlation_id,
       node_id,
       local_tunnels_removed,
-      remote_droplet_delete_attempted,
-      remote_droplet_delete_succeeded,
+      remote_node_delete_attempted,
+      remote_node_delete_succeeded,
       node_record_removed
     );
 
     let detail = format!(
-      "local_tunnels_removed={local_tunnels_removed} remote_droplet_delete_attempted={remote_droplet_delete_attempted} remote_droplet_delete_succeeded={remote_droplet_delete_succeeded} node_record_removed={node_record_removed}"
+      "local_tunnels_removed={local_tunnels_removed} remote_node_delete_attempted={remote_node_delete_attempted} remote_node_delete_succeeded={remote_node_delete_succeeded} node_record_removed={node_record_removed}"
     );
-    // A remote delete that was tried and failed leaves a droplet the user is still paying for while
-    // the local row disappears. That is the one outcome of this flow that must not read as success.
-    if remote_droplet_delete_attempted && !remote_droplet_delete_succeeded {
+
+    let result = ForceCleanupResult {
+      node_id: node_id.to_string(),
+      // Cloned rather than moved: `activity` borrows it, and it is still needed below to record
+      // the outcome under the same correlation id.
+      correlation_id: correlation_id.clone(),
+      local_tunnels_removed,
+      remote_node_delete_attempted,
+      remote_node_delete_succeeded,
+      node_record_removed,
+    };
+
+    // A remote delete that was tried and failed leaves a server the user is still paying for while
+    // the local row disappears. That is the one outcome of this flow that must not read as success,
+    // and the same predicate the UI branches on — defined once, on the result itself.
+    if result.remote_resource_may_still_bill() {
       activity.record(
         "cleanup.completed",
         "error",
@@ -1263,14 +1298,7 @@ impl Orchestrator {
       activity.success("cleanup.completed", &detail);
     }
 
-    Ok(ForceCleanupResult {
-      node_id: node_id.to_string(),
-      correlation_id,
-      local_tunnels_removed,
-      remote_droplet_delete_attempted,
-      remote_droplet_delete_succeeded,
-      node_record_removed,
-    })
+    Ok(result)
   }
 
   pub fn create_vpn_node_to_ready(
@@ -1367,7 +1395,7 @@ impl Orchestrator {
 
           return Err(OrchestratorError::InvalidState {
             node_id: request.node_id.clone(),
-            detail: "Node is marked Ready but missing droplet reference, endpoint IP, or server key."
+            detail: "Node is marked Ready but missing its provider reference, endpoint IP, or server key."
               .to_string(),
           });
         }
@@ -2890,7 +2918,7 @@ impl Orchestrator {
       if matches!(node.lifecycle_status, NodeLifecycleStatus::Ready | NodeLifecycleStatus::Connected) {
         match node.external_ref.as_deref() {
           None => {
-            let detail = "Node is Ready/Connected but has no droplet reference.".to_string();
+            let detail = "Node is Ready/Connected but has no provider reference.".to_string();
             let _ = db.transition_vpn_node_status(&node.id, NodeLifecycleStatus::Error, Some(&detail));
             report.issues.push(ReconcileIssue {
               kind: ReconcileIssueKind::MissingNodeRuntimeData,
@@ -2922,7 +2950,7 @@ impl Orchestrator {
                   Some(&detail),
                 );
                 report.issues.push(ReconcileIssue {
-                  kind: ReconcileIssueKind::MissingDroplet,
+                  kind: ReconcileIssueKind::MissingProviderNode,
                   node_id: Some(node.id.clone()),
                   tunnel_id: None,
                   repaired: false,
@@ -3047,7 +3075,7 @@ impl Orchestrator {
     }
 
     // Startup is the one moment the app can notice something that changed while it was not
-    // running — a tunnel stopped, a droplet deleted from the provider's own console. Recording it
+    // running — a tunnel stopped, a server deleted from the provider's own console. Recording it
     // means the user sees that it happened, not just the repaired end state.
     for issue in &report.issues {
       let mut recorder = ActivityRecorder::new(db, "app", None);
@@ -3331,8 +3359,8 @@ mod tests {
 
   use super::*;
   use crate::backend::provider::{
-    Account, BootstrapWaitRequest, CredentialField, InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY,
-    ProviderAdapter, ProviderAdapterError, ProviderNodeStatus,
+    BootstrapWaitRequest, CredentialField, InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY,
+    ProviderAdapter, ProviderAdapterError, ProviderIdentity, ProviderNodeStatus,
   };
   use crate::backend::secure_storage::SecureStorage;
   use crate::backend::provider::ProviderRegistry;
@@ -3344,6 +3372,9 @@ mod tests {
     delete_calls: usize,
     node_exists: bool,
     node_status: ProviderNodeStatus,
+    /// Makes `delete_node` fail, standing in for a provider that will not release a server —
+    /// the case where the user keeps being billed after cleanup "succeeds".
+    fail_delete: bool,
   }
 
   impl Default for MockAdapterState {
@@ -3352,6 +3383,7 @@ mod tests {
         delete_calls: 0,
         node_exists: true,
         node_status: ProviderNodeStatus::Active,
+        fail_delete: false,
       }
     }
   }
@@ -3375,11 +3407,11 @@ mod tests {
       "digitalocean"
     }
 
-    fn validate_token(&self, _token: &str) -> Result<Account, ProviderAdapterError> {
-      Ok(Account {
-        uuid: "acct-1".to_string(),
-        email: "vpn@example.com".to_string(),
-        status: "active".to_string(),
+    fn validate_token(&self, _token: &str) -> Result<ProviderIdentity, ProviderAdapterError> {
+      Ok(ProviderIdentity {
+        account_id: "acct-1".to_string(),
+        label: Some("vpn@example.com".to_string()),
+        status: None,
       })
     }
 
@@ -3480,6 +3512,11 @@ mod tests {
     fn delete_node(&self, _token: &str, _node_id: &str) -> Result<(), ProviderAdapterError> {
       let mut state = self.state.lock().expect("lock must work");
       state.delete_calls += 1;
+      if state.fail_delete {
+        return Err(ProviderAdapterError::Unsupported {
+          detail: "mock provider refused to delete the node".to_string(),
+        });
+      }
       Ok(())
     }
 
@@ -3922,7 +3959,7 @@ mod tests {
   }
 
   #[test]
-  fn create_vpn_node_failure_rolls_back_droplet_and_marks_error() {
+  fn create_vpn_node_failure_rolls_back_the_node_and_marks_error() {
     let db = Database::new(test_db_path("create_fail"));
     db.run_migrations().expect("migrations should succeed");
 
@@ -4310,8 +4347,8 @@ mod tests {
   }
 
   #[test]
-  fn reconcile_flags_deleted_droplet() {
-    let db = Database::new(test_db_path("reconcile_deleted_droplet"));
+  fn reconcile_flags_a_node_deleted_at_the_provider() {
+    let db = Database::new(test_db_path("reconcile_deleted_node"));
     db.run_migrations().expect("migrations should succeed");
     let secure_storage = SecureStorage::dev_mock();
     setup_provider_and_token(&db, &secure_storage);
@@ -4353,7 +4390,7 @@ mod tests {
     assert!(report
       .issues
       .iter()
-      .any(|issue| issue.kind == ReconcileIssueKind::MissingDroplet));
+      .any(|issue| issue.kind == ReconcileIssueKind::MissingProviderNode));
 
     let node = db
       .get_vpn_node("node-1")
@@ -4463,8 +4500,8 @@ mod tests {
       .expect("force cleanup should complete");
 
     assert_eq!(result.local_tunnels_removed, 1);
-    assert!(result.remote_droplet_delete_attempted);
-    assert!(result.remote_droplet_delete_succeeded);
+    assert!(result.remote_node_delete_attempted);
+    assert!(result.remote_node_delete_succeeded);
     assert!(result.node_record_removed);
 
     assert!(db.get_vpn_node("node-partial").expect("query should succeed").is_none());
@@ -4478,6 +4515,69 @@ mod tests {
     // command rather than a stop followed by an uninstall.
     assert_eq!(wireguard_state.deactivate_calls, 0);
     assert_eq!(wireguard_state.unregister_calls, 1);
+  }
+
+  /// The one cleanup outcome that must never read as success.
+  ///
+  /// When the remote delete is attempted and fails, the local records go but the server does not:
+  /// nothing in the app points at it any more, and it keeps billing until the user removes it by
+  /// hand. The result has to say so, and the activity trail has to record an `error` — the
+  /// dashboard showed "Force cleanup complete" here regardless, burying the only fact that
+  /// mattered.
+  #[test]
+  fn cleanup_reports_a_server_it_could_not_delete_rather_than_success() {
+    let db = Database::new(test_db_path("force_cleanup_remote_delete_failed"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    db
+      .create_vpn_node("node-stuck", TEST_PROVIDER_ID, "Node Stuck", "nyc1")
+      .expect("node should insert");
+    db
+      .transition_vpn_node_status("node-stuck", NodeLifecycleStatus::Provisioning, None)
+      .expect("transition should succeed");
+    db
+      .update_vpn_node_runtime_details(
+        "node-stuck",
+        Some("42"),
+        Some("203.0.113.5"),
+        None,
+        Some(51820),
+        None,
+      )
+      .expect("runtime details should persist");
+
+    let adapter = Arc::new(MockProviderAdapter::new(false));
+    adapter.state.lock().expect("lock must work").fail_delete = true;
+    let providers = ProviderRegistry::from_adapter(adapter);
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+
+    let result = Orchestrator::new()
+      .force_cleanup_vpn_node(&providers, &wireguard, &db, &secure_storage, "node-stuck")
+      .expect("cleanup itself still completes — it is the outcome that is bad, not the call");
+
+    assert!(result.remote_node_delete_attempted, "a node with a provider ref must be attempted");
+    assert!(!result.remote_node_delete_succeeded, "the provider refused the delete");
+    assert!(
+      result.remote_resource_may_still_bill(),
+      "this is the state the user has to act on, and it must be reported as such"
+    );
+
+    // The activity trail is where the user goes to find out what happened, so the failure has to
+    // be an `error` there rather than a success row.
+    let events = db
+      .list_activity_events(200)
+      .expect("activity query should succeed");
+    let completed = events
+      .iter()
+      .find(|event| event.stage == "cleanup.completed")
+      .expect("cleanup should record a completion event");
+    assert_eq!(completed.outcome, "error", "was: {completed:?}");
+    assert!(
+      completed.detail.contains("may still be billing"),
+      "the recorded reason must name the consequence: {}",
+      completed.detail
+    );
   }
 
   #[test]
@@ -5602,7 +5702,7 @@ mod tests {
 
     let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
     assert!(
-      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      cleanup.remote_node_delete_attempted && cleanup.remote_node_delete_succeeded,
       "the droplet must be destroyed, or it keeps billing: {cleanup:?}"
     );
 
@@ -5761,7 +5861,7 @@ mod tests {
 
     let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
     assert!(
-      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      cleanup.remote_node_delete_attempted && cleanup.remote_node_delete_succeeded,
       "the instance and its security group must be destroyed, or they keep billing: {cleanup:?}"
     );
 
@@ -5921,7 +6021,7 @@ mod tests {
 
     let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
     assert!(
-      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      cleanup.remote_node_delete_attempted && cleanup.remote_node_delete_succeeded,
       "the instance must be destroyed, or it keeps billing: {cleanup:?}"
     );
 
@@ -6099,7 +6199,7 @@ mod tests {
 
     let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
     assert!(
-      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      cleanup.remote_node_delete_attempted && cleanup.remote_node_delete_succeeded,
       "the instance and its firewall rule must be destroyed, or they keep billing: {cleanup:?}"
     );
 
@@ -6293,7 +6393,7 @@ mod tests {
 
     let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
     assert!(
-      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      cleanup.remote_node_delete_attempted && cleanup.remote_node_delete_succeeded,
       "the server, its floating IP and its security group must all be destroyed: {cleanup:?}"
     );
 
@@ -6525,7 +6625,7 @@ mod tests {
 
     let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
     assert!(
-      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      cleanup.remote_node_delete_attempted && cleanup.remote_node_delete_succeeded,
       "the droplet must be destroyed, or it keeps billing: {cleanup:?}"
     );
 

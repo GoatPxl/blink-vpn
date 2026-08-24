@@ -381,7 +381,7 @@ export function OnboardingWizard() {
   async function startProvision() {
     setProvisionBusy(true);
     setProvisionPhase("provisioning");
-    setProvisionMessage("Provisioning droplet resources...");
+    setProvisionMessage("Provisioning server resources...");
 
     let pollStopped = false;
     const intervalId = window.setInterval(async () => {

@@ -12,7 +12,8 @@ while carrying no traffic. Where a real signal exists — a handshake, a byte co
 database — assert that instead of a status field.
 
 **Real lanes must clean up on every path.** Tests that create billable or long-lived resources tear
-them down before asserting anything, so a failed assertion cannot strand a droplet or a container.
+them down before asserting anything, so a failed assertion cannot strand a paid server or a
+container.
 
 ## Layers
 

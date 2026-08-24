@@ -38,7 +38,7 @@ function provisionRunThatFailed(): ActivityEvent[] {
       detail: "Node creation failed <- name must be a valid hostname",
       created_at: "2026-08-16T10:00:09.000Z",
     }),
-    event({ stage: "provider.create", outcome: "success", detail: "droplet created", created_at: "2026-08-16T10:00:05.000Z" }),
+    event({ stage: "provider.create", outcome: "success", detail: "server created", created_at: "2026-08-16T10:00:05.000Z" }),
     event({ stage: "create.start", outcome: "info", detail: "init flow started", created_at: "2026-08-16T10:00:00.000Z" }),
   ];
 }
@@ -185,7 +185,7 @@ describe("selectUnresolvedFailure", () => {
 
   it("keeps an app-level failure, which has no node to check", () => {
     const runs = groupActivity([
-      event({ node_id: null, correlation_id: null, category: "app", outcome: "error", stage: "startup.reconcile", detail: "droplet missing" }),
+      event({ node_id: null, correlation_id: null, category: "app", outcome: "error", stage: "startup.reconcile", detail: "server missing" }),
     ]);
 
     assert.equal(selectUnresolvedFailure(runs, NODES)?.steps[0].stage, "startup.reconcile");

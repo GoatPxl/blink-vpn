@@ -391,7 +391,10 @@ function NodeDetailsDrawer({
               <DetailRow label="Plan" value={pricing?.planLabel ?? node.plan_key ?? "n/a"} />
               <DetailRow label="Size" value={node.size_slug ?? pricing?.sizeSlug ?? "n/a"} mono />
               <DetailRow label="Specs" value={specs} />
-              <DetailRow label="Droplet ID" value={node.external_ref ?? "n/a"} mono />
+              {/* Whatever the owning provider calls this node: a DigitalOcean droplet id, an EC2
+                  `region/instance-id`, a GCE `zone/name`, a Docker container id. This read
+                  "Droplet ID" until every provider but DigitalOcean made that wrong. */}
+              <DetailRow label="Provider ID" value={node.external_ref ?? "n/a"} mono />
               <DetailRow label="Node ID" value={node.id} mono />
               <DetailRow label="Created" value={formatCreatedTime(node.created_at)} />
               <DetailRow label="Server key" value={node.server_public_key ?? "pending"} mono />
@@ -424,7 +427,7 @@ function NodeDetailsDrawer({
           />
 
           {/* Separated because both actions delete a paid server. "Uninstall Host" used to sit in
-              every row, coloured red, one click from destroying a droplet the user is billed for. */}
+              every row, coloured red, one click from destroying a server the user is billed for. */}
           <section className="rounded-[18px] border border-[color:rgba(255,155,155,0.25)] bg-[color:rgba(255,155,155,0.05)] p-4">
             <div className="text-[11px] uppercase tracking-[0.24em] text-[#ff9b9b]">Danger zone</div>
             <p className="mt-2 text-xs text-[var(--on-surface-variant)]">

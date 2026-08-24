@@ -1185,11 +1185,25 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     try {
       const result = await forceCleanupVpnNode(nodeId);
       setRecovery(null);
-      pushToast(
-        "success",
-        "Force cleanup complete",
-        `Removed ${result.local_tunnels_removed} tunnel(s) for ${node?.name ?? nodeId}.`,
-      );
+
+      const label = node?.name ?? nodeId;
+      // A remote delete that was tried and failed leaves a server running that nothing in the app
+      // points at any more — it keeps billing until the user removes it themselves. The backend
+      // records that case as an error; reporting "cleanup complete" here would bury it.
+      if (result.remote_node_delete_attempted && !result.remote_node_delete_succeeded) {
+        pushToast(
+          "warning",
+          "Server may still be running",
+          `Local records for ${label} were removed, but the server could not be deleted and may still be billing. Remove it in your provider's console, then check the Activity page for details.`,
+        );
+      } else {
+        pushToast(
+          "success",
+          "Force cleanup complete",
+          `Removed ${result.local_tunnels_removed} tunnel(s) for ${label}.`,
+        );
+      }
+
       await loadDashboard(nodeId);
     } catch (error) {
       handleError(error);

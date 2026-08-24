@@ -46,7 +46,7 @@ const SFO: ProviderRegion = {
 };
 
 describe("deriveNodeStatus", () => {
-  // The original bug: STATUS rendered provider_status, so two powered-on droplets both read
+  // The original bug: STATUS rendered provider_status, so two powered-on servers both read
   // "ACTIVE" and neither said whether the VPN was up.
   it("does not report two provider-active nodes as connected", () => {
     const a = deriveNodeStatus({ node: node({ provider_status: "active" }), isCurrent: true, isLiveConnected: false, isConnecting: false });
@@ -70,7 +70,7 @@ describe("deriveNodeStatus", () => {
 
   // You cannot connect to a powered-off server; burying that in a details panel would leave
   // Connect failing for no visible reason.
-  it("surfaces a powered-off droplet as unavailable even when the app thinks it is ready", () => {
+  it("surfaces a powered-off server as unavailable even when the app thinks it is ready", () => {
     for (const providerStatus of ["off", "archive", "deleted"]) {
       const status = deriveNodeStatus({
         node: node({ lifecycle_status: "ready", provider_status: providerStatus }),

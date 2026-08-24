@@ -111,6 +111,13 @@ The contract covers:
   whether to mask it, and help text. DigitalOcean declares one API token; AWS declares an access key
   id and a secret access key. The settings and onboarding forms render whatever they are given, so a
   provider's credential shape never becomes a branch in the UI.
+- `validate_token`: check the credential works and report a `ProviderIdentity` — the account,
+  project or tenancy it acts on (`account_id`), something a person recognises as theirs (`label`),
+  and account standing where the provider reports any (`status`). The last two are optional, and
+  that matters: only DigitalOcean actually reports standing, so the rest answer `None` rather than
+  claiming `"active"` on their provider's behalf. This replaced `Account`, DigitalOcean's own
+  `GET /v2/account` response, whose `uuid`/`email`/`status` fields forced every later adapter to put
+  something untrue in them — an ARN in `email`, an invented status.
 - `init_delivery`: state whether the rendered bootstrap script is delivered as cloud-init or as a
   container entrypoint script. The orchestrator used to choose this with `if provider_slug ==
   "docker"`, which decided any further provider's delivery mechanism by dropping it through an

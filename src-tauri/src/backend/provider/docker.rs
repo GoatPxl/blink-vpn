@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::backend::bootstrap::{BootstrapOutputContract, READINESS_MARKER_PATH};
 
 use super::{
-  Account, BootstrapWaitRequest, CredentialField, InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY,
-  ProviderAdapterError, ProviderCredential, ProviderNodeStatus, ProviderPlanPricing, ProviderRegion,
+  BootstrapWaitRequest, CredentialField, InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY,
+  ProviderAdapterError, ProviderCredential, ProviderIdentity, ProviderNodeStatus, ProviderPlanPricing, ProviderRegion,
   ProvisionedNode,
 };
 
@@ -686,14 +686,16 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     }]
   }
 
-  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
+  fn validate_token(&self, token: &str) -> Result<ProviderIdentity, ProviderAdapterError> {
     Self::validate_faux_token(token)?;
     let daemon_version = Self::ensure_daemon_available()?;
 
-    Ok(Account {
-      uuid: "docker-local".to_string(),
-      email: "docker-local@host".to_string(),
-      status: format!("daemon:{daemon_version}"),
+    Ok(ProviderIdentity {
+      account_id: "docker-local".to_string(),
+      // There is no account here — this provider is the local daemon. Reporting its version is
+      // the useful thing, and it doubles as proof the daemon actually answered.
+      label: None,
+      status: Some(format!("daemon {daemon_version}")),
     })
   }
 

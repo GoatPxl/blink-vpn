@@ -240,7 +240,7 @@ No placeholder TODO logic unless explicitly marked and justified.
 - Bounded retries with exponential backoff + jitter for transient failures; explicit timeouts.
 - Idempotent provision/connect/disconnect/destroy where practical, with safe rollback on partial
   failure. **Destroy must report real failures** — never swallow a failed remote delete and return
-  success; that leaves the user paying for an invisible droplet.
+  success; that leaves the user paying for a server the app can no longer see.
 
 **Frontend.**
 - Typed bindings to Tauri commands in `src/lib/tauri.ts`. Bindings are hand-written, so when a Rust

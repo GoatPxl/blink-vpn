@@ -628,8 +628,8 @@ export interface ForceCleanupResult {
   node_id: string;
   correlation_id: string;
   local_tunnels_removed: number;
-  remote_droplet_delete_attempted: boolean;
-  remote_droplet_delete_succeeded: boolean;
+  remote_node_delete_attempted: boolean;
+  remote_node_delete_succeeded: boolean;
   node_record_removed: boolean;
 }
 

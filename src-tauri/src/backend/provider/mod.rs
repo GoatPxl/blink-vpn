@@ -24,9 +24,11 @@ use crate::backend::crypto::keypair::WireGuardKeypair;
 use crate::backend::db::{Database, DbError, ProviderRecord, ProviderStatus};
 use crate::backend::secure_storage::{SecretStoreError, SecureStorage};
 
+// `Account` is deliberately not re-exported: it is DigitalOcean's own account response, and the
+// neutral result of a credential check is `ProviderIdentity`, defined below.
 #[allow(unused_imports)]
 pub use digitalocean::{
-  Account, CreateDropletRequest, DEFAULT_IMAGE, DEFAULT_REGION, DEFAULT_SIZE, DigitalOceanConfig,
+  CreateDropletRequest, DEFAULT_IMAGE, DEFAULT_REGION, DEFAULT_SIZE, DigitalOceanConfig,
 };
 
 use digitalocean::{DigitalOceanApiClient, DigitalOceanError};
@@ -54,7 +56,8 @@ pub trait ProviderAdapter: Send + Sync {
   /// renders whatever it is given rather than branching on a slug, so a provider's credential shape
   /// stays inside its adapter (AGENTS.md §3).
   fn credential_fields(&self) -> Vec<CredentialField>;
-  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError>;
+  /// Check the credential works, and report whose account it is.
+  fn validate_token(&self, token: &str) -> Result<ProviderIdentity, ProviderAdapterError>;
   fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError>;
   /// Geography for a slug this adapter owns, without contacting the provider.
   ///
@@ -237,9 +240,11 @@ impl ProviderRegion {
 
 /// A provider's own view of a node, normalized.
 ///
-/// The variant names and their `as_str` values are a UI contract — `attach_live_provider_status`
-/// serializes them straight to the fleet list — so they are deliberately unchanged from when this
-/// was named after droplets.
+/// The variants are DigitalOcean's droplet states, kept because they turned out to describe every
+/// provider's node adequately — each adapter maps its own vocabulary onto them.
+///
+/// The names and their `as_str` values are a UI contract: `attach_live_provider_status` serializes
+/// them straight to the fleet list, so renaming one would change what the dashboard receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderNodeStatus {
@@ -397,11 +402,19 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
     }]
   }
 
-  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
-    self
+  fn validate_token(&self, token: &str) -> Result<ProviderIdentity, ProviderAdapterError> {
+    let account = self
       .client
       .validate_token(&Self::api_token(token)?)
-      .map_err(|source| ProviderAdapterError::api("DigitalOcean token validation request failed.", source))
+      .map_err(|source| ProviderAdapterError::api("DigitalOcean token validation request failed.", source))?;
+
+    Ok(ProviderIdentity {
+      account_id: account.uuid,
+      label: Some(account.email),
+      // DigitalOcean is the one provider that reports account standing, and it matters: a
+      // `locked` account accepts this token and then refuses to create a droplet.
+      status: Some(account.status),
+    })
   }
 
   fn list_plan_pricing(
@@ -794,18 +807,17 @@ impl ProviderAdapter for LinodeProviderAdapter {
     }]
   }
 
-  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
+  fn validate_token(&self, token: &str) -> Result<ProviderIdentity, ProviderAdapterError> {
     let account = self
       .client
       .get_account(&Self::api_token(token)?)
       .map_err(|source| ProviderAdapterError::api("Linode token validation request failed.", source))?;
 
-    // `Account` is DigitalOcean-shaped and reused as the neutral validation result; the fields are
-    // filled with the closest Linode equivalent. Replacing this type is tracked separately.
-    Ok(Account {
-      uuid: account.euuid,
-      email: account.email,
-      status: "active".to_string(),
+    Ok(ProviderIdentity {
+      account_id: account.euuid,
+      label: Some(account.email),
+      // Linode's account endpoint reports no standing, so none is claimed.
+      status: None,
     })
   }
 
@@ -1318,7 +1330,7 @@ impl ProviderAdapter for OpenStackProviderAdapter {
     ]
   }
 
-  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
+  fn validate_token(&self, token: &str) -> Result<ProviderIdentity, ProviderAdapterError> {
     let credentials = Self::credentials(token)?;
 
     // Authenticating *is* the validation: it proves the credential works and that the catalogue
@@ -1328,12 +1340,12 @@ impl ProviderAdapter for OpenStackProviderAdapter {
       .project_id(&credentials)
       .map_err(|source| Self::adapt_error("OpenStack authentication failed.", source))?;
 
-    // `Account` is DigitalOcean-shaped and reused as the neutral validation result; the fields are
-    // filled with the closest OpenStack equivalent. Replacing this type is tracked separately.
-    Ok(Account {
-      uuid: project_id,
-      email: credentials.application_credential_id.clone(),
-      status: "active".to_string(),
+    Ok(ProviderIdentity {
+      account_id: project_id,
+      // The credential id, not a person: an application credential belongs to a project rather
+      // than to a named user, so there is no email to report.
+      label: Some(credentials.application_credential_id.clone()),
+      status: None,
     })
   }
 
@@ -2003,7 +2015,7 @@ impl ProviderAdapter for GceProviderAdapter {
     }]
   }
 
-  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
+  fn validate_token(&self, token: &str) -> Result<ProviderIdentity, ProviderAdapterError> {
     let key = Self::service_account(token)?;
 
     // Reading the project proves three things at once: the key signs, the Compute Engine API is
@@ -2013,12 +2025,11 @@ impl ProviderAdapter for GceProviderAdapter {
       .get_project(&key)
       .map_err(|source| ProviderAdapterError::api("Google project lookup failed.", source))?;
 
-    // `Account` is DigitalOcean-shaped and reused as the neutral validation result; the fields are
-    // filled with the closest GCE equivalent. Replacing this type is tracked separately.
-    Ok(Account {
-      uuid: key.project_id.clone(),
-      email: key.client_email.clone(),
-      status: "active".to_string(),
+    Ok(ProviderIdentity {
+      // The project is what Google bills, and what the instance will live in.
+      account_id: key.project_id.clone(),
+      label: Some(key.client_email.clone()),
+      status: None,
     })
   }
 
@@ -2640,7 +2651,7 @@ impl ProviderAdapter for Ec2ProviderAdapter {
     ]
   }
 
-  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
+  fn validate_token(&self, token: &str) -> Result<ProviderIdentity, ProviderAdapterError> {
     let credentials = Self::credentials(token)?;
 
     let identity = self
@@ -2648,12 +2659,13 @@ impl ProviderAdapter for Ec2ProviderAdapter {
       .get_caller_identity(DEFAULT_EC2_REGION, &credentials)
       .map_err(|source| ProviderAdapterError::api("AWS credential validation failed.", source))?;
 
-    Ok(Account {
-      uuid: identity.account,
-      // AWS exposes no email for a key. The ARN is the meaningful identifier and is what an
-      // operator would use to check which principal this is.
-      email: identity.arn,
-      status: format!("active:{}", identity.user_id),
+    Ok(ProviderIdentity {
+      account_id: identity.account,
+      // AWS exposes no email for a key. The ARN names the principal, which is what an operator
+      // would check to confirm they saved the key they meant to.
+      label: Some(identity.arn),
+      // STS answers who the caller is, not whether the account is in good standing.
+      status: None,
     })
   }
 
@@ -3143,6 +3155,48 @@ impl NodeProvider for AdapterNodeProvider {
   }
 }
 
+/// Who a validated credential belongs to.
+///
+/// The answer to "this key works — but whose account is it, and will it be the one billed?", which
+/// is the question a user actually has after saving a credential.
+///
+/// This replaced `Account`, DigitalOcean's own `GET /v2/account` response type, which was used as
+/// the neutral result because DigitalOcean was once the only provider. Its `uuid`/`email`/`status`
+/// fields forced every later adapter to lie: EC2 put an ARN in `email`, GCE a service-account
+/// address, OpenStack a credential id, and all of them hardcoded `status: "active"` — a claim none
+/// of those providers had actually made. The fields here are named for what they mean, and the
+/// ones a provider does not answer are `None` rather than invented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderIdentity {
+  /// The account, project or tenancy this credential acts on — whatever the provider bills.
+  pub account_id: String,
+  /// Something a person recognises as theirs: an email, a service account address, a project name.
+  /// `None` where the provider offers nothing human-readable.
+  pub label: Option<String>,
+  /// Account standing, where the provider reports one.
+  ///
+  /// DigitalOcean does, and it matters: a `locked` account accepts a valid token and then refuses
+  /// to create anything, so surfacing it turns a baffling provisioning failure into an obvious
+  /// one. Most providers say nothing, and `None` records that rather than asserting "active" on
+  /// their behalf.
+  pub status: Option<String>,
+}
+
+impl ProviderIdentity {
+  /// One line naming this account, for the message shown after a credential is checked.
+  pub fn describe(&self) -> String {
+    let named = match self.label.as_deref().map(str::trim) {
+      Some(label) if !label.is_empty() => format!("{label} ({})", self.account_id),
+      _ => self.account_id.clone(),
+    };
+
+    match self.status.as_deref().map(str::trim) {
+      Some(status) if !status.is_empty() => format!("{named}, status {status}"),
+      _ => named,
+    }
+  }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderPlanPricing {
   pub plan_key: String,
@@ -3426,7 +3480,7 @@ impl ProviderRegistry {
     db: &Database,
     secure_storage: &SecureStorage,
     provider_id: &str,
-  ) -> Result<Account, ProviderFlowError> {
+  ) -> Result<ProviderIdentity, ProviderFlowError> {
     let (provider, adapter) = self.load_provider_and_adapter(db, provider_id)?;
     let token = self.resolve_provider_token_for_record(db, secure_storage, &provider)?;
     let outcome = adapter
@@ -3732,10 +3786,10 @@ mod tests {
   use crate::backend::logging;
 
   use super::{
-    Account, BootstrapWaitRequest, CredentialField, EC2_USER_DATA_LIMIT_BYTES, Ec2ProviderAdapter,
+    BootstrapWaitRequest, CredentialField, EC2_USER_DATA_LIMIT_BYTES, Ec2ProviderAdapter,
     GCE_USER_DATA_LIMIT_BYTES, GceProviderAdapter, InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY,
     LINODE_USER_DATA_LIMIT_BYTES, LinodeProviderAdapter, NodeInitRequest, ProviderAdapter,
-    ProviderAdapterError, ProviderCredential, ProviderNodeStatus, ProviderPlanPricing,
+    ProviderAdapterError, ProviderCredential, ProviderIdentity, ProviderNodeStatus, ProviderPlanPricing,
     OpenStackProviderAdapter, ProviderRegion, ProviderRegistry, ProvisionedNode, base64_encode,
     ec2_security_group_name, sanitize_droplet_name, sanitize_ec2_tag_value,
     sanitize_gce_instance_name, sanitize_linode_label,
@@ -4643,10 +4697,89 @@ mod tests {
     let _project = mock_gce(&mut server, "GET", GCE_PROJECT_PATH, r#"{"name":"goatstare-test"}"#);
 
     let adapter = GceProviderAdapter::with_base_url(&server.url());
-    let account = adapter.validate_token(&gce_credential()).expect("validation should succeed");
+    let identity = adapter.validate_token(&gce_credential()).expect("validation should succeed");
 
-    assert_eq!(account.uuid, "goatstare-test");
-    assert_eq!(account.email, "goatstare@goatstare-test.iam.gserviceaccount.com");
+    // The project is what Google bills and what the instance lives in, so it is the account id.
+    assert_eq!(identity.account_id, "goatstare-test");
+    assert_eq!(
+      identity.label.as_deref(),
+      Some("goatstare@goatstare-test.iam.gserviceaccount.com")
+    );
+    // Google reports no account standing, and inventing "active" would assert something unchecked.
+    assert_eq!(identity.status, None);
+  }
+
+  /// The line shown after a credential is checked, for each shape a provider can answer with.
+  #[test]
+  fn an_identity_describes_itself_without_inventing_the_parts_it_lacks() {
+    // DigitalOcean: the only provider that reports account standing.
+    assert_eq!(
+      ProviderIdentity {
+        account_id: "abc-123".to_string(),
+        label: Some("vpn@example.com".to_string()),
+        status: Some("active".to_string()),
+      }
+      .describe(),
+      "vpn@example.com (abc-123), status active"
+    );
+
+    // Most providers: an account and something human-readable, but no standing to report.
+    assert_eq!(
+      ProviderIdentity {
+        account_id: "goatstare-test".to_string(),
+        label: Some("goatstare@goatstare-test.iam.gserviceaccount.com".to_string()),
+        status: None,
+      }
+      .describe(),
+      "goatstare@goatstare-test.iam.gserviceaccount.com (goatstare-test)"
+    );
+
+    // Docker: no account at all, so the id stands alone rather than being padded out.
+    assert_eq!(
+      ProviderIdentity {
+        account_id: "docker-local".to_string(),
+        label: None,
+        status: Some("daemon 27.0.2".to_string()),
+      }
+      .describe(),
+      "docker-local, status daemon 27.0.2"
+    );
+
+    // An empty string is treated as absent: a stray "()" or a dangling "status" reads as a bug.
+    assert_eq!(
+      ProviderIdentity {
+        account_id: "acct".to_string(),
+        label: Some("  ".to_string()),
+        status: Some(String::new()),
+      }
+      .describe(),
+      "acct"
+    );
+  }
+
+  /// Every adapter must report the account that will actually be billed.
+  ///
+  /// This is what the old `Account` type could not express: its `uuid`/`email`/`status` were
+  /// DigitalOcean's field names, so EC2 put an ARN in `email` and everyone hardcoded
+  /// `status: "active"` — a claim those providers never made.
+  #[test]
+  fn no_adapter_claims_an_account_status_its_provider_does_not_report() {
+    let mut server = mockito::Server::new();
+    let _token = mock_gce_token(&mut server);
+    let _project = mock_gce(&mut server, "GET", GCE_PROJECT_PATH, r#"{"name":"goatstare-test"}"#);
+
+    let identity = GceProviderAdapter::with_base_url(&server.url())
+      .validate_token(&gce_credential())
+      .expect("validation should succeed");
+
+    assert!(
+      !identity.account_id.trim().is_empty(),
+      "the account that gets billed must always be named"
+    );
+    assert_eq!(
+      identity.status, None,
+      "Google reports no account standing, so none may be asserted on its behalf"
+    );
   }
 
   /// A pasted excerpt, or a key for a project the account cannot see, must be named as a
@@ -5660,11 +5793,11 @@ mod tests {
       }]
     }
 
-    fn validate_token(&self, _token: &str) -> Result<Account, ProviderAdapterError> {
-      Ok(Account {
-        uuid: "test-account".to_string(),
-        email: "test@example.com".to_string(),
-        status: "active".to_string(),
+    fn validate_token(&self, _token: &str) -> Result<ProviderIdentity, ProviderAdapterError> {
+      Ok(ProviderIdentity {
+        account_id: "test-account".to_string(),
+        label: Some("test@example.com".to_string()),
+        status: None,
       })
     }
 

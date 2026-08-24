@@ -74,7 +74,7 @@ function normalizeOutcome(raw: string): ActivityOutcome {
 /**
  * A run is only as good as its worst step.
  *
- * A provision that created a droplet and then failed to bootstrap has six `success` rows and one
+ * A provision that created a server and then failed to bootstrap has six `success` rows and one
  * `error`; summarising it as anything but failed would be a lie the user acts on.
  */
 function worstOutcome(steps: ActivityStep[]): ActivityOutcome {

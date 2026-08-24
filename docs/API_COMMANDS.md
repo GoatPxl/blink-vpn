@@ -38,7 +38,7 @@ Provider adapters currently included:
 | --- | --- | --- | --- |
 | `register_provider_credential` | `provider_id`, `provider_name`, `credentials` (map of field key to value) | `string` | Stores the credential in secure storage and persists its reference. Provider-neutral: the adapter is resolved from the stored provider record, so there is no per-provider command. Every field the adapter declares must be present and non-empty. |
 | `list_provider_credential_fields` | `provider_id` | `CredentialField[]` | The credential inputs this provider needs — `key`, `label`, `placeholder`, `secret`, `help`. The UI renders whatever it returns rather than branching on a provider slug. |
-| `validate_provider_token` | `provider_id` | `string` | Checks the stored key through the adapter and records the verdict on that provider row. Reads the *stored* key, so it never validates something newly typed but unsaved |
+| `validate_provider_token` | `provider_id` | `string` | Checks the stored credential through the adapter and records the verdict on that provider row. Reads the *stored* credential, so it never validates something newly typed but unsaved. The returned string names the account the credential belongs to — display text only; nothing parses it |
 | `list_provider_regions` | `provider_id` | `ProviderRegion[]` | Region catalog with normalized geography — see below |
 | `list_provider_pricing` | `provider_id`, `region` | `ProviderPricingResponse` | Plan and pricing catalog |
 | `create_vpn_node_to_ready` | `node_id`, `provider_id`, `node_name`, `region`, `plan_key` | `string` | Provision and bootstrap workflow |
@@ -55,7 +55,7 @@ Provider adapters currently included:
 | `resume_provider` | `provider_id` | `void` | Resumes provider operations |
 | `delete_provider` | `provider_id` | `void` | Deletes provider when dependencies are clear |
 | `destroy_vpn_node` | `node_id` | `void` | Standard destroy path |
-| `force_cleanup_vpn_node` | `node_id` | `ForceCleanupResult` | Recovery cleanup path |
+| `force_cleanup_vpn_node` | `node_id` | `ForceCleanupResult` | Recovery cleanup path — see the note below on reading its result |
 | `list_vpn_nodes` | none | `VpnNodeRecord[]` | Local node records, enriched with live `provider_status` and adapter-supplied `region_geo` |
 | `get_current_node_id` | none | `string \| null` | The default node; `null` when several exist and none was chosen |
 | `set_current_node_id` | `node_id` (nullable) | `void` | Sets or clears the default node; rejects an unknown id |
@@ -76,6 +76,28 @@ Provider adapters currently included:
 | `open_wireguard_install_page` | none | `void` | Opens the WireGuard download page in the default browser (Windows only) |
 | `install_wireguard_with_prerequisites` | none | `WireGuardInstallResult` | Runs the WireGuard installer with elevation (Windows only) |
 | `force_disconnect_node_service` | `node_id` | `void` | Best-effort teardown of every tunnel service for a node; ignores individual failures |
+
+### Reading a `ForceCleanupResult`
+
+```ts
+interface ForceCleanupResult {
+  node_id: string;
+  correlation_id: string;
+  local_tunnels_removed: number;
+  remote_node_delete_attempted: boolean;
+  remote_node_delete_succeeded: boolean;
+  node_record_removed: boolean;
+}
+```
+
+**`remote_node_delete_attempted && !remote_node_delete_succeeded` is a failure, and callers must
+present it as one.** It means the local records are gone while the server is not: nothing in the app
+points at it any more, and it keeps billing until the user deletes it in the provider's console. The
+backend records that case as an `error` activity event; a caller that reports "cleanup complete"
+regardless — which the dashboard did — buries the one outcome the user has to act on.
+
+These fields were `remote_droplet_delete_*`. "Droplet" is DigitalOcean's word for a virtual machine,
+and the names outlived the assumption that DigitalOcean was the only provider.
 
 ## Request and Response Examples
 

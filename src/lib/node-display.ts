@@ -11,7 +11,7 @@ import type { ProviderRegion, VpnNodeRecord } from "./tauri";
  * What a node is doing, from the user's point of view.
  *
  * Deliberately one value derived from three independent facts, because showing any one of them
- * alone misleads: the table used to render `provider_status`, so two provisioned droplets both
+ * alone misleads: the table used to render `provider_status`, so two provisioned servers both
  * read "ACTIVE" and neither indicated whether the VPN was up.
  */
 export type NodeStatus =

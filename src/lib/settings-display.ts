@@ -82,7 +82,7 @@ export type RowAction = {
  * The `⋯` menu for one provider row.
  *
  * The delete guard mirrors a real backend invariant: removing the credential would orphan live
- * droplets the app could then never destroy, leaving the user paying for them.
+ * servers the app could then never destroy, leaving the user paying for them.
  */
 export function buildRowActions(input: {
   provider: ProviderRecord;
