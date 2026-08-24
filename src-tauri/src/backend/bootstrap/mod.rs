@@ -16,7 +16,9 @@ mod tests {
     BootstrapPeer, DEFAULT_INTERFACE_NAME, DEFAULT_PEER_SLOTS, DEFAULT_SERVER_INTERFACE_CIDR,
     DEFAULT_WIREGUARD_PORT, READINESS_MARKER_PATH,
   };
-  use crate::backend::crypto::keypair::{generate_client_keypair, generate_server_keypair};
+  use crate::backend::crypto::keypair::{
+    generate_client_keypair, generate_preshared_key, generate_server_keypair,
+  };
 
   /// Params carrying real client public keys, as every production render does.
   fn params_with_peers(public_keys: &[String]) -> BootstrapParams {
@@ -34,6 +36,7 @@ mod tests {
         .map(|(public_key, address_cidr)| BootstrapPeer {
           public_key: public_key.clone(),
           address_cidr,
+          preshared_key: generate_preshared_key().expect("preshared key should generate"),
         })
         .collect(),
     }
@@ -201,6 +204,7 @@ mod tests {
       peers: vec![BootstrapPeer {
         public_key: client.public_key,
         address_cidr: "not-cidr".to_string(),
+        preshared_key: generate_preshared_key().expect("preshared key should generate"),
       }],
     };
 
@@ -322,11 +326,102 @@ mod tests {
       .init_payload;
 
     assert!(payload.contains("NAT_SOURCE_CIDR=\"10.66.0.0/24\""));
-    assert!(payload.contains("POSTROUTING -s ${NAT_SOURCE_CIDR} -j MASQUERADE"));
+    assert!(
+      payload.contains("POSTROUTING -s ${NAT_SOURCE_CIDR} -o ${WAN_IFACE} -j MASQUERADE"),
+      "NAT must cover the tunnel subnet and pin the default-route interface"
+    );
     assert!(
       !payload.contains("POSTROUTING -s ${CLIENT_CIDR}"),
       "the single-peer NAT scope must be gone"
     );
+    // Unpinned masquerade NATs onto the wrong interface on multi-homed boxes.
+    assert!(!payload.contains("-s ${NAT_SOURCE_CIDR} -j MASQUERADE"));
+  }
+
+  /// The first line must be exactly `#cloud-config`. One added space and every provider silently
+  /// ignores the entire payload — no error surfaces anywhere, and under the write-only contract
+  /// nothing ever would. (This exact failure shipped in Algo, breaking every deploy.)
+  #[test]
+  fn cloud_init_payload_starts_with_the_exact_cloud_config_line() {
+    let bootstrap = Bootstrap::new();
+    let client = generate_client_keypair().expect("client keypair should generate");
+    let server = generate_server_keypair().expect("server keypair should generate");
+    let params = params_with_client_peer(&client.public_key);
+
+    let payload = bootstrap
+      .render_cloud_init(&params, &server.private_key, &server.public_key)
+      .expect("cloud-init render should succeed")
+      .init_payload;
+
+    assert_eq!(
+      payload.lines().next(),
+      Some("#cloud-config"),
+      "the first line must be the exact cloud-config sentinel"
+    );
+    assert!(
+      !payload.starts_with("---") && !payload.contains("\n---\n"),
+      "a YAML document-start marker also breaks cloud-init parsing"
+    );
+  }
+
+  /// Every peer's PSK must be baked into the server config — like the public keys, there is no
+  /// later channel to add one, and a server without it rejects the client that presents one.
+  #[test]
+  fn both_renderers_bake_each_peers_preshared_key() {
+    let bootstrap = Bootstrap::new();
+    let server = generate_server_keypair().expect("server keypair should generate");
+    let params = params_with_peers(&generated_public_keys(2));
+
+    let cloud = bootstrap
+      .render_cloud_init(&params, &server.private_key, &server.public_key)
+      .expect("cloud-init render should succeed")
+      .init_payload;
+    let docker = bootstrap
+      .render_docker_init(&params, &server.private_key, &server.public_key)
+      .expect("docker init render should succeed")
+      .init_payload;
+
+    for payload in [&cloud, &docker] {
+      for peer in &params.peers {
+        assert!(
+          payload.contains(&format!("PresharedKey = {}", peer.preshared_key)),
+          "every [Peer] block must carry its preshared key"
+        );
+      }
+    }
+  }
+
+  /// VPN peers must not be able to reach the cloud metadata service or each other.
+  #[test]
+  fn forward_rules_block_the_metadata_service_and_isolate_peers() {
+    let bootstrap = Bootstrap::new();
+    let client = generate_client_keypair().expect("client keypair should generate");
+    let server = generate_server_keypair().expect("server keypair should generate");
+    let params = params_with_client_peer(&client.public_key);
+
+    let cloud = bootstrap
+      .render_cloud_init(&params, &server.private_key, &server.public_key)
+      .expect("cloud-init render should succeed")
+      .init_payload;
+    let docker = bootstrap
+      .render_docker_init(&params, &server.private_key, &server.public_key)
+      .expect("docker init render should succeed")
+      .init_payload;
+
+    for payload in [&cloud, &docker] {
+      assert!(
+        payload.contains("-s ${NAT_SOURCE_CIDR} -d 169.254.0.0/16 -j DROP"),
+        "peers must not reach the instance metadata service through the tunnel"
+      );
+      assert!(
+        payload.contains("-s ${NAT_SOURCE_CIDR} -d ${NAT_SOURCE_CIDR} -j DROP"),
+        "peers must not reach each other through the server"
+      );
+      assert!(
+        !payload.contains("--dport 22"),
+        "no SSH ingress rule: nothing ever dials in"
+      );
+    }
   }
 
   /// The self-check has to cover every peer, not just the first.

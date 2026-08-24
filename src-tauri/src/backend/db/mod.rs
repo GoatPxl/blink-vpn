@@ -41,6 +41,8 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (18, include_str!("../../../migrations/0018_backfill_legacy_correlation_ids.sql")),
   (19, include_str!("../../../migrations/0019_seed_ec2_provider.sql")),
   (20, include_str!("../../../migrations/0020_node_peers.sql")),
+  (21, include_str!("../../../migrations/0021_peer_psk_and_client_mtu.sql")),
+  (22, include_str!("../../../migrations/0022_seed_linode_provider.sql")),
 ];
 
 
@@ -265,6 +267,10 @@ pub struct VpnNodeRecord {
   pub updated_at: String,
   /// UDP port the client dials, as reported by the provider adapter at provision time.
   pub endpoint_port: Option<u16>,
+  /// Tunnel MTU the owning provider calls for in client configs, captured at provision time.
+  /// `None` means the provider needs no MTU line. Not serialized: the UI never renders configs.
+  #[serde(skip_serializing)]
+  pub client_mtu: Option<u16>,
 }
 
 /// A peer slot about to be written. Borrowed rather than owned: every field already exists in the
@@ -278,6 +284,7 @@ pub struct NewNodePeer<'a> {
   pub client_public_key: &'a str,
   pub client_private_key_ref: &'a str,
   pub client_address_cidr: &'a str,
+  pub preshared_key: &'a str,
 }
 
 /// One baked `[Peer]` slot on a provisioned server.
@@ -299,6 +306,11 @@ pub struct NodePeerRecord {
   #[serde(skip_serializing)]
   pub client_private_key_ref: String,
   pub client_address_cidr: String,
+  /// The symmetric key this peer shares with the server, baked at create time. `None` only for
+  /// peers created before PSK support — their server has no PSK for them and never can. Not
+  /// serialized: the UI receives whole rendered configs, never key fields.
+  #[serde(skip_serializing)]
+  pub preshared_key: Option<String>,
   pub claimed_at: Option<String>,
   pub created_at: String,
 }
@@ -709,7 +721,7 @@ impl Database {
         "SELECT id, provider_id, name, region, plan_key, size_slug, price_monthly_usd,
           price_hourly_usd, price_source_timestamp, lifecycle_status, external_ref,
           public_ipv4, server_public_key, error_reason, created_at, updated_at,
-          endpoint_port
+          endpoint_port, client_mtu
          FROM vpn_nodes
          ORDER BY created_at ASC",
       )
@@ -748,7 +760,7 @@ impl Database {
         "SELECT id, provider_id, name, region, plan_key, size_slug, price_monthly_usd,
           price_hourly_usd, price_source_timestamp, lifecycle_status, external_ref,
           public_ipv4, server_public_key, error_reason, created_at, updated_at,
-          endpoint_port
+          endpoint_port, client_mtu
          FROM vpn_nodes
          WHERE id = ?1",
         params![id],
@@ -821,6 +833,7 @@ impl Database {
     public_ipv4: Option<&str>,
     server_public_key: Option<&str>,
     endpoint_port: Option<u16>,
+    client_mtu: Option<u16>,
   ) -> Result<(), DbError> {
     let connection = self.open_connection()?;
     let changed = connection
@@ -830,6 +843,7 @@ impl Database {
              public_ipv4 = ?3,
              server_public_key = ?4,
              endpoint_port = COALESCE(?5, endpoint_port),
+             client_mtu = COALESCE(?6, client_mtu),
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?1",
         params![
@@ -837,7 +851,8 @@ impl Database {
           external_ref,
           public_ipv4,
           server_public_key,
-          endpoint_port.map(i64::from)
+          endpoint_port.map(i64::from),
+          client_mtu.map(i64::from)
         ],
       )
       .map_err(|source| DbError::Query {
@@ -877,9 +892,9 @@ impl Database {
         .execute(
           "INSERT INTO node_peers (
              id, node_id, slot_index, label, client_public_key, client_private_key_ref,
-             client_address_cidr, claimed_at, created_at
+             client_address_cidr, preshared_key, claimed_at, created_at
            ) VALUES (
-             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
              CASE WHEN ?4 IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%fZ', 'now') END,
              strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
            )",
@@ -891,6 +906,7 @@ impl Database {
             peer.client_public_key,
             peer.client_private_key_ref,
             peer.client_address_cidr,
+            peer.preshared_key,
           ],
         )
         .map_err(|source| DbError::Query {
@@ -912,7 +928,7 @@ impl Database {
     let mut statement = connection
       .prepare(
         "SELECT id, node_id, slot_index, label, client_public_key, client_private_key_ref,
-          client_address_cidr, claimed_at, created_at
+          client_address_cidr, preshared_key, claimed_at, created_at
          FROM node_peers
          WHERE node_id = ?1
          ORDER BY slot_index ASC",
@@ -947,7 +963,7 @@ impl Database {
     connection
       .query_row(
         "SELECT id, node_id, slot_index, label, client_public_key, client_private_key_ref,
-          client_address_cidr, claimed_at, created_at
+          client_address_cidr, preshared_key, claimed_at, created_at
          FROM node_peers
          WHERE id = ?1",
         params![id],
@@ -1596,6 +1612,7 @@ fn map_vpn_node_row(row: &Row<'_>) -> rusqlite::Result<VpnNodeRecord> {
     created_at: row.get(14)?,
     updated_at: row.get(15)?,
     endpoint_port: row.get::<_, Option<i64>>(16)?.and_then(|value| u16::try_from(value).ok()),
+    client_mtu: row.get::<_, Option<i64>>(17)?.and_then(|value| u16::try_from(value).ok()),
   })
 }
 
@@ -1608,8 +1625,9 @@ fn map_node_peer_row(row: &Row<'_>) -> rusqlite::Result<NodePeerRecord> {
     client_public_key: row.get(4)?,
     client_private_key_ref: row.get(5)?,
     client_address_cidr: row.get(6)?,
-    claimed_at: row.get(7)?,
-    created_at: row.get(8)?,
+    preshared_key: row.get(7)?,
+    claimed_at: row.get(8)?,
+    created_at: row.get(9)?,
   })
 }
 

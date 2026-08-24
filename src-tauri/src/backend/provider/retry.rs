@@ -9,7 +9,7 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
-  pub fn digitalocean_default() -> Self {
+  pub fn cloud_default() -> Self {
     Self {
       max_retries: 5,
       base_delay_ms: 250,
@@ -62,7 +62,7 @@ mod tests {
 
   #[test]
   fn retry_policy_identifies_retryable_statuses() {
-    let policy = RetryPolicy::digitalocean_default();
+    let policy = RetryPolicy::cloud_default();
     assert!(policy.should_retry_status(429));
     assert!(policy.should_retry_status(500));
     assert!(policy.should_retry_status(503));

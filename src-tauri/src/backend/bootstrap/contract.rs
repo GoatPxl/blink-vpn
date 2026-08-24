@@ -24,6 +24,10 @@ pub struct BootstrapPeer {
   pub public_key: String,
   /// The single address this peer is allowed to use, as `a.b.c.d/32`.
   pub address_cidr: String,
+  /// Symmetric key shared between the server and this one peer, generated on the Windows host
+  /// alongside the keypair. Required: bootstrap only runs at create, and every peer created since
+  /// PSK support carries one.
+  pub preshared_key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +198,7 @@ fn validate_peers(peers: &[BootstrapPeer]) -> Result<(), BootstrapError> {
 
   let mut seen_keys = HashSet::new();
   let mut seen_addresses = HashSet::new();
+  let mut seen_preshared_keys = HashSet::new();
 
   for peer in peers {
     if peer.public_key.trim().is_empty() {
@@ -210,12 +215,28 @@ fn validate_peers(peers: &[BootstrapPeer]) -> Result<(), BootstrapError> {
       }
     })?;
 
+    crate::backend::crypto::keypair::validate_preshared_key(&peer.preshared_key).map_err(
+      |source| BootstrapError::InvalidParameter {
+        field: "peers",
+        detail: format!("A peer preshared key is not valid WireGuard key material: {source}"),
+      },
+    )?;
+
     validate_ipv4_cidr(&peer.address_cidr, "peers")?;
 
     if !seen_keys.insert(peer.public_key.trim().to_string()) {
       return Err(BootstrapError::InvalidParameter {
         field: "peers",
         detail: "Two peers share a public key.".to_string(),
+      });
+    }
+
+    // A shared PSK collapses the pairwise secrecy the key exists to add: any holder could then
+    // impersonate either peer's symmetric half.
+    if !seen_preshared_keys.insert(peer.preshared_key.trim().to_string()) {
+      return Err(BootstrapError::InvalidParameter {
+        field: "peers",
+        detail: "Two peers share a preshared key.".to_string(),
       });
     }
 

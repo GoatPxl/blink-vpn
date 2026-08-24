@@ -50,6 +50,10 @@ Columns:
 - `public_ipv4` TEXT NULL
 - `server_public_key` TEXT NULL
 - `error_reason` TEXT NULL
+- `client_mtu` INTEGER NULL — tunnel MTU the owning provider's adapter calls for in client
+  configs, captured at provision time (migration 0021). NULL means no MTU line is written. Exists
+  because some providers run instance NICs below 1500 (GCE: 1460), where WireGuard's default 1420
+  fragments; the value is stored on the row so config rendering never needs the provider registry.
 - `created_at` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
 
@@ -111,6 +115,11 @@ Columns:
 - `client_public_key` TEXT NOT NULL
 - `client_private_key_ref` TEXT NOT NULL
 - `client_address_cidr` TEXT NOT NULL
+- `preshared_key` TEXT NULL — the WireGuard PSK this peer shares with the server, baked into the
+  server config at create time (migration 0021). NULL only for peers created before PSK support;
+  their server holds no PSK for them and, provisioning being write-only, never can. Stored in
+  SQLite deliberately: WireGuard key material is not a secret in this app (AGENTS.md §6), and the
+  value must appear verbatim in exported client configs and QR codes.
 - `claimed_at` TEXT NULL
 - `created_at` TEXT NOT NULL
 
@@ -247,6 +256,9 @@ Current migration sequence in [src-tauri/migrations](src-tauri/migrations):
 17. Activity events *(replaces init run logs)*
 18. Backfill legacy correlation ids
 19. Amazon EC2 provider seed
+20. Node peer slots *(replaces the single-peer columns on `vpn_nodes` and `tunnels`)*
+21. Peer preshared keys and per-node client MTU
+22. Linode provider seed
 
 Migration rules:
 

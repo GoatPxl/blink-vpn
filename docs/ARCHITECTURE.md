@@ -17,6 +17,7 @@ Included provider adapters:
 
 - DigitalOcean adapter for cloud VPS lifecycle
 - Amazon EC2 adapter for cloud VPS lifecycle
+- Linode adapter for cloud VPS lifecycle
 - Docker adapter for local container-backed development workflows
 
 ## System Diagram
@@ -29,12 +30,14 @@ flowchart LR
   REG --> NP[Unified NodeProvider]
   NP --> DO[DigitalOcean adapter]
   NP --> EC2[Amazon EC2 adapter]
+  NP --> LIN[Linode adapter]
   NP --> DKR[Docker adapter]
   ORCH --> DB[(SQLite)]
   ORCH --> SEC[Credential Manager]
   ORCH --> RUNTIME[WireGuard for Windows service]
   DO --> DOAPI[DigitalOcean API]
   EC2 --> AWSAPI[AWS EC2 / SSM / STS APIs]
+  LIN --> LINAPI[Linode API v4]
   DKR --> DKRCLI[Docker CLI]
 ```
 
@@ -111,6 +114,10 @@ The contract covers:
 - `get_status`: report the provider-level node status in a normalized form.
 - `exists`: check whether the node still exists.
 - `delete`: tear down the provider-side node resource.
+- `client_mtu_hint`: state the tunnel MTU this provider's networking calls for, or `None` (the
+  default) for providers that need no MTU line. Read once at provision time and stored on the node
+  row, so config rendering never needs the registry. Exists because some providers run instance
+  NICs below 1500, where WireGuard's default of 1420 fragments or blackholes.
 
 The registry resolves the correct provider adapter, loads the provider credential from secure storage, and presents that provider through the shared NodeProvider interface to the orchestrator.
 
@@ -128,7 +135,8 @@ while reporting cleanup as successful** — silently leaving a billable resource
 An adapter whose provider needs more than an id to address a node encodes that into the string and
 splits it back out at its own boundary. The EC2 adapter stores `<region>/<instance-id>`, because
 AWS scopes both the endpoint host and the request signature to a region and the trait's status,
-exists and delete methods do not carry one.
+exists and delete methods do not carry one. DigitalOcean and Linode both have globally addressable
+resources, so theirs are bare ids — the shape is the adapter's business, not a convention.
 
 ### Provider credentials are a field set
 
@@ -152,9 +160,11 @@ noted.
    Unknown codes must return `ProviderRegion::unknown` rather than a guess.
 3. **`impl ProviderAdapter`** — in `provider/mod.rs`, alongside the existing adapters. Name-mapping
    rules (hostname limits, tag charsets) belong here, not upstream.
-4. **Register it** — add to the array in `ProviderRegistry::new`. Each adapter names itself through
+4. **Register it** — add to the vec in `ProviderRegistry::new`. Each adapter names itself through
    `provider_name`, so the registry key cannot drift from the adapter's identity. Construction must
-   not fail: the registry unwraps, so a fallible constructor is a panic on startup.
+   not fail: the registry unwraps, so a fallible constructor is a panic on startup — follow
+   `Ec2ProviderAdapter::new` / `LinodeProviderAdapter::new`, which are infallible by construction,
+   rather than `DigitalOceanProviderAdapter::new`, whose `Result` is unwrapped with a panic.
 5. **Seed the provider row** — a new `migrations/00NN_seed_<slug>_provider.sql` using
    `INSERT OR IGNORE`, registered in the `MIGRATIONS` array in `backend/db/mod.rs`, plus
    `BUILTIN_*` constants and an `ensure_provider_present` call in `commands/system.rs`.

@@ -1,7 +1,7 @@
 use super::super::contract::{subnet_of, BootstrapError, BootstrapParams, READINESS_MARKER_PATH};
 use super::shared::{
   peer_public_keys_shell_list, peer_specs_shell_list, render_wg_interface_config,
-  FIREWALL_RULES_FRAGMENT,
+  FIREWALL_RULES_FRAGMENT, FORWARD_NAT_UP_COMMANDS,
 };
 
 /// Docker's equivalent of the cloud-init payload.
@@ -86,6 +86,16 @@ command -v wg >/dev/null
 command -v iptables >/dev/null
 command -v ip >/dev/null
 
+log_stage "wan-iface" "resolving the default-route interface for NAT pinning"
+WAN_IFACE=$(ip route show default 2>/dev/null | awk '{{print $5; exit}}')
+if [ -z "${{WAN_IFACE}}" ]; then
+  log_stage "wan-iface" "no default route found; cannot pin the NAT output interface"
+  exit 67
+fi
+
+log_stage "surface" "resetting ufw if present"
+if command -v ufw >/dev/null 2>&1; then ufw --force reset >/dev/null 2>&1 || true; fi
+
 log_stage "validate-privileges" "checking WireGuard interface operations inside container"
 probe="gspw0"
 ip link delete "$probe" >/dev/null 2>&1 || true
@@ -142,10 +152,16 @@ else
   wg set "${{WG_IFACE}}" private-key /etc/wireguard/server_private.key listen-port "${{WG_PORT}}"
   # wg-quick would have applied the [Peer] blocks from the config; the manual path must add
   # every one explicitly or the server comes up with no peers and rejects every handshake.
+  # Each spec is publickey|presharedkey|address; wg only takes a PSK from a file, hence the
+  # process substitution.
   for peer_spec in ${{PEER_SPECS}}; do
-    wg set "${{WG_IFACE}}" peer "${{peer_spec%%|*}}" allowed-ips "${{peer_spec##*|}}"
+    peer_rest="${{peer_spec#*|}}"
+    wg set "${{WG_IFACE}}" peer "${{peer_spec%%|*}}" preshared-key <(printf '%s\n' "${{peer_rest%%|*}}") allowed-ips "${{peer_spec##*|}}"
   done
   ip link set up dev "${{WG_IFACE}}"
+  # wg-quick's PostUp never ran on this path, so the forward/NAT rules it would have applied
+  # must be installed by hand — FORWARD is default-drop, so skipping them strands every peer.
+  {forward_nat_up_commands}
 fi
 
 log_stage "verify-interface" "verifying WireGuard interface state"
@@ -193,5 +209,6 @@ log_stage "complete" "bootstrap finished"
     endpoint = params.server_endpoint_ip,
     interface_config_fragment = render_wg_interface_config(&params.peers),
     firewall_rules_fragment = FIREWALL_RULES_FRAGMENT,
+    forward_nat_up_commands = FORWARD_NAT_UP_COMMANDS,
   ))
 }

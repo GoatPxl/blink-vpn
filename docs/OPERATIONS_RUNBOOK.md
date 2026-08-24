@@ -48,6 +48,7 @@ Use this order for fast recovery:
 | WireGuard runtime or mode failure | Repair the local runtime, confirm the selected mode, and retry | Tunnel reaches `connected` |
 | Stale node/tunnel state | Force cleanup and re-run flow | Local and remote state aligned |
 | Docker readiness failure | Start Docker and rerun readiness check | Readiness reports installed + daemon reachable |
+| Brief disconnect around 04:00 server time | None — the server applies security patches unattended and reboots itself when a patch requires it; the tunnel returns on its own | Tunnel reconnects within a few minutes |
 
 ## Escalation
 

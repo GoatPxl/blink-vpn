@@ -8,6 +8,7 @@ Provider adapters currently included:
 
 - DigitalOcean adapter for cloud node lifecycle
 - Amazon EC2 adapter for cloud node lifecycle
+- Linode adapter for cloud node lifecycle
 - Docker adapter for local container-backed development workflows
 
 ## Command Design Principles

@@ -24,6 +24,7 @@ them down before asserting anything, so a failed assertion cannot strand a dropl
 | Real Tauri E2E | the app itself — UI, commands, backend, daemon | needs Docker |
 | Real DigitalOcean | the production path against a live droplet | **billable** |
 | Real Amazon EC2 | the production path against a live instance | **billable** |
+| Real Linode | the production path against a live instance | **billable** |
 
 ## Required Verification Matrix
 
@@ -37,6 +38,7 @@ them down before asserting anything, so a failed assertion cannot strand a dropl
 | Connect / disconnect | `npm run tauri:e2e:connect` (**elevated shell**) |
 | DigitalOcean adapter or cloud-init | `npm run backend:test:do:real` (**billable**) |
 | Amazon EC2 adapter or cloud-init | `npm run backend:test:ec2:real` (**billable**) |
+| Linode adapter or cloud-init | `npm run backend:test:linode:real` (**billable**) |
 
 ## Frontend unit lane
 
@@ -149,6 +151,37 @@ that behavior. What differs for EC2 is resource orchestration, which is what thi
 
 The client runs in a container so no Windows elevation is needed. It is the *client*; nothing execs
 into the provisioned droplet.
+
+### Linode
+
+```bash
+GOATSTARE_LINODE_TEST_TOKEN=<personal access token> npm run backend:test:linode:real
+```
+
+`GOATSTARE_LINODE_TEST_REGION` overrides the default `us-ord`. The token needs read/write access to
+Linodes.
+
+**Creates a real, billable resource** — a `g6-nanode-1`, destroyed on every exit path including
+panics, with assertions running only after teardown. Linode bills hourly up to the monthly cap, and
+**keeps billing while an instance is powered off**, so a stranded instance is not free.
+
+The lane asserts an instance reaches ready with an endpoint and a locally-generated server key, that
+`external_ref` records a bare numeric instance id, and that the rendered client config carries a
+full tunnel and the peer's preshared key — with nothing read back off the server.
+
+The region is the part worth watching. `user_data` is accepted by the create call in every region
+but only *honoured* where the Metadata service runs; elsewhere it is silently ignored and the
+instance boots healthy and never bootstraps. `list_regions` filters on the `Metadata` capability,
+and this lane is what proves the filter is pointed at the right thing.
+
+Confirm nothing is left over if a run is interrupted:
+
+```bash
+curl -s -H "Authorization: Bearer $GOATSTARE_LINODE_TEST_TOKEN" \
+  https://api.linode.com/v4/linode/instances | grep goatstare
+```
+
+Every instance this app creates carries the `goatstare` tag.
 
 ## Environment Notes
 

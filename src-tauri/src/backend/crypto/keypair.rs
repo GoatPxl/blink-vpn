@@ -51,8 +51,26 @@ pub fn generate_client_keypair() -> Result<WireGuardKeypair, KeygenError> {
   generate_keypair()
 }
 
+/// A WireGuard preshared key: 32 random bytes, base64.
+///
+/// `wg genpsk` is byte-for-byte the same generation as `wg genkey`, so this reuses the keypair
+/// path's `Key::generate()` rather than adding an RNG dependency. A PSK accepts any 32-byte
+/// value — the x25519 clamping a private key carries does not disqualify it.
+pub fn generate_preshared_key() -> Result<String, KeygenError> {
+  let key = Key::generate().to_string();
+  if key.trim().is_empty() {
+    return Err(KeygenError::EmptyPublicKey);
+  }
+  Ok(key)
+}
+
 pub fn normalize_wireguard_key_material(value: &str) -> String {
   value.trim().replace('\r', "").replace('\n', "")
+}
+
+/// A preshared key is structurally identical to any other WireGuard key: 32 bytes, base64.
+pub fn validate_preshared_key(preshared_key: &str) -> Result<String, WireGuardConfigError> {
+  validate_public_key(preshared_key)
 }
 
 pub fn validate_public_key(public_key: &str) -> Result<String, WireGuardConfigError> {

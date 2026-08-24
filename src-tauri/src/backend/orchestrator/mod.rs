@@ -22,6 +22,7 @@ struct GeneratedPeer {
   public_key: String,
   private_key_ref: String,
   address_cidr: String,
+  preshared_key: String,
 }
 
 /// Remove key material written for a provision that then failed.
@@ -39,7 +40,9 @@ use crate::backend::bootstrap::{
   BootstrapPeer, DEFAULT_INTERFACE_NAME, DEFAULT_PEER_SLOTS, DEFAULT_SERVER_INTERFACE_CIDR,
   DEFAULT_WIREGUARD_PORT,
 };
-use crate::backend::crypto::keypair::{generate_client_keypair, generate_server_keypair, KeygenError};
+use crate::backend::crypto::keypair::{
+  generate_client_keypair, generate_preshared_key, generate_server_keypair, KeygenError,
+};
 use crate::backend::db::Database;
 use crate::backend::db::{
   DbError, NewActivityEvent, NewNodePeer, NodeLifecycleStatus, NodePeerRecord, TunnelRecord,
@@ -882,6 +885,11 @@ impl Orchestrator {
       source,
     })?;
 
+    let preshared_key = generate_preshared_key().map_err(|source| OrchestratorError::Keygen {
+      detail: "Failed to generate WireGuard preshared key for droplet provisioning.".to_string(),
+      source,
+    })?;
+
     let peers = allocate_peer_addresses(DEFAULT_SERVER_INTERFACE_CIDR, 1)
       .map_err(|source| OrchestratorError::Bootstrap {
         detail: "Could not allocate a peer address for droplet provisioning.".to_string(),
@@ -891,6 +899,7 @@ impl Orchestrator {
       .map(|address_cidr| BootstrapPeer {
         public_key: client_keypair.public_key.clone(),
         address_cidr,
+        preshared_key: preshared_key.clone(),
       })
       .collect();
 
@@ -1095,6 +1104,8 @@ impl Orchestrator {
         .map(|entry| (*entry).to_string())
         .collect(),
       persistent_keepalive_seconds: settings.keepalive_seconds,
+      preshared_key: peer.preshared_key.clone(),
+      mtu: node.client_mtu,
     })
     .map_err(|source| OrchestratorError::WireGuard {
       detail: "Could not build the device configuration.".to_string(),
@@ -1285,7 +1296,15 @@ impl Orchestrator {
         source,
       })?
       .map(|provider| provider.slug)
-      .unwrap_or_else(|| "digitalocean".to_string());
+      .ok_or_else(|| OrchestratorError::Provider {
+        detail:
+          "Provider record was not found before the node create flow. Re-open Settings so built-in providers are re-seeded, then retry."
+            .to_string(),
+        source: ProviderFlowError::MissingPersistedProvider {
+          provider_id: request.provider_id.clone(),
+          detail: "Node create flow requires an existing provider row.".to_string(),
+        },
+      })?;
 
     // The stage labels used to be prefixed "cloud-init" or "docker-init", chosen by comparing the
     // slug here — a provider branch outside an adapter (AGENTS.md 3). `provider_slug` is recorded
@@ -1316,11 +1335,7 @@ impl Orchestrator {
     providers
       .validate_provider_token(db, secure_storage, &request.provider_id)
       .map_err(|source| OrchestratorError::Provider {
-        detail: if provider_slug == "docker" {
-          "Docker provider validation failed before provisioning node. Verify Docker Desktop is running and daemon is reachable, then retry.".to_string()
-        } else {
-          "Provider token failed validation before provisioning node.".to_string()
-        },
+        detail: "Provider credential failed validation before provisioning node.".to_string(),
         source,
       })?;
 
@@ -1434,12 +1449,27 @@ impl Orchestrator {
         }
       };
 
+      // The PSK is symmetric, so it is minted here with the keypair: the server's copy ships in
+      // the bootstrap payload, the client's copy lives on the peer row for config export.
+      let preshared_key = match generate_preshared_key() {
+        Ok(preshared_key) => preshared_key,
+        Err(source) => {
+          failure = Some(OrchestratorError::Keygen {
+            detail: "Failed to generate a WireGuard preshared key for node provisioning."
+              .to_string(),
+            source,
+          });
+          break;
+        }
+      };
+
       match secure_storage.store_client_private_key(&request.node_id, &keypair.private_key) {
         Ok(private_key_ref) => generated.push(GeneratedPeer {
           id: Uuid::new_v4().to_string(),
           public_key: keypair.public_key,
           private_key_ref,
           address_cidr,
+          preshared_key,
         }),
         Err(source) => {
           failure = Some(OrchestratorError::SecretStorage {
@@ -1472,6 +1502,7 @@ impl Orchestrator {
         client_public_key: &peer.public_key,
         client_private_key_ref: &peer.private_key_ref,
         client_address_cidr: &peer.address_cidr,
+        preshared_key: &peer.preshared_key,
       })
       .collect();
 
@@ -1493,6 +1524,7 @@ impl Orchestrator {
         .map(|peer| BootstrapPeer {
           public_key: peer.public_key.clone(),
           address_cidr: peer.address_cidr.clone(),
+          preshared_key: peer.preshared_key.clone(),
         })
         .collect(),
     };
@@ -1603,6 +1635,15 @@ impl Orchestrator {
 
       created_node = Some(provisioned.clone());
 
+      // The adapter's MTU hint is captured on the row now, while the owning adapter is at hand;
+      // config rendering later reads the column instead of needing the registry.
+      let client_mtu = providers
+        .client_mtu_hint_for_provider(db, &request.provider_id)
+        .map_err(|source| OrchestratorError::Provider {
+          detail: "Could not read the provider's client MTU hint.".to_string(),
+          source,
+        })?;
+
       db
         .update_vpn_node_runtime_details(
           &request.node_id,
@@ -1610,6 +1651,7 @@ impl Orchestrator {
           Some(&provisioned.public_ipv4),
           None,
           Some(provisioned.endpoint_port),
+          client_mtu,
         )
         .map_err(|source| OrchestratorError::Database {
           detail: "Failed storing provider node reference/IP for node record.".to_string(),
@@ -1657,6 +1699,7 @@ impl Orchestrator {
           // The adapter reports the port the client should dial, which for the Docker dev
           // provider is the published host port rather than the in-container listen port.
           Some(contract.listen_port),
+          None,
         )
         .map_err(|source| OrchestratorError::Database {
           detail: "Failed persisting server endpoint and public key.".to_string(),
@@ -3254,6 +3297,8 @@ fn load_connect_config_for_tunnel(
     server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
     allowed_ips,
     persistent_keepalive_seconds: settings.keepalive_seconds,
+    preshared_key: peer.preshared_key.clone(),
+    mtu: node.client_mtu,
   };
 
   crate::backend::wireguard::build_client_config(&config)
@@ -3715,6 +3760,7 @@ mod tests {
         Some("203.0.113.10"),
         Some("server-pub-key-123"),
         Some(51820),
+        None,
       )
       .expect("runtime details should persist");
     db
@@ -3730,6 +3776,10 @@ mod tests {
 
   /// The address slot 0 gets from the default subnet, which is what the fixtures below assume.
   const TEST_CLIENT_CIDR: &str = "10.66.0.2/32";
+
+  /// A fixed, obviously-fake PSK for fixtures. The DB does not validate it; renders carry it
+  /// through verbatim.
+  const TEST_PRESHARED_KEY: &str = "dGVzdC1wcmVzaGFyZWQta2V5LTMyLWJ5dGVzISEhIQ==";
 
   /// Give a node the one peer slot its fixtures need, standing in for what provisioning bakes.
   fn seed_desktop_peer(
@@ -3753,6 +3803,7 @@ mod tests {
           client_public_key: "client-public-key",
           client_private_key_ref: &key_ref,
           client_address_cidr: TEST_CLIENT_CIDR,
+          preshared_key: TEST_PRESHARED_KEY,
         }],
       )
       .expect("peer slot should insert");
@@ -3788,6 +3839,7 @@ mod tests {
         Some("203.0.113.10"),
         Some("server-pub-key-123"),
         Some(51820),
+        None,
       )
       .expect("runtime details should persist");
     db
@@ -3938,6 +3990,7 @@ mod tests {
         Some("203.0.113.10"),
         Some("server-pub-key-123"),
         Some(51820),
+        None,
       )
       .expect("runtime details should persist");
 
@@ -3984,6 +4037,7 @@ mod tests {
         Some("203.0.113.10"),
         Some("server-pub-key-123"),
         Some(51820),
+        None,
       )
       .expect("runtime details should persist");
 
@@ -4144,6 +4198,7 @@ mod tests {
       created_at: "now".to_string(),
       updated_at: "now".to_string(),
       endpoint_port: Some(49154),
+      client_mtu: None,
     };
 
     let endpoint = resolve_server_endpoint_ip_for_connect(&node)
@@ -4246,6 +4301,7 @@ mod tests {
       created_at: "now".to_string(),
       updated_at: "now".to_string(),
       endpoint_port: None,
+      client_mtu: None,
     };
 
     let result = resolve_server_endpoint_ip_for_connect(&node);
@@ -4278,6 +4334,7 @@ mod tests {
         Some("203.0.113.10"),
         Some("server-pub-key-123"),
         Some(51820),
+        None,
       )
       .expect("runtime details should persist");
 
@@ -4388,6 +4445,7 @@ mod tests {
         Some("203.0.113.5"),
         None,
         Some(51820),
+        None,
       )
       .expect("runtime details should persist");
     db
@@ -4493,6 +4551,7 @@ mod tests {
       Some("203.0.113.10"),
       Some("server-pub-key"),
       Some(51820),
+      None,
     )
     .expect("runtime details should persist");
 
@@ -5020,7 +5079,7 @@ mod tests {
       db.transition_vpn_node_status(&"node-h".to_string(), status, None)
         .expect("node transition should persist");
     }
-    db.update_vpn_node_runtime_details("node-h", Some("42"), Some("203.0.113.10"), Some("k"), Some(51820))
+    db.update_vpn_node_runtime_details("node-h", Some("42"), Some("203.0.113.10"), Some("k"), Some(51820), None)
       .expect("runtime details should persist");
     db.create_tunnel("tunnel-h", "node-h", "wg-h", Some("wg-h"))
       .expect("tunnel should insert");
@@ -5519,6 +5578,8 @@ mod tests {
             server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
             allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
             persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+            preshared_key: desktop.as_ref().and_then(|peer| peer.preshared_key.clone()),
+            mtu: node.client_mtu,
           })
           .ok()
         });
@@ -5676,6 +5737,8 @@ mod tests {
             server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
             allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
             persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+            preshared_key: desktop.as_ref().and_then(|peer| peer.preshared_key.clone()),
+            mtu: node.client_mtu,
           })
           .ok()
         });
@@ -5733,6 +5796,171 @@ mod tests {
     println!("\n=== EC2 client config: {} ===", path.display());
     println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
     println!("=== instance and security group destroyed; this config is kept only as a record ===\n");
+  }
+
+  /// The full backend path against a real Linode instance.
+  ///
+  /// **Creates a billable resource** — destroyed on every exit path, with the assertions running
+  /// only after teardown so a failure cannot strand one. Needs `GOATSTARE_LINODE_TEST_TOKEN`;
+  /// `GOATSTARE_LINODE_TEST_REGION` overrides the default region.
+  ///
+  /// The region matters more here than on other providers: `user_data` is accepted everywhere but
+  /// only honoured where the Metadata service runs, so a region without it would provision an
+  /// instance that boots healthily and never bootstraps. `list_regions` filters those out; this
+  /// lane is what proves the filter is pointed at the right capability.
+  #[test]
+  #[ignore = "Creates a real, billable Linode instance; needs GOATSTARE_LINODE_TEST_TOKEN"]
+  fn real_linode_full_backend_path_produces_a_connect_config() {
+    use crate::backend::provider::{LinodeProviderAdapter, ProviderCredential};
+    use crate::backend::wireguard::{build_client_config, ClientConfigParams};
+
+    let token = match std::env::var("GOATSTARE_LINODE_TEST_TOKEN") {
+      Ok(token) if !token.trim().is_empty() => token,
+      _ => {
+        eprintln!("GOATSTARE_LINODE_TEST_TOKEN is not set; skipping.");
+        return;
+      }
+    };
+
+    let region = std::env::var("GOATSTARE_LINODE_TEST_REGION")
+      .ok()
+      .filter(|value| !value.trim().is_empty())
+      .unwrap_or_else(|| "us-ord".to_string());
+
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_secs())
+      .unwrap_or(0);
+
+    let db = Database::new(test_db_path(&format!("real_linode_{suffix}")));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    // Migration 0022 seeds this provider row.
+    const LINODE_PROVIDER_ID: &str = "provider-linode";
+    let credential = ProviderCredential::from_fields([("api_token".to_string(), token)]);
+    let token_ref = secure_storage
+      .store_provider_credential(LINODE_PROVIDER_ID, &credential.to_stored_value())
+      .expect("credential should store");
+    db.update_provider_token_ref(LINODE_PROVIDER_ID, Some(&token_ref))
+      .expect("token ref should persist");
+
+    let providers = ProviderRegistry::from_adapter(Arc::new(LinodeProviderAdapter::new()));
+    let orchestrator = Orchestrator::new();
+    let bootstrap = Bootstrap::new();
+    let wireguard = WireGuardManager::new();
+
+    let node_id = format!("node-linode-{suffix}");
+    let created = orchestrator.create_vpn_node_to_ready(
+      &providers,
+      &bootstrap,
+      &db,
+      &secure_storage,
+      &CreateVpnNodeRequest {
+        node_id: node_id.clone(),
+        provider_id: LINODE_PROVIDER_ID.to_string(),
+        node_name: format!("goatstare-e2e-{suffix}"),
+        region: region.clone(),
+        plan_key: "g6-nanode-1".to_string(),
+      },
+    );
+
+    // Everything needed for assertions is gathered while the node still exists, then teardown runs
+    // before anything is asserted. A panic in between would leave an instance billing.
+    let findings = created.as_ref().ok().map(|created| {
+      let node = db
+        .get_vpn_node(&node_id)
+        .ok()
+        .flatten()
+        .expect("node row should exist");
+
+      let desktop = desktop_peer(&db, &node_id);
+      let client_config = desktop
+        .as_ref()
+        .and_then(|peer| {
+          secure_storage
+            .get_client_private_key(&peer.client_private_key_ref)
+            .ok()
+            .flatten()
+        })
+        .and_then(|private_key| {
+          build_client_config(&ClientConfigParams {
+            private_key,
+            client_address_cidr: desktop
+              .as_ref()
+              .map(|peer| peer.client_address_cidr.clone())
+              .unwrap_or_default(),
+            dns_server: None,
+            server_public_key: created.server_public_key.clone(),
+            server_endpoint_ip: node.public_ipv4.clone().unwrap_or_default(),
+            server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
+            allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+            persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+            preshared_key: desktop.as_ref().and_then(|peer| peer.preshared_key.clone()),
+            mtu: node.client_mtu,
+          })
+          .ok()
+        });
+
+      (node, created.server_public_key.clone(), client_config)
+    });
+
+    // Teardown first, unconditionally.
+    let cleanup = orchestrator.force_cleanup_vpn_node(
+      &providers,
+      &wireguard,
+      &db,
+      &secure_storage,
+      &node_id,
+    );
+
+    let created =
+      created.unwrap_or_else(|error| panic!("node creation should reach Ready: {error:?}"));
+    let (node, server_public_key, client_config) =
+      findings.expect("findings should exist when creation succeeded");
+
+    let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
+    assert!(
+      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      "the instance must be destroyed, or it keeps billing: {cleanup:?}"
+    );
+
+    assert_eq!(node.lifecycle_status, NodeLifecycleStatus::Ready);
+    assert!(!created.server_public_key.trim().is_empty());
+
+    // Linode's API is global, so the reference is a bare numeric id — not a region-qualified one.
+    let external_ref = node.external_ref.clone().expect("an external_ref should be recorded");
+    assert!(
+      external_ref.parse::<u64>().is_ok(),
+      "the external_ref should be a Linode instance id, got {external_ref}"
+    );
+
+    let endpoint = node.public_ipv4.clone().expect("a public IPv4 should be recorded");
+    assert!(
+      !endpoint_is_locally_scoped(&endpoint),
+      "a Linode endpoint should be publicly routable, got {endpoint}"
+    );
+    assert_eq!(node.endpoint_port, Some(DEFAULT_WIREGUARD_PORT));
+
+    let config = client_config.expect("a client config should render");
+    assert!(config.contains("[Peer]"));
+    assert!(config.contains(&format!("PublicKey = {server_public_key}")));
+    assert!(config.contains(&format!("Endpoint = {endpoint}:{DEFAULT_WIREGUARD_PORT}")));
+    assert!(
+      config.contains("AllowedIPs = 0.0.0.0/0"),
+      "full tunnel must survive for a public endpoint: {config}"
+    );
+    // Every peer baked since PSK support carries one, and a config missing it cannot hand shake.
+    assert!(
+      config.contains("PresharedKey = "),
+      "the desktop peer's preshared key must reach the config: {config}"
+    );
+
+    let path = std::env::temp_dir().join(format!("goatstare-linode-{suffix}.conf"));
+    std::fs::write(&path, config.replace("\r\n", "\n")).expect("config should be writable");
+    println!("\n=== Linode client config: {} ===", path.display());
+    println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
+    println!("=== instance destroyed; this config is kept only as a record ===\n");
   }
 
   /// The production path, proven by an actual handshake against a real droplet.
@@ -5839,6 +6067,10 @@ mod tests {
         server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
         allowed_ips: vec!["10.66.0.0/24".to_string()],
         persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+        // The server baked a PSK for this peer, so the handshake this lane verifies only
+        // completes if the client presents the same one.
+        preshared_key: desktop.preshared_key.clone(),
+        mtu: node.client_mtu,
       })
       .map_err(|error| format!("client config should render: {error:?}"))?;
 
@@ -6289,6 +6521,7 @@ mod tests {
         Some("127.0.0.1"),
         Some("server-pub-key-123"),
         Some(51820),
+        None,
       )
       .expect("runtime details should persist");
 

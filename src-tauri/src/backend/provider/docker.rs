@@ -884,22 +884,24 @@ mod tests {
   };
   use crate::backend::bootstrap::{Bootstrap, BootstrapParams, BootstrapPeer, READINESS_MARKER_PATH};
   use crate::backend::crypto::keypair::{
-    generate_client_keypair, generate_server_keypair, WireGuardKeypair,
+    generate_client_keypair, generate_preshared_key, generate_server_keypair, WireGuardKeypair,
   };
 
   /// Render a real bootstrap payload the way the orchestrator does.
   ///
   /// Provisioning no longer accepts an empty script, because a defaulted payload would carry no
-  /// client peer. Returns the payload alongside the keypairs so tests can assert that exactly
-  /// these keys reach the container.
-  fn render_real_docker_payload() -> (String, WireGuardKeypair, WireGuardKeypair) {
+  /// client peer. Returns the payload alongside the keypairs and the peer's preshared key, so
+  /// tests can assert that exactly these keys reach the container — and hand-shake with it.
+  fn render_real_docker_payload() -> (String, WireGuardKeypair, WireGuardKeypair, String) {
     let server = generate_server_keypair().expect("server keypair should generate for real test");
     let client = generate_client_keypair().expect("client keypair should generate for real test");
+    let preshared_key = generate_preshared_key().expect("preshared key should generate");
 
     let params = BootstrapParams {
       peers: vec![BootstrapPeer {
         public_key: client.public_key.clone(),
         address_cidr: "10.66.0.2/32".to_string(),
+        preshared_key: preshared_key.clone(),
       }],
       ..BootstrapParams::default()
     };
@@ -909,7 +911,7 @@ mod tests {
       .expect("docker init render should succeed")
       .init_payload;
 
-    (payload, server, client)
+    (payload, server, client, preshared_key)
   }
   use crate::backend::provider::{BootstrapWaitRequest, ProviderAdapter};
   use std::time::{SystemTime, UNIX_EPOCH};
@@ -955,6 +957,7 @@ mod tests {
       peers: vec![BootstrapPeer {
         public_key: client.public_key.clone(),
         address_cidr: "10.66.0.2/32".to_string(),
+        preshared_key: generate_preshared_key().expect("preshared key should generate"),
       }],
       ..BootstrapParams::default()
     };
@@ -1004,7 +1007,7 @@ mod tests {
       .map(|value| value.as_secs())
       .unwrap_or(0);
     let node_name = format!("docker-bootstrap-phase-{suffix}");
-    let (payload, server_keypair, client_keypair) = render_real_docker_payload();
+    let (payload, server_keypair, client_keypair, _preshared_key) = render_real_docker_payload();
     let server_public_key_copy = server_keypair.public_key.clone();
 
     let provisioned = adapter
@@ -1086,7 +1089,7 @@ mod tests {
       .map(|value| value.as_secs())
       .unwrap_or(0);
     let node_name = format!("docker-connect-phase-{suffix}");
-    let (payload, server_keypair, client_keypair) = render_real_docker_payload();
+    let (payload, server_keypair, client_keypair, _preshared_key) = render_real_docker_payload();
 
     let provisioned = adapter
       .create_node(token, &node_name, DOCKER_REGION, "docker-small", &payload)
@@ -1153,7 +1156,7 @@ mod tests {
       .map(|value| value.as_secs())
       .unwrap_or(0);
 
-    let (payload, server_keypair, client_keypair) = render_real_docker_payload();
+    let (payload, server_keypair, client_keypair, preshared_key) = render_real_docker_payload();
     let node_name = format!("docker-clientconf-{suffix}");
 
     let provisioned = adapter
@@ -1182,6 +1185,10 @@ mod tests {
       // over the host's default route.
       allowed_ips: vec!["10.66.0.0/24".to_string()],
       persistent_keepalive_seconds: 25,
+      // The container's server config bakes a PSK for this peer, so the client must present the
+      // same one or the handshake this test exists to verify can never complete.
+      preshared_key: Some(preshared_key),
+      mtu: None,
     })
     .expect("client config should render");
 
@@ -1224,7 +1231,7 @@ mod tests {
       .map(|value| value.as_nanos())
       .unwrap_or(0);
 
-    let (payload_one, _s1, _c1) = render_real_docker_payload();
+    let (payload_one, _s1, _c1, _p1) = render_real_docker_payload();
     let first = adapter
       .create_node(
         token,
@@ -1235,7 +1242,7 @@ mod tests {
       )
       .expect("first docker node should provision");
 
-    let (payload_two, _s2, _c2) = render_real_docker_payload();
+    let (payload_two, _s2, _c2, _p2) = render_real_docker_payload();
     let second_result = adapter.create_node(
       token,
       &format!("docker-coexist-b-{suffix}"),
@@ -1288,7 +1295,7 @@ mod tests {
   }
 
   fn demo_run_args() -> Vec<String> {
-    let (payload, _server, _client) = render_real_docker_payload();
+    let (payload, _server, _client, _preshared_key) = render_real_docker_payload();
 
     DockerProviderAdapter::build_container_run_args("demo-container", "1", "1024m", &payload)
   }

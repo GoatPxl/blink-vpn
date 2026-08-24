@@ -3,6 +3,8 @@ pub mod digitalocean_regions;
 pub mod docker;
 pub mod ec2;
 pub mod ec2_regions;
+pub mod linode;
+pub mod linode_regions;
 pub mod retry;
 
 use std::collections::HashMap;
@@ -26,6 +28,10 @@ pub use digitalocean::{
 use digitalocean::{DigitalOceanApiClient, DigitalOceanError};
 use docker::DockerProviderAdapter;
 use ec2::{AwsCredentials, DEFAULT_EC2_REGION, Ec2ApiClient, Ec2Config};
+use linode::{
+  CreateLinodeRequest, LinodeApiClient, LinodeConfig, LinodeError, LinodeMetadata,
+  LINODE_USER_DATA_LIMIT_BYTES,
+};
 use retry::RetryPolicy;
 
 pub trait ProviderAdapter: Send + Sync {
@@ -75,6 +81,16 @@ pub trait ProviderAdapter: Send + Sync {
   ) -> Result<ProviderNodeStatus, ProviderAdapterError>;
   fn node_exists(&self, token: &str, node_id: &str) -> Result<bool, ProviderAdapterError>;
   fn delete_node(&self, token: &str, node_id: &str) -> Result<(), ProviderAdapterError>;
+  /// Tunnel MTU client configs for this provider's nodes should carry, if the provider's
+  /// networking calls for one.
+  ///
+  /// Some providers run instance NICs below 1500 (Google Compute Engine: 1460), where WireGuard's
+  /// default of 1420 fragments or blackholes. The value is captured on the node row at provision
+  /// time, so it survives adapter changes and stays `NULL` for nodes created before the hint
+  /// existed. `None` — the default — means client configs carry no MTU line.
+  fn client_mtu_hint(&self) -> Option<u16> {
+    None
+  }
 }
 
 /// How a provider takes delivery of the rendered bootstrap script.
@@ -295,7 +311,7 @@ impl DigitalOceanProviderAdapter {
     let config = DigitalOceanConfig::defaults();
     let client = DigitalOceanApiClient::new_with_timeout(
       base_url,
-      RetryPolicy::digitalocean_default(),
+      RetryPolicy::cloud_default(),
       config.request_timeout,
     )
     .map_err(|source| {
@@ -618,6 +634,426 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
   }
 }
 
+/// Linode labels: 3–64 characters, alphanumerics plus `-`, `_` and `.`, and no leading or
+/// trailing separator. Distinct from `sanitize_droplet_name` because the rule is Linode's, and a
+/// shared sanitizer would encode one provider's constraints for every other (AGENTS.md §3).
+fn sanitize_linode_label(raw: &str) -> String {
+  let mut sanitized = String::new();
+  let mut last_was_separator = false;
+
+  for character in raw.trim().chars() {
+    if character.is_ascii_alphanumeric() {
+      sanitized.push(character);
+      last_was_separator = false;
+    } else if !last_was_separator {
+      sanitized.push('-');
+      last_was_separator = true;
+    }
+  }
+
+  let trimmed = sanitized.trim_matches(|character| character == '-' || character == '.');
+  let bounded: String = trimmed.chars().take(64).collect();
+  let bounded = bounded.trim_end_matches(|character| character == '-' || character == '.');
+
+  // Also covers the 3-character minimum: anything shorter would be rejected at create.
+  if bounded.len() < 3 {
+    "goatstare-node".to_string()
+  } else {
+    bounded.to_string()
+  }
+}
+
+/// A single-use root password for a Linode deploy.
+///
+/// The create call requires either `root_pass` or `authorized_keys`, and the app has no SSH key to
+/// offer (AGENTS.md §2). This value is generated, sent once, and dropped — never stored, never
+/// logged, and never usable for login, because the bootstrap disables sshd on first boot.
+fn throwaway_root_password() -> String {
+  format!(
+    "Gs1!{}{}",
+    uuid::Uuid::new_v4().simple(),
+    uuid::Uuid::new_v4().simple()
+  )
+}
+
+pub struct LinodeProviderAdapter {
+  client: LinodeApiClient,
+  config: LinodeConfig,
+}
+
+impl LinodeProviderAdapter {
+  /// Infallible by construction, following `Ec2ProviderAdapter::new` rather than
+  /// `DigitalOceanProviderAdapter::new`, whose `Result` the registry unwraps with a panic.
+  pub fn new() -> Self {
+    Self::for_base_url("https://api.linode.com")
+  }
+
+  /// Construct against a specific API base URL so tests can point at a local mock server.
+  #[cfg(test)]
+  fn with_base_url(base_url: &str) -> Self {
+    Self::for_base_url(base_url)
+  }
+
+  fn for_base_url(base_url: &str) -> Self {
+    let config = LinodeConfig::defaults();
+    let client =
+      LinodeApiClient::new_with_timeout(base_url, RetryPolicy::cloud_default(), config.request_timeout)
+        .unwrap_or_else(|_| {
+          // A blocking client build failure is not recoverable here and must not panic at
+          // registry construction; the retry-free client surfaces it as a normal API error.
+          LinodeApiClient::new_with_timeout(base_url, RetryPolicy::cloud_default(), Duration::from_secs(20))
+            .expect("linode client should build with default timeout")
+        });
+
+    Self { client, config }
+  }
+
+  /// The bearer token out of the stored credential. Linode needs exactly one field, so a
+  /// credential saved before field sets existed maps onto the same key.
+  fn api_token(stored: &str) -> Result<String, ProviderAdapterError> {
+    Ok(ProviderCredential::parse(stored).single()?.to_string())
+  }
+
+  /// Linode keys instances by a numeric id, so the opaque node id is parsed back at the adapter
+  /// boundary. A malformed id is a caller error, not a panic.
+  fn instance_id(node_id: &str) -> Result<u64, ProviderAdapterError> {
+    node_id
+      .trim()
+      .parse::<u64>()
+      .map_err(|_| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "'{node_id}' is not a Linode instance id. The node record may belong to another provider."
+        ),
+      })
+  }
+
+  /// Delete an instance this call created but can no longer return, folding the outcome into the
+  /// error the caller sees.
+  ///
+  /// A failed delete is never swallowed (AGENTS.md §8): if the instance survives, its id goes into
+  /// the message so the user can remove it rather than paying for one the app never recorded.
+  fn abandon_instance(
+    &self,
+    api_token: &str,
+    instance_id: u64,
+    detail: &str,
+    cause: LinodeError,
+  ) -> ProviderAdapterError {
+    match self.client.delete_instance(api_token, instance_id) {
+      Ok(()) => ProviderAdapterError::api(
+        format!("{detail} The Linode was deleted, so nothing is still billing."),
+        cause,
+      ),
+      Err(cleanup_error) => ProviderAdapterError::api(
+        format!(
+          "{detail} Linode {instance_id} could NOT be deleted and may still be billing — remove it in the Linode console. Cleanup failure: {cleanup_error}"
+        ),
+        cause,
+      ),
+    }
+  }
+}
+
+impl ProviderAdapter for LinodeProviderAdapter {
+  fn provider_name(&self) -> &'static str {
+    "linode"
+  }
+
+  fn credential_fields(&self) -> Vec<CredentialField> {
+    vec![CredentialField {
+      key: LEGACY_SINGLE_CREDENTIAL_KEY.to_string(),
+      label: "Personal access token".to_string(),
+      placeholder: "linode_...".to_string(),
+      secret: true,
+      help: Some("Needs read/write access to Linodes.".to_string()),
+    }]
+  }
+
+  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
+    let account = self
+      .client
+      .get_account(&Self::api_token(token)?)
+      .map_err(|source| ProviderAdapterError::api("Linode token validation request failed.", source))?;
+
+    // `Account` is DigitalOcean-shaped and reused as the neutral validation result; the fields are
+    // filled with the closest Linode equivalent. Replacing this type is tracked separately.
+    Ok(Account {
+      uuid: account.euuid,
+      email: account.email,
+      status: "active".to_string(),
+    })
+  }
+
+  fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError> {
+    let regions = self
+      .client
+      .list_regions(&Self::api_token(token)?)
+      .map_err(|source| ProviderAdapterError::api("Linode region catalog request failed.", source))?;
+
+    // Only regions running the Metadata service can be offered: elsewhere `user_data` is accepted
+    // and silently ignored, which provisions a healthy-looking server that never bootstrapped.
+    let mut slugs = BTreeSet::new();
+    for region in regions
+      .into_iter()
+      .filter(|region| region.supports_metadata() && !region.id.trim().is_empty())
+    {
+      slugs.insert(region.id);
+    }
+
+    Ok(slugs.iter().map(|slug| self.describe_region(slug)).collect())
+  }
+
+  fn describe_region(&self, slug: &str) -> ProviderRegion {
+    linode_regions::describe_region(slug)
+  }
+
+  fn list_plan_pricing(
+    &self,
+    token: &str,
+    region: &str,
+  ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError> {
+    let types = self
+      .client
+      .list_types(&Self::api_token(token)?)
+      .map_err(|source| ProviderAdapterError::api("Linode type catalog request failed.", source))?;
+
+    let fetched_at_epoch_seconds =
+      match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(value) => value.as_secs().to_string(),
+        Err(_) => "0".to_string(),
+      };
+
+    // Shared-CPU plans only. Dedicated/GPU/premium classes exist but are far past what a personal
+    // WireGuard endpoint needs, and listing them invites an expensive mistake.
+    let mut pricing: Vec<ProviderPlanPricing> = types
+      .into_iter()
+      .filter(|entry| entry.class == "nanode" || entry.class == "standard")
+      .map(|entry| {
+        let (monthly_usd, hourly_usd) = entry.price_for_region(region);
+        let transfer_tb = entry.transfer as f64 / 1000.0;
+        let plan_label = if entry.label.trim().is_empty() {
+          entry.id.to_uppercase()
+        } else {
+          entry.label.trim().to_string()
+        };
+
+        ProviderPlanPricing {
+          plan_key: entry.id.clone(),
+          plan_label,
+          size_slug: entry.id,
+          region: region.to_string(),
+          memory_mb: entry.memory,
+          vcpus: entry.vcpus,
+          // Linode reports disk in MB; every other adapter reports GB.
+          disk_gb: entry.disk / 1024,
+          transfer_tb,
+          transfer_note: format!(
+            "Includes up to {transfer_tb:.2} TB transfer before provider overage policies apply."
+          ),
+          monthly_usd,
+          hourly_usd,
+          // Live prices, including any regional override.
+          estimated: false,
+          source_timestamp: fetched_at_epoch_seconds.clone(),
+        }
+      })
+      .collect();
+
+    pricing.sort_by(|left, right| {
+      left
+        .monthly_usd
+        .total_cmp(&right.monthly_usd)
+        .then_with(|| left.size_slug.cmp(&right.size_slug))
+    });
+
+    Ok(pricing)
+  }
+
+  fn init_delivery(&self) -> InitDelivery {
+    InitDelivery::CloudInit
+  }
+
+  fn create_node(
+    &self,
+    token: &str,
+    node_name: &str,
+    region: &str,
+    size_slug: &str,
+    init_payload: &str,
+  ) -> Result<ProvisionedNode, ProviderAdapterError> {
+    // The API takes user-data base64-encoded, and documents its limit on the encoded form — so
+    // the check has to happen after encoding, not before.
+    let user_data = base64_encode(init_payload.as_bytes());
+    if user_data.len() > LINODE_USER_DATA_LIMIT_BYTES {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "The bootstrap payload is {} bytes once encoded, over Linode's {LINODE_USER_DATA_LIMIT_BYTES}-byte user-data limit.",
+          user_data.len()
+        ),
+      });
+    }
+
+    let request = CreateLinodeRequest {
+      label: sanitize_linode_label(node_name),
+      region: if region.trim().is_empty() {
+        self.config.region.to_string()
+      } else {
+        region.trim().to_string()
+      },
+      instance_type: if size_slug.trim().is_empty() {
+        self.config.instance_type.to_string()
+      } else {
+        size_slug.trim().to_string()
+      },
+      image: self.config.image.to_string(),
+      root_pass: throwaway_root_password(),
+      booted: true,
+      tags: vec!["goatstare".to_string()],
+      metadata: LinodeMetadata { user_data },
+    };
+
+    let api_token = Self::api_token(token)?;
+
+    let created = self
+      .client
+      .create_instance(&api_token, &request)
+      .map_err(|source| ProviderAdapterError::api("Linode instance create call failed.", source))?;
+
+    // Past this line a billable instance exists. The orchestrator's rollback only fires once
+    // `create_node` has *returned* a node id, so a failure from here on must delete the instance
+    // itself or leave the user paying for one the app never recorded.
+    let running = match self.client.wait_for_instance_running(
+      &api_token,
+      created.id,
+      self.config.poll_interval,
+      self.config.poll_max_attempts,
+      self.config.instance_ready_timeout,
+    ) {
+      Ok(running) => running,
+      Err(source) => {
+        return Err(self.abandon_instance(
+          &api_token,
+          created.id,
+          "Linode instance never reached running state.",
+          source,
+        ));
+      }
+    };
+
+    let public_ipv4 = match self.client.extract_public_ipv4(&running) {
+      Ok(public_ipv4) => public_ipv4,
+      Err(source) => {
+        return Err(self.abandon_instance(
+          &api_token,
+          created.id,
+          "Running Linode did not expose a public IPv4.",
+          source,
+        ));
+      }
+    };
+
+    Ok(ProvisionedNode {
+      node_id: created.id.to_string(),
+      public_ipv4,
+      endpoint_port: DEFAULT_WIREGUARD_PORT,
+    })
+  }
+
+  /// Readiness is "the instance is running and has a public IPv4".
+  ///
+  /// Nothing is read off the server: the server keypair was generated locally and baked into the
+  /// payload, so its public key is already known here (AGENTS.md §2).
+  fn wait_for_bootstrap_ready(
+    &self,
+    token: &str,
+    request: &BootstrapWaitRequest,
+  ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
+    let instance = self
+      .client
+      .get_instance(&Self::api_token(token)?, Self::instance_id(&request.node_id)?)
+      .map_err(|source| {
+        ProviderAdapterError::api(
+          "Could not confirm Linode instance state before completing provisioning.",
+          source,
+        )
+      })?;
+
+    if !instance.status.trim().eq_ignore_ascii_case("running") {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "Linode instance is '{}' rather than running; provisioning cannot complete.",
+          instance.status
+        ),
+      });
+    }
+
+    let public_ipv4 = if request.endpoint_ip.trim().is_empty() {
+      self
+        .client
+        .extract_public_ipv4(&instance)
+        .map_err(|source| {
+          ProviderAdapterError::api("Running Linode did not expose a public IPv4.", source)
+        })?
+    } else {
+      request.endpoint_ip.clone()
+    };
+
+    Ok(BootstrapOutputContract {
+      server_endpoint_ip: public_ipv4,
+      // Echoed from what the caller generated and baked into the payload, not read back.
+      server_public_key: request.server_keypair.public_key.clone(),
+      listen_port: DEFAULT_WIREGUARD_PORT,
+    })
+  }
+
+  fn node_status(
+    &self,
+    token: &str,
+    node_id: &str,
+  ) -> Result<ProviderNodeStatus, ProviderAdapterError> {
+    match self
+      .client
+      .get_instance(&Self::api_token(token)?, Self::instance_id(node_id)?)
+    {
+      Ok(instance) => Ok(match instance.status.trim().to_ascii_lowercase().as_str() {
+        "provisioning" | "booting" | "migrating" | "rebuilding" | "cloning" | "restoring" => {
+          ProviderNodeStatus::New
+        }
+        "running" => ProviderNodeStatus::Active,
+        "offline" | "stopped" | "shutting_down" | "rebooting" => ProviderNodeStatus::Off,
+        "deleting" => ProviderNodeStatus::Archive,
+        _ => ProviderNodeStatus::Unknown,
+      }),
+      Err(LinodeError::NotFound { .. }) => Ok(ProviderNodeStatus::Deleted),
+      Err(source) => Err(ProviderAdapterError::api(
+        "Linode instance status check failed.",
+        source,
+      )),
+    }
+  }
+
+  fn node_exists(&self, token: &str, node_id: &str) -> Result<bool, ProviderAdapterError> {
+    match self
+      .client
+      .get_instance(&Self::api_token(token)?, Self::instance_id(node_id)?)
+    {
+      Ok(_) => Ok(true),
+      Err(LinodeError::NotFound { .. }) => Ok(false),
+      Err(source) => Err(ProviderAdapterError::api(
+        "Linode instance existence check failed.",
+        source,
+      )),
+    }
+  }
+
+  fn delete_node(&self, token: &str, node_id: &str) -> Result<(), ProviderAdapterError> {
+    self
+      .client
+      .delete_instance(&Self::api_token(token)?, Self::instance_id(node_id)?)
+      .map_err(|source| ProviderAdapterError::api("Linode instance delete call failed.", source))
+  }
+}
+
 /// Instance types offered for a GoatStare node, cheapest first.
 ///
 /// AWS publishes prices through the Pricing API, which is a large region-limited catalogue and a
@@ -770,11 +1206,11 @@ impl Ec2ProviderAdapter {
   /// the HTTP client is built lazily-safe here and a build failure surfaces as a normal API error.
   pub fn new() -> Self {
     let config = Ec2Config::defaults();
-    let client = Ec2ApiClient::new_with_timeout(RetryPolicy::digitalocean_default(), config.request_timeout)
+    let client = Ec2ApiClient::new_with_timeout(RetryPolicy::cloud_default(), config.request_timeout)
       .unwrap_or_else(|_| {
         // `reqwest` only fails to build a client on a malformed TLS configuration, which is not
         // input-dependent. Retrying with defaults keeps construction total.
-        Ec2ApiClient::new_with_timeout(RetryPolicy::digitalocean_default(), Duration::from_secs(20))
+        Ec2ApiClient::new_with_timeout(RetryPolicy::cloud_default(), Duration::from_secs(20))
           .expect("a default blocking HTTP client must be constructible")
       });
 
@@ -1499,9 +1935,10 @@ impl ProviderRegistry {
     // Each adapter names itself, so the registry key and the adapter's own identity cannot drift.
     // These slugs were written out a second time here, which meant a renamed adapter would still
     // answer to its old key and `UnsupportedProviderSlug` would name a provider that exists.
-    let adapters: [Arc<dyn ProviderAdapter>; 3] = [
+    let adapters: Vec<Arc<dyn ProviderAdapter>> = vec![
       Arc::new(digitalocean),
       Arc::new(Ec2ProviderAdapter::new()),
+      Arc::new(LinodeProviderAdapter::new()),
       Arc::new(DockerProviderAdapter::new()),
     ];
 
@@ -1844,6 +2281,17 @@ impl ProviderRegistry {
     Ok(adapter.init_delivery())
   }
 
+  /// The owning adapter's client-MTU hint, read at provision time so it can be recorded on the
+  /// node row. Offline: needs the stored slug, not a token.
+  pub fn client_mtu_hint_for_provider(
+    &self,
+    db: &Database,
+    provider_id: &str,
+  ) -> Result<Option<u16>, ProviderFlowError> {
+    let (_, adapter) = self.load_provider_and_adapter_allow_suspended(db, provider_id)?;
+    Ok(adapter.client_mtu_hint())
+  }
+
   fn load_provider_and_adapter(
     &self,
     db: &Database,
@@ -1971,10 +2419,11 @@ mod tests {
 
   use super::{
     Account, BootstrapWaitRequest, CredentialField, EC2_USER_DATA_LIMIT_BYTES, Ec2ProviderAdapter,
-    InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY, NodeInitRequest, ProviderAdapter,
-    ProviderAdapterError, ProviderCredential, ProviderNodeStatus, ProviderPlanPricing,
-    ProviderRegion, ProviderRegistry, ProvisionedNode, base64_encode, ec2_security_group_name,
-    sanitize_droplet_name, sanitize_ec2_tag_value,
+    InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY, LINODE_USER_DATA_LIMIT_BYTES,
+    LinodeProviderAdapter, NodeInitRequest, ProviderAdapter, ProviderAdapterError,
+    ProviderCredential, ProviderNodeStatus, ProviderPlanPricing, ProviderRegion, ProviderRegistry,
+    ProvisionedNode, base64_encode, ec2_security_group_name, sanitize_droplet_name,
+    sanitize_ec2_tag_value, sanitize_linode_label,
   };
 
   fn test_db_path(test_name: &str) -> PathBuf {
@@ -2333,6 +2782,285 @@ mod tests {
     assert_eq!(provisioned.node_id, "eu-west-2/i-0abc123def4567890");
   }
 
+  /// A Linode token is a single field, so the credential the adapter receives is the legacy
+  /// bare-token shape as well as the JSON one.
+  fn linode_credential() -> String {
+    single_field_credential("linode_test_token").to_stored_value()
+  }
+
+  fn mock_linode(
+    server: &mut mockito::Server,
+    method: &str,
+    path: &str,
+    body: &str,
+  ) -> mockito::Mock {
+    server
+      .mock(method, path)
+      .match_header("authorization", mockito::Matcher::Regex("^Bearer .+".to_string()))
+      .with_status(200)
+      .with_body(body)
+      .expect_at_least(1)
+      .create()
+  }
+
+  #[test]
+  fn linode_create_node_bakes_the_payload_and_reports_its_endpoint() {
+    let mut server = mockito::Server::new();
+
+    let create = mock_linode(
+      &mut server,
+      "POST",
+      "/v4/linode/instances",
+      r#"{"id":2002,"label":"primary-node","status":"provisioning","ipv4":["198.51.100.20"]}"#,
+    );
+    let poll = mock_linode(
+      &mut server,
+      "GET",
+      "/v4/linode/instances/2002",
+      r#"{"id":2002,"label":"primary-node","status":"running","ipv4":["198.51.100.20"]}"#,
+    );
+
+    let adapter = LinodeProviderAdapter::with_base_url(&server.url());
+
+    let provisioned = adapter
+      .create_node(
+        &linode_credential(),
+        "Primary Node",
+        "us-ord",
+        "g6-nanode-1",
+        "#cloud-config\npackages: [wireguard]\n",
+      )
+      .expect("provisioning should succeed against the mocked Linode API");
+
+    create.assert();
+    poll.assert();
+
+    assert_eq!(provisioned.public_ipv4, "198.51.100.20");
+    assert_eq!(provisioned.endpoint_port, DEFAULT_WIREGUARD_PORT);
+    // Linode's API is global, so the id needs no region prefix to be actionable later.
+    assert_eq!(provisioned.node_id, "2002");
+  }
+
+  /// Once the create call returns, a billable Linode exists. The orchestrator's rollback only
+  /// fires after `create_node` returns a node id, so a later failure has to clean up itself.
+  #[test]
+  fn linode_create_node_deletes_the_instance_when_it_never_starts() {
+    let mut server = mockito::Server::new();
+
+    let _create = mock_linode(
+      &mut server,
+      "POST",
+      "/v4/linode/instances",
+      r#"{"id":2002,"label":"n","status":"provisioning","ipv4":["198.51.100.20"]}"#,
+    );
+    let _poll = mock_linode(
+      &mut server,
+      "GET",
+      "/v4/linode/instances/2002",
+      r#"{"id":2002,"label":"n","status":"offline","ipv4":["198.51.100.20"]}"#,
+    );
+    let delete = mock_linode(&mut server, "DELETE", "/v4/linode/instances/2002", "{}");
+
+    let adapter = LinodeProviderAdapter::with_base_url(&server.url());
+
+    let error = adapter
+      .create_node(&linode_credential(), "n", "us-ord", "g6-nanode-1", "#cloud-config\n")
+      .expect_err("an instance that never runs must fail");
+
+    delete.assert();
+    assert!(
+      error.to_string().contains("nothing is still billing"),
+      "the user must be told the instance was cleaned up; was: {error}"
+    );
+  }
+
+  /// A delete that fails must name the instance rather than reporting success — otherwise the
+  /// user pays for a Linode the app has forgotten (AGENTS.md §8).
+  #[test]
+  fn linode_reports_an_instance_it_could_not_delete() {
+    let mut server = mockito::Server::new();
+
+    let _create = mock_linode(
+      &mut server,
+      "POST",
+      "/v4/linode/instances",
+      r#"{"id":2002,"label":"n","status":"provisioning","ipv4":["198.51.100.20"]}"#,
+    );
+    let _poll = mock_linode(
+      &mut server,
+      "GET",
+      "/v4/linode/instances/2002",
+      r#"{"id":2002,"label":"n","status":"offline","ipv4":["198.51.100.20"]}"#,
+    );
+    let _delete = server
+      .mock("DELETE", "/v4/linode/instances/2002")
+      .with_status(500)
+      .expect_at_least(1)
+      .create();
+
+    let adapter = LinodeProviderAdapter::with_base_url(&server.url());
+
+    let error = adapter
+      .create_node(&linode_credential(), "n", "us-ord", "g6-nanode-1", "#cloud-config\n")
+      .expect_err("the failure must surface");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("2002"), "the surviving instance must be named; was: {rendered}");
+    assert!(
+      rendered.contains("could NOT be deleted"),
+      "a failed cleanup must not read as success; was: {rendered}"
+    );
+  }
+
+  /// A region without the Metadata service accepts `user_data` and ignores it, producing a server
+  /// that boots cleanly and hand-shakes with nobody. Such regions must never reach the picker.
+  #[test]
+  fn linode_lists_only_regions_that_run_the_metadata_service() {
+    // Built directly rather than through `mock_linode`: the catalogue endpoints are paginated, so
+    // the request carries a query string the helper cannot express.
+    let mut server = mockito::Server::new();
+    let _regions = server
+      .mock("GET", "/v4/regions")
+      .match_query(mockito::Matcher::Any)
+      .with_status(200)
+      .with_body(
+        r#"{"data":[
+          {"id":"us-ord","status":"ok","capabilities":["Linodes","Metadata"]},
+          {"id":"ap-west","status":"ok","capabilities":["Linodes"]}
+        ],"pages":1}"#,
+      )
+      .expect_at_least(1)
+      .create();
+
+    let adapter = LinodeProviderAdapter::with_base_url(&server.url());
+    let regions = adapter
+      .list_regions(&linode_credential())
+      .expect("regions should list");
+
+    let slugs: Vec<&str> = regions.iter().map(|region| region.slug.as_str()).collect();
+    assert_eq!(slugs, vec!["us-ord"], "a non-metadata region must not be offered");
+    assert_eq!(regions[0].city.as_deref(), Some("Chicago"));
+  }
+
+  #[test]
+  fn linode_pricing_lists_shared_plans_cheapest_first_with_live_prices() {
+    let mut server = mockito::Server::new();
+    let _types = server
+      .mock("GET", "/v4/linode/types")
+      .match_query(mockito::Matcher::Any)
+      .with_status(200)
+      .with_body(
+        r#"{"data":[
+          {"id":"g6-standard-1","label":"Linode 2GB","class":"standard","memory":2048,"vcpus":1,
+           "disk":51200,"transfer":2000,"price":{"monthly":12.0,"hourly":0.018},"region_prices":[]},
+          {"id":"g6-nanode-1","label":"Nanode 1GB","class":"nanode","memory":1024,"vcpus":1,
+           "disk":25600,"transfer":1000,"price":{"monthly":5.0,"hourly":0.0075},"region_prices":[]},
+          {"id":"g7-gpu-x","label":"GPU","class":"gpu","memory":32768,"vcpus":8,
+           "disk":819200,"transfer":10000,"price":{"monthly":1000.0,"hourly":1.5},"region_prices":[]}
+        ],"pages":1}"#,
+      )
+      .expect_at_least(1)
+      .create();
+
+    let adapter = LinodeProviderAdapter::with_base_url(&server.url());
+    let pricing = adapter
+      .list_plan_pricing(&linode_credential(), "us-ord")
+      .expect("pricing should list");
+
+    let plans: Vec<&str> = pricing.iter().map(|plan| plan.size_slug.as_str()).collect();
+    assert_eq!(
+      plans,
+      vec!["g6-nanode-1", "g6-standard-1"],
+      "shared plans only, cheapest first — a GPU plan is an expensive mistake to offer"
+    );
+    assert_eq!(pricing[0].monthly_usd, 5.0);
+    assert!(!pricing[0].estimated, "these are live prices, not a curated table");
+    // Linode reports disk in MB; the field is GB everywhere else.
+    assert_eq!(pricing[0].disk_gb, 25);
+  }
+
+  /// A node id from another provider must be refused rather than parsed into someone else's
+  /// instance number.
+  #[test]
+  fn linode_rejects_a_node_reference_that_is_not_its_own() {
+    let adapter = LinodeProviderAdapter::new();
+
+    let error = adapter
+      .delete_node(&linode_credential(), "us-east-1/i-0abc123def4567890")
+      .expect_err("an EC2 node id must not be accepted");
+
+    assert!(matches!(error, ProviderAdapterError::Unsupported { .. }));
+  }
+
+  #[test]
+  fn linode_sanitizes_labels_to_what_the_api_accepts() {
+    assert_eq!(sanitize_linode_label("Primary Node"), "Primary-Node");
+    assert_eq!(sanitize_linode_label("  weird///name  "), "weird-name");
+    // Under Linode's 3-character minimum, so it falls back rather than being rejected at create.
+    assert_eq!(sanitize_linode_label("a"), "goatstare-node");
+    assert_eq!(sanitize_linode_label("***"), "goatstare-node");
+    assert!(sanitize_linode_label(&"x".repeat(120)).len() <= 64);
+  }
+
+  /// The payload is checked after encoding, because that is the form Linode's limit applies to.
+  #[test]
+  fn linode_rejects_a_payload_over_the_user_data_limit() {
+    let adapter = LinodeProviderAdapter::new();
+    // Base64 inflates by 4/3, so this is over the limit encoded but under it raw.
+    let oversized = "#cloud-config\n".to_string() + &"x".repeat(60_000);
+
+    let error = adapter
+      .create_node(&linode_credential(), "n", "us-ord", "g6-nanode-1", &oversized)
+      .expect_err("an oversized payload must be refused before a billable instance exists");
+
+    assert!(matches!(error, ProviderAdapterError::Unsupported { .. }));
+    assert!(error.to_string().contains("user-data limit"), "was: {error}");
+  }
+
+  /// The rendered cloud-init must fit Linode's user-data ceiling once encoded, the same guard the
+  /// EC2 adapter keeps against an edit to the shared bootstrap script.
+  #[test]
+  fn the_rendered_cloud_init_fits_inside_the_linode_user_data_limit() {
+    use crate::backend::bootstrap::{
+      allocate_peer_addresses, Bootstrap, BootstrapParams, BootstrapPeer, DEFAULT_PEER_SLOTS,
+      DEFAULT_SERVER_INTERFACE_CIDR,
+    };
+    use crate::backend::crypto::keypair::{
+      generate_client_keypair, generate_preshared_key, generate_server_keypair,
+    };
+
+    let server = generate_server_keypair().expect("server keypair should generate");
+    let peers = allocate_peer_addresses(DEFAULT_SERVER_INTERFACE_CIDR, DEFAULT_PEER_SLOTS)
+      .expect("the default subnet has room for a full slot complement")
+      .into_iter()
+      .map(|address_cidr| BootstrapPeer {
+        public_key: generate_client_keypair()
+          .expect("client keypair should generate")
+          .public_key,
+        address_cidr,
+        preshared_key: generate_preshared_key().expect("preshared key should generate"),
+      })
+      .collect();
+
+    let artifact = Bootstrap
+      .render_cloud_init(
+        &BootstrapParams {
+          peers,
+          ..BootstrapParams::default()
+        },
+        &server.private_key,
+        &server.public_key,
+      )
+      .expect("cloud-init should render");
+
+    let encoded = base64_encode(artifact.init_payload.as_bytes());
+    assert!(
+      encoded.len() <= LINODE_USER_DATA_LIMIT_BYTES,
+      "encoded payload is {} bytes, over Linode's {LINODE_USER_DATA_LIMIT_BYTES}-byte limit",
+      encoded.len()
+    );
+  }
+
   /// An account with no default VPC gets a capability error naming the problem, not a failed launch.
   #[test]
   fn ec2_create_node_reports_a_missing_default_vpc_as_a_capability_error() {
@@ -2584,7 +3312,9 @@ mod tests {
       allocate_peer_addresses, Bootstrap, BootstrapParams, BootstrapPeer, DEFAULT_PEER_SLOTS,
       DEFAULT_SERVER_INTERFACE_CIDR,
     };
-    use crate::backend::crypto::keypair::{generate_client_keypair, generate_server_keypair};
+    use crate::backend::crypto::keypair::{
+      generate_client_keypair, generate_preshared_key, generate_server_keypair,
+    };
 
     let server = generate_server_keypair().expect("server keypair should generate");
 
@@ -2600,6 +3330,7 @@ mod tests {
           .expect("client keypair should generate")
           .public_key,
         address_cidr,
+        preshared_key: generate_preshared_key().expect("preshared key should generate"),
       })
       .collect();
 
@@ -2818,6 +3549,7 @@ mod tests {
     assert!(registry.node_provider_for_slug("docker").is_some());
     assert!(registry.node_provider_for_slug("digitalocean").is_some());
     assert!(registry.node_provider_for_slug("aws-ec2").is_some());
+    assert!(registry.node_provider_for_slug("linode").is_some());
     assert!(registry.node_provider_for_slug("nimbus-cloud").is_none());
   }
 

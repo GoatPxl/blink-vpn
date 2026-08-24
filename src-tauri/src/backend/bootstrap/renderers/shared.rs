@@ -2,23 +2,35 @@ use super::super::contract::{
   subnet_of, BootstrapError, BootstrapParams, BootstrapPeer, READINESS_MARKER_PATH,
 };
 
+/// The forwarding and NAT rules the tunnel needs, applied when the interface comes up.
+///
+/// `${...}` are *shell* variables — expanded by the unquoted heredoc when these commands sit in
+/// `PostUp`, or directly by the script when the Docker fallback applies them by hand. One constant
+/// serves both so the two paths cannot drift.
+///
+/// Rule order and content, each learned the hard way (mostly by Algo, stolen gratefully):
+/// - The 169.254.0.0/16 drop keeps VPN peers away from the cloud metadata service
+///   (169.254.169.254) — without it any phone on the tunnel can read the instance's IMDS.
+/// - The subnet-to-subnet drop isolates peers from each other; WireGuard's per-peer AllowedIPs
+///   already prevents cross-routing, this is the belt to that suspender.
+/// - The NAT rule masquerades `${NAT_SOURCE_CIDR}`, the whole tunnel subnet (a single `/32` here
+///   once silently denied every peer but the first any internet), and pins the output interface
+///   to `${WAN_IFACE}` — unpinned masquerade NATs onto the wrong interface on multi-homed boxes.
+pub(super) const FORWARD_NAT_UP_COMMANDS: &str = "iptables -A FORWARD -s ${NAT_SOURCE_CIDR} -d 169.254.0.0/16 -j DROP; iptables -A FORWARD -s ${NAT_SOURCE_CIDR} -d ${NAT_SOURCE_CIDR} -j DROP; iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT; iptables -A FORWARD -i ${WG_IFACE} -s ${NAT_SOURCE_CIDR} -j ACCEPT; iptables -t nat -A POSTROUTING -s ${NAT_SOURCE_CIDR} -o ${WAN_IFACE} -j MASQUERADE";
+
+const FORWARD_NAT_DOWN_COMMANDS: &str = "iptables -D FORWARD -s ${NAT_SOURCE_CIDR} -d 169.254.0.0/16 -j DROP; iptables -D FORWARD -s ${NAT_SOURCE_CIDR} -d ${NAT_SOURCE_CIDR} -j DROP; iptables -D FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT; iptables -D FORWARD -i ${WG_IFACE} -s ${NAT_SOURCE_CIDR} -j ACCEPT; iptables -t nat -D POSTROUTING -s ${NAT_SOURCE_CIDR} -o ${WAN_IFACE} -j MASQUERADE";
+
 /// The `[Interface]` half of the server's `wg0.conf`.
 ///
 /// `${...}` are *shell* variables, expanded by the unquoted heredoc that writes this file on the
 /// server — not Rust format arguments. Only the `[Peer]` blocks are substituted here, by
-/// `render_wg_interface_config`.
-///
-/// The NAT rule masquerades `${NAT_SOURCE_CIDR}`, the whole tunnel subnet. It masqueraded a single
-/// client `/32` while only one peer existed; under that rule a second peer completes a handshake
-/// and then has no internet at all, which looks like a client fault and is not one.
-const WG_INTERFACE_HEADER_FRAGMENT: &str = r#"[Interface]
-Address = ${SERVER_CIDR}
-ListenPort = ${WG_PORT}
-PrivateKey = ${SERVER_PRIVATE_KEY}
-SaveConfig = false
-
-PostUp = iptables -A FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -A FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -A POSTROUTING -s ${NAT_SOURCE_CIDR} -j MASQUERADE
-PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -D FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -D POSTROUTING -s ${NAT_SOURCE_CIDR} -j MASQUERADE"#;
+/// `render_wg_interface_config`. `${WAN_IFACE}` is resolved by the script from the default route
+/// before the heredoc runs, so the baked rules name the interface the box actually egresses on.
+fn wg_interface_header() -> String {
+  format!(
+    "[Interface]\nAddress = ${{SERVER_CIDR}}\nListenPort = ${{WG_PORT}}\nPrivateKey = ${{SERVER_PRIVATE_KEY}}\nSaveConfig = false\n\nPostUp = {FORWARD_NAT_UP_COMMANDS}\nPostDown = {FORWARD_NAT_DOWN_COMMANDS}"
+  )
+}
 
 /// Server `wg0.conf`, including one `[Peer]` block per baked peer.
 ///
@@ -29,11 +41,13 @@ PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -D FORWARD -o 
 /// WireGuard key material and IPv4 CIDRs by `validate_bootstrap_params` before this runs, so
 /// nothing shell-significant can reach the generated file.
 pub(super) fn render_wg_interface_config(peers: &[BootstrapPeer]) -> String {
-  let mut config = String::from(WG_INTERFACE_HEADER_FRAGMENT);
+  let mut config = wg_interface_header();
 
   for peer in peers {
     config.push_str("\n\n[Peer]\nPublicKey = ");
     config.push_str(&peer.public_key);
+    config.push_str("\nPresharedKey = ");
+    config.push_str(&peer.preshared_key);
     config.push_str("\nAllowedIPs = ");
     config.push_str(&peer.address_cidr);
   }
@@ -50,25 +64,35 @@ pub(super) fn peer_public_keys_shell_list(peers: &[BootstrapPeer]) -> String {
     .join(" ")
 }
 
-/// Space-separated `publickey|address` pairs, for the Docker path's manual `wg set` fallback.
+/// Space-separated `publickey|presharedkey|address` triples, for the Docker path's manual
+/// `wg set` fallback.
 ///
-/// `|` cannot occur in base64 key material or in a CIDR, so it is unambiguous as a separator and
-/// the shell can split each pair with `%%` / `##` expansions.
+/// `|` cannot occur in base64 key material or in a CIDR, so it is unambiguous as a separator:
+/// `%%|*` takes the public key, `##*|` the address, and stripping the first field then taking
+/// `%%|*` again yields the preshared key.
 pub(super) fn peer_specs_shell_list(peers: &[BootstrapPeer]) -> String {
   peers
     .iter()
-    .map(|peer| format!("{}|{}", peer.public_key, peer.address_cidr))
+    .map(|peer| format!("{}|{}|{}", peer.public_key, peer.preshared_key, peer.address_cidr))
     .collect::<Vec<_>>()
     .join(" ")
 }
 
-pub(super) const FIREWALL_RULES_FRAGMENT: &str = r#"iptables -N GOATSTARE-INPUT 2>/dev/null || true
+/// Ingress rules and the forward-by-default-deny posture.
+///
+/// No SSH rule: the server runs no sshd (the cloud path disables it outright) and the app never
+/// dials in (AGENTS.md §2), so the only listener is WireGuard's UDP port. ICMP echo is answered
+/// but rate-limited per source; the plain-accept fallback covers a kernel without `xt_hashlimit`
+/// (some container hosts) — same script everywhere, degraded by one rule where the module is
+/// absent rather than forked per provider (§3).
+pub(super) const FIREWALL_RULES_FRAGMENT: &str = r#"iptables -P FORWARD DROP
+iptables -N GOATSTARE-INPUT 2>/dev/null || true
 iptables -F GOATSTARE-INPUT
 iptables -A GOATSTARE-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A GOATSTARE-INPUT -i lo -j ACCEPT
 iptables -A GOATSTARE-INPUT -i ${WG_IFACE} -j ACCEPT
-iptables -A GOATSTARE-INPUT -p tcp --dport 22 -j ACCEPT
 iptables -A GOATSTARE-INPUT -p udp --dport ${WG_PORT} -j ACCEPT
+iptables -A GOATSTARE-INPUT -p icmp --icmp-type echo-request -m hashlimit --hashlimit-upto 5/second --hashlimit-burst 10 --hashlimit-mode srcip --hashlimit-name goatstare-icmp -j ACCEPT 2>/dev/null || iptables -A GOATSTARE-INPUT -p icmp --icmp-type echo-request -j ACCEPT
 iptables -A GOATSTARE-INPUT -j DROP
 iptables -C INPUT -j GOATSTARE-INPUT 2>/dev/null || iptables -I INPUT 1 -j GOATSTARE-INPUT"#;
 
@@ -125,6 +149,20 @@ log_stage "validate-tools" "checking WireGuard and firewall toolchain"
 command -v wg >/dev/null
 command -v iptables >/dev/null
 command -v systemctl >/dev/null
+command -v ip >/dev/null
+
+log_stage "wan-iface" "resolving the default-route interface for NAT pinning"
+WAN_IFACE=$(ip route show default 2>/dev/null | awk '{{print $5; exit}}')
+if [ -z "${{WAN_IFACE}}" ]; then
+  log_stage "wan-iface" "no default route found; cannot pin the NAT output interface"
+  exit 67
+fi
+
+log_stage "surface" "resetting ufw and disabling sshd"
+# Provider images often ship UFW enabled; two rule writers on one box fight each other.
+if command -v ufw >/dev/null 2>&1; then ufw --force reset >/dev/null 2>&1 || true; fi
+# Nothing ever dials in (AGENTS.md 2), so no listener stays behind.
+systemctl disable --now ssh >/dev/null 2>&1 || true
 
 if [ ! -f /etc/wireguard/server_private.key ] || [ ! -f /etc/wireguard/server_public.key ]; then
   log_stage "keypair-missing" "app must stage server keys before running init script"
@@ -154,6 +192,12 @@ sysctl --system
 
 log_stage "firewall" "installing input chain rules"
 {firewall_rules_fragment}
+
+# Persist the ingress chain before the tunnel starts. Auto-reboot is enabled (unattended
+# upgrades), and PostUp only re-creates the forward/NAT rules — the INPUT chain must come back
+# from the saved rule set. Saving before wg-quick keeps its PostUp rules out of the saved file,
+# or every reboot would apply them twice.
+command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
 
 log_stage "service" "enabling wg-quick@${{WG_IFACE}}"
 systemctl enable --now wg-quick@${{WG_IFACE}}

@@ -14,7 +14,8 @@ Provider API keys are stored in **Windows Credential Manager**, under the servic
 `token_ref` handle pointing at that entry — never the key.
 
 A credential is a **set of named fields**, serialized to a JSON object inside that single entry:
-DigitalOcean stores `api_token`, Amazon EC2 stores `access_key_id` and `secret_access_key`. Only the
+DigitalOcean and Linode store `api_token`, Amazon EC2 stores `access_key_id` and
+`secret_access_key`. Only the
 provider's own adapter interprets them, so the schema never learns that some providers need two
 values. A stored value that is not a JSON object is read as a single `api_token` field, which is how
 credentials saved by earlier versions keep working.
@@ -76,6 +77,36 @@ close that window, but a failure to clean them up leaves the machine with no con
 obvious remedy, and they would need elevation outside connect/disconnect (§4 of AGENTS.md). Two
 mechanisms would also be the parallel-implementation drift §5 forbids. Revisit as its own task if
 the residual window proves unacceptable.
+
+## Server Hardening
+
+The bootstrap payload (migration-0021-era nodes onward) hardens the server it creates. All of it
+is baked at create time — provisioning is write-only (AGENTS.md §2), so none of it can be adjusted
+on a running node.
+
+- **Ingress is default-drop.** The only listener is WireGuard's UDP port. There is no SSH rule and
+  no sshd: the bootstrap disables the service outright, since nothing ever dials in. ICMP echo is
+  answered but rate-limited per source. UFW, if the provider image shipped it enabled, is reset so
+  exactly one thing writes firewall rules.
+- **VPN peers cannot reach the cloud metadata service.** A FORWARD drop for 169.254.0.0/16 keeps a
+  device on the tunnel from querying the instance's IMDS (169.254.169.254) through the exit.
+- **Peers are isolated from each other.** A subnet-to-subnet FORWARD drop backs up WireGuard's
+  per-peer AllowedIPs routing.
+- **NAT is pinned to the default-route interface**, resolved at boot — unpinned masquerade picks
+  the wrong interface on multi-homed instances.
+- **Every peer has a per-peer preshared key**, generated on the Windows host with the keypair and
+  baked into the server config. PSKs are WireGuard key material, not secrets (§6): they live in
+  SQLite and travel inside exported configs and QR codes, because a client without its PSK cannot
+  complete a handshake at all.
+- **Security patches apply themselves, and reboot the box.** unattended-upgrades runs with
+  `Automatic-Reboot "true"` (04:00 server time): no operator ever logs in, so a kernel patch that
+  waited for a manual reboot would wait forever. The tunnel and firewall are reboot-safe —
+  `wg-quick@` is enabled and re-applies forward/NAT rules via PostUp, and the ingress chain is
+  restored by `netfilter-persistent`. The reboot itself is a brief tunnel drop, documented in the
+  operations runbook.
+
+Nodes provisioned before these changes keep the server they were created with; the upgrade path is
+destroy-and-recreate, same as every other server-side change.
 
 ## Tunnel Coverage
 

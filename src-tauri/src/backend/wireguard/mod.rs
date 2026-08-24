@@ -704,6 +704,13 @@ pub struct ClientConfigParams {
   pub server_listen_port: u16,
   pub allowed_ips: Vec<String>,
   pub persistent_keepalive_seconds: u16,
+  /// Symmetric key this peer shares with the server. `None` only for peers baked before PSK
+  /// support — their server holds no PSK for them, and a config that sent one anyway would fail
+  /// every handshake.
+  pub preshared_key: Option<String>,
+  /// Tunnel MTU the node's provider calls for (e.g. 1380 on GCE, whose NIC MTU is 1460 — the
+  /// WireGuard default of 1420 fragments there). `None` omits the line for the kernel default.
+  pub mtu: Option<u16>,
 }
 
 /// What `sc query` says about a tunnel's service.
@@ -1131,12 +1138,26 @@ pub fn build_client_config(params: &ClientConfigParams) -> Result<String, WireGu
     .map(|dns| format!("DNS = {dns}\n"))
     .unwrap_or_default();
 
+  let mtu_line = params
+    .mtu
+    .map(|mtu| format!("MTU = {mtu}\n"))
+    .unwrap_or_default();
+
+  let preshared_key_line = params
+    .preshared_key
+    .as_ref()
+    .filter(|value| !value.trim().is_empty())
+    .map(|psk| format!("PresharedKey = {psk}\n"))
+    .unwrap_or_default();
+
   Ok(format!(
-    "[Interface]\nPrivateKey = {}\nAddress = {}\n{}\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\nEndpoint = {}:{}\nPersistentKeepalive = {}\n",
+    "[Interface]\nPrivateKey = {}\nAddress = {}\n{}{}\n[Peer]\nPublicKey = {}\n{}AllowedIPs = {}\nEndpoint = {}:{}\nPersistentKeepalive = {}\n",
     params.private_key,
     params.client_address_cidr,
+    mtu_line,
     dns_line,
     params.server_public_key,
+    preshared_key_line,
     allowed_ips.join(", "),
     params.server_endpoint_ip,
     params.server_listen_port,
@@ -1758,6 +1779,8 @@ mod tests {
       server_listen_port: 51820,
       allowed_ips: vec!["0.0.0.0/0".to_string()],
       persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+      preshared_key: None,
+      mtu: None,
     })
     .expect("config generation should succeed");
 
@@ -1781,6 +1804,8 @@ mod tests {
       server_listen_port: 51820,
       allowed_ips: vec![],
       persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+      preshared_key: None,
+      mtu: None,
     })
     .expect("config generation should succeed");
 
@@ -1801,6 +1826,8 @@ mod tests {
       server_listen_port: 51820,
       allowed_ips: vec!["0.0.0.0/0".to_string()],
       persistent_keepalive_seconds: 15,
+      preshared_key: None,
+      mtu: None,
     })
     .expect("config should render");
 
@@ -1820,10 +1847,60 @@ mod tests {
       server_listen_port: 51820,
       allowed_ips: vec!["0.0.0.0/0".to_string()],
       persistent_keepalive_seconds: 25,
+      preshared_key: None,
+      mtu: None,
     })
     .expect("config should render");
 
     assert!(!config.contains("DNS"), "config was: {config}");
+  }
+
+  /// A peer baked with a PSK must present it, and one baked without must not send one — a config
+  /// on the wrong side of that line fails every handshake.
+  #[test]
+  fn client_config_carries_the_preshared_key_only_when_the_peer_has_one() {
+    let base = |preshared_key: Option<String>| ClientConfigParams {
+      private_key: "client-private".to_string(),
+      client_address_cidr: "10.66.0.2/32".to_string(),
+      dns_server: None,
+      server_public_key: "server-public".to_string(),
+      server_endpoint_ip: "203.0.113.10".to_string(),
+      server_listen_port: 51820,
+      allowed_ips: vec!["0.0.0.0/0".to_string()],
+      persistent_keepalive_seconds: 25,
+      preshared_key,
+      mtu: None,
+    };
+
+    let with_psk = build_client_config(&base(Some("psk-value".to_string())))
+      .expect("config should render");
+    assert!(with_psk.contains("PresharedKey = psk-value"), "config was: {with_psk}");
+
+    let without_psk = build_client_config(&base(None)).expect("config should render");
+    assert!(!without_psk.contains("PresharedKey"), "config was: {without_psk}");
+  }
+
+  /// The MTU line appears only when the node's provider called for one (e.g. GCE's 1460 NIC).
+  #[test]
+  fn client_config_carries_the_mtu_only_when_the_provider_hints_one() {
+    let base = |mtu: Option<u16>| ClientConfigParams {
+      private_key: "client-private".to_string(),
+      client_address_cidr: "10.66.0.2/32".to_string(),
+      dns_server: None,
+      server_public_key: "server-public".to_string(),
+      server_endpoint_ip: "203.0.113.10".to_string(),
+      server_listen_port: 51820,
+      allowed_ips: vec!["0.0.0.0/0".to_string()],
+      persistent_keepalive_seconds: 25,
+      preshared_key: None,
+      mtu,
+    };
+
+    let with_mtu = build_client_config(&base(Some(1380))).expect("config should render");
+    assert!(with_mtu.contains("MTU = 1380"), "config was: {with_mtu}");
+
+    let without_mtu = build_client_config(&base(None)).expect("config should render");
+    assert!(!without_mtu.contains("MTU"), "config was: {without_mtu}");
   }
 
   #[test]
