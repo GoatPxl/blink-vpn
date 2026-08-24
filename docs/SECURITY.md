@@ -23,10 +23,16 @@ provider's own adapter interprets them, so the schema never learns that some pro
 values. A stored value that is not a JSON object is read as a single `api_token` field, which is how
 credentials saved by earlier versions keep working.
 
-Redaction covers `secret_access_key`, `session_token`, `service_account_json` and `assertion` (the
-signed JWT sent to Google's token endpoint) alongside `api_token`. `access_key_id`, `client_email`
-and `project_id` are deliberately left readable: they identify which credential is in use, which is
-a real diagnostic, and none of them is a secret.
+OpenStack stores three fields: `auth_url`, `application_credential_id` and
+`application_credential_secret`. Application credentials are asked for rather than a username and
+password because they are scoped to one project, independently revocable, and carry no domain or
+project name for the user to get wrong.
+
+Redaction covers `secret_access_key`, `session_token`, `service_account_json`, `assertion` (the
+signed JWT sent to Google's token endpoint), `application_credential_secret` and `X-Subject-Token`
+(the issued Keystone token) alongside `api_token`. `access_key_id`, `client_email`, `project_id`,
+`auth_url` and `application_credential_id` are deliberately left readable: they identify which
+credential and which cloud are in use, which is a real diagnostic, and none of them is a secret.
 
 **The RSA key inside a Google key file is matched by shape, not by field name.** Google calls it
 `private_key` — the same name WireGuard client configs use for material this app deliberately does

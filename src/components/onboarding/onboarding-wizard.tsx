@@ -643,7 +643,7 @@ export function OnboardingWizard() {
                       <div className="font-medium text-[var(--on-surface)]">{plan.plan_label}</div>
                       <div className="mt-1 font-mono text-xs text-[var(--on-surface-variant)]">{plan.size_slug}</div>
                       <div className="mt-2 text-xs text-[var(--on-surface-variant)]">{plan.vcpus} vCPU · {plan.memory_mb} MB · {plan.disk_gb} GB disk</div>
-                      <div className="mt-2 text-xs text-[var(--secondary)]">${plan.monthly_usd.toFixed(2)}/mo</div>
+                      <div className="mt-2 text-xs text-[var(--secondary)]">{plan.monthly_usd === null ? "Price set by your cloud operator" : `$${plan.monthly_usd.toFixed(2)}/mo`}</div>
                     </button>
                   ))}
                   {selectedRegionPricing.length === 0 ? <div className="rounded-xl border border-dashed border-[color:var(--outline-variant)] px-4 py-3 text-xs text-[var(--on-surface-variant)]">No plans available for this region.</div> : null}
@@ -667,8 +667,8 @@ export function OnboardingWizard() {
                   <div className="mt-2 grid gap-1 text-xs md:grid-cols-2">
                     <div>Size: <span className="text-[var(--on-surface)]">{selectedPlanPricing.size_slug}</span></div>
                     <div>Region: <span className="text-[var(--on-surface)]">{selectedPlanPricing.region}</span></div>
-                    <div>Monthly: <span className="text-[var(--on-surface)]">${selectedPlanPricing.monthly_usd.toFixed(2)}</span></div>
-                    <div>Hourly: <span className="text-[var(--on-surface)]">${selectedPlanPricing.hourly_usd.toFixed(5)}</span></div>
+                    <div>Monthly: <span className="text-[var(--on-surface)]">{selectedPlanPricing.monthly_usd === null ? "n/a" : `$${selectedPlanPricing.monthly_usd.toFixed(2)}`}</span></div>
+                    <div>Hourly: <span className="text-[var(--on-surface)]">{selectedPlanPricing.hourly_usd === null ? "n/a" : `$${selectedPlanPricing.hourly_usd.toFixed(5)}`}</span></div>
                     <div className="md:col-span-2">Source timestamp: <span className="text-[var(--on-surface)]">{selectedPlanPricing.source_timestamp}</span></div>
                   </div>
                 ) : (
@@ -690,8 +690,8 @@ export function OnboardingWizard() {
                 <div>Region: <span className="text-[var(--on-surface)]">{state.region}</span></div>
                 <div>Plan: <span className="text-[var(--on-surface)]">{state.plan}</span></div>
                 <div>Size: <span className="text-[var(--on-surface)]">{selectedPlanPricing?.size_slug ?? "n/a"}</span></div>
-                <div>Monthly est: <span className="text-[var(--on-surface)]">{selectedPlanPricing ? `$${selectedPlanPricing.monthly_usd.toFixed(2)}` : "n/a"}</span></div>
-                <div>Hourly est: <span className="text-[var(--on-surface)]">{selectedPlanPricing ? `$${selectedPlanPricing.hourly_usd.toFixed(5)}` : "n/a"}</span></div>
+                <div>Monthly est: <span className="text-[var(--on-surface)]">{selectedPlanPricing?.monthly_usd != null ? `$${selectedPlanPricing.monthly_usd.toFixed(2)}` : "n/a"}</span></div>
+                <div>Hourly est: <span className="text-[var(--on-surface)]">{selectedPlanPricing?.hourly_usd != null ? `$${selectedPlanPricing.hourly_usd.toFixed(5)}` : "n/a"}</span></div>
               </div>
               <div className={`rounded-xl border px-4 py-3 text-sm ${provisionPhase === "ready" ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.08)] text-[var(--secondary)]" : provisionPhase === "error" ? "border-[color:rgba(255,107,107,0.25)] bg-[color:rgba(255,107,107,0.08)] text-[#ffd5d5]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>
                 <div className="font-medium">{provisionPhase === "idle" ? "Not started" : provisionPhase === "provisioning" ? "Provisioning" : provisionPhase === "bootstrapping" ? "Bootstrapping" : provisionPhase === "ready" ? "Ready" : "Error"}</div>

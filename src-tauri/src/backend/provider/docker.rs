@@ -737,8 +737,8 @@ impl super::ProviderAdapter for DockerProviderAdapter {
             "Synthetic plan estimate for local Docker runtime: up to {:.2} TB transfer equivalent.",
             plan.transfer_tb
           ),
-          monthly_usd: plan.monthly_usd,
-          hourly_usd: plan.hourly_usd,
+          monthly_usd: Some(plan.monthly_usd),
+          hourly_usd: Some(plan.hourly_usd),
           estimated: true,
           source_timestamp: source_timestamp.clone(),
         })

@@ -26,6 +26,7 @@ them down before asserting anything, so a failed assertion cannot strand a dropl
 | Real Amazon EC2 | the production path against a live instance | **billable** |
 | Real Linode | the production path against a live instance | **billable** |
 | Real Google Compute Engine | the production path against a live instance | **billable** |
+| Real OpenStack | the production path against a live cloud | **manual, billable** |
 
 ## Required Verification Matrix
 
@@ -41,6 +42,7 @@ them down before asserting anything, so a failed assertion cannot strand a dropl
 | Amazon EC2 adapter or cloud-init | `npm run backend:test:ec2:real` (**billable**) |
 | Linode adapter or cloud-init | `npm run backend:test:linode:real` (**billable**) |
 | Google Compute Engine adapter or cloud-init | `npm run backend:test:gce:real` (**billable**) |
+| OpenStack adapter or cloud-init | `npm run backend:test:openstack:real` (**manual, billable**) |
 
 ## Frontend unit lane
 
@@ -224,6 +226,48 @@ gcloud compute firewall-rules list --filter="name~'-wg$'"
 Expect the exit IP's geolocation to disagree with the zone. Google's published region is where the
 hardware is; geo-IP databases frequently place GCE addresses elsewhere. That is a property of the
 provider, not a bug in the adapter.
+
+### OpenStack — a manual lane
+
+```bash
+GOATSTARE_OPENSTACK_TEST_AUTH_URL=https://identity.example.com/v3 \
+GOATSTARE_OPENSTACK_TEST_APPLICATION_CREDENTIAL_ID=<id> \
+GOATSTARE_OPENSTACK_TEST_APPLICATION_CREDENTIAL_SECRET=<secret> \
+GOATSTARE_OPENSTACK_TEST_FLAVOR=<flavor id> \
+npm run backend:test:openstack:real
+```
+
+`GOATSTARE_OPENSTACK_TEST_REGION` is optional on a single-region cloud and required on the rest.
+There is no default flavor: flavor ids are operator-defined, so no guess is right across clouds —
+list them with `openstack flavor list` and pick the smallest that has ~1 GB of RAM.
+
+**This lane is manual, and deliberately so.** The other real lanes each target one vendor whose API
+behaves one way, so running them repeatedly against that vendor is meaningful. OpenStack is software
+many operators run, and they differ in exactly the places this adapter absorbs — whether a server
+gets a routable address directly or needs a floating IP, what images are called, which flavors
+exist. **Running this against a second cloud is worth more than running it twice against one.**
+Rackspace's OpenStack Flex is the reference target. Standing up DevStack in CI is out of scope: a
+single default configuration would not exercise the variation the adapter exists for.
+
+**Creates billable resources on a commercial cloud** — a server, and on most clouds a floating IP.
+The test destroys both on every exit path, including panics, and asserts only after teardown.
+
+Teardown order is forced by Neutron and is the part most worth watching: the security group cannot
+be deleted while the server's port still references it, so the run deletes the server, waits for it
+to disappear, then releases the floating IP and removes the group. Ids for the floating IP and the
+group are **rediscovered** at teardown rather than remembered, so the run still does the right thing
+if an operator removed one by hand. Only groups named `goatstare-*` are candidates — a group the
+operator attached themselves is left alone.
+
+Confirm nothing is left over if a run is interrupted:
+
+```bash
+openstack server list --long | grep goatstare
+openstack floating ip list --status DOWN
+openstack security group list | grep goatstare
+```
+
+Every server this app creates carries the `goatstare=managed` metadata key.
 
 ## Environment Notes
 

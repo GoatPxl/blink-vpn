@@ -56,6 +56,12 @@ pub fn redact_sensitive_text(input: &str) -> String {
   // which is a diagnostic rather than a secret.
   output = redact_assignment_like(&output, "service_account_json");
   output = redact_assignment_like(&output, "assertion");
+  // OpenStack: the application credential's secret, and the Keystone token issued for it. The
+  // auth URL and the credential id stay readable — they name which cloud and which key are in
+  // use, which is the same diagnostic `access_key_id` provides.
+  output = redact_assignment_like(&output, "application_credential_secret");
+  output = redact_assignment_like(&output, "X-Subject-Token");
+  output = redact_assignment_like(&output, "x-subject-token");
   // The RSA key inside that file is matched by *content*, not by field name.
   //
   // Google names it `private_key` — the same key WireGuard client configs use for material this
@@ -312,6 +318,24 @@ mod tests {
 
     assert!(!output.contains("SECRETJWT"), "the assertion leaked: {output}");
     assert!(output.contains("[REDACTED]"));
+  }
+
+  /// An OpenStack application credential secret authorises creating billable servers until it is
+  /// revoked; the Keystone token it yields does so until it expires.
+  #[test]
+  fn redacts_an_openstack_secret_but_keeps_the_cloud_it_names() {
+    let input = r#"{"auth_url": "https://identity.example.com/v3", "application_credential_id": "8ab1cd", "application_credential_secret": "s3cr3t not real"}"#;
+    let output = redact_sensitive_text(input);
+
+    assert!(!output.contains("s3cr3t"), "the credential secret leaked: {output}");
+    assert!(!output.contains("not real"), "the credential secret leaked: {output}");
+    // Which cloud and which credential are diagnostics, not secrets.
+    assert!(output.contains("https://identity.example.com/v3"), "the auth URL should survive: {output}");
+    assert!(output.contains("8ab1cd"), "the credential id should survive: {output}");
+
+    let header = "X-Subject-Token: gAAAAABlSECRETTOKEN";
+    let output = redact_sensitive_text(header);
+    assert!(!output.contains("SECRETTOKEN"), "the Keystone token leaked: {output}");
   }
 
   /// Not every PEM block is a secret, and blanking a certificate would remove a real diagnostic.

@@ -22,7 +22,8 @@
     "backend:test:do:real": "cargo test --manifest-path src-tauri/Cargo.toml real_digitalocean -- --ignored --nocapture",
     "backend:test:ec2:real": "cargo test --manifest-path src-tauri/Cargo.toml real_ec2 -- --ignored --nocapture",
     "backend:test:linode:real": "cargo test --manifest-path src-tauri/Cargo.toml real_linode -- --ignored --nocapture",
-    "backend:test:gce:real": "cargo test --manifest-path src-tauri/Cargo.toml real_gce -- --ignored --nocapture"
+    "backend:test:gce:real": "cargo test --manifest-path src-tauri/Cargo.toml real_gce -- --ignored --nocapture",
+    "backend:test:openstack:real": "cargo test --manifest-path src-tauri/Cargo.toml real_openstack -- --ignored --nocapture"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

@@ -10,6 +10,7 @@ Provider adapters currently included:
 - Amazon EC2 adapter for cloud node lifecycle
 - Linode adapter for cloud node lifecycle
 - Google Compute Engine adapter for cloud node lifecycle
+- OpenStack adapter for cloud node lifecycle (experimental)
 - Docker adapter for local container-backed development workflows
 
 ## Command Design Principles

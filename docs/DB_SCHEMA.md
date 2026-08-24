@@ -260,6 +260,7 @@ Current migration sequence in [src-tauri/migrations](src-tauri/migrations):
 21. Peer preshared keys and per-node client MTU
 22. Linode provider seed
 23. Google Compute Engine provider seed
+24. OpenStack provider seed
 
 Migration rules:
 

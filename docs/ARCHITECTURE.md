@@ -19,6 +19,7 @@ Included provider adapters:
 - Amazon EC2 adapter for cloud VPS lifecycle
 - Linode adapter for cloud VPS lifecycle
 - Google Compute Engine adapter for cloud VPS lifecycle
+- OpenStack adapter for cloud VPS lifecycle (experimental — see below)
 - Docker adapter for local container-backed development workflows
 
 ## System Diagram
@@ -33,6 +34,7 @@ flowchart LR
   NP --> EC2[Amazon EC2 adapter]
   NP --> LIN[Linode adapter]
   NP --> GCE[Google Compute Engine adapter]
+  NP --> OS[OpenStack adapter]
   NP --> DKR[Docker adapter]
   ORCH --> DB[(SQLite)]
   ORCH --> SEC[Credential Manager]
@@ -41,6 +43,7 @@ flowchart LR
   EC2 --> AWSAPI[AWS EC2 / SSM / STS APIs]
   LIN --> LINAPI[Linode API v4]
   GCE --> GCEAPI[Google Compute / OAuth2 APIs]
+  OS --> OSAPI[Keystone / Nova / Neutron / Glance]
   DKR --> DKRCLI[Docker CLI]
 ```
 
@@ -150,6 +153,41 @@ thing that interprets them.
 A stored value that is not a JSON object is read as a single `api_token` field. That is not a
 convenience — it is the compatibility guarantee for every credential saved before credentials had
 fields, and dropping it would leave existing installs looking configured while every API call failed.
+
+### The OpenStack adapter is experimental, and what that means
+
+Every other adapter targets one vendor's API, which behaves one way. OpenStack is software that
+many operators run, and they differ in exactly the places provisioning touches. The adapter is
+marked experimental to say that honestly — not because it is unfinished, but because "does it work"
+is a question about a *cloud*, not about the adapter.
+
+Three consequences shape its design:
+
+- **There is no fixed endpoint.** The user supplies a Keystone URL; every other service address
+  comes from the catalogue authentication returns. This is why it has no `#[cfg(test)]
+  with_base_url` like the others — the base URL is part of the credential, so a test points it at a
+  mock simply by saying so in the credential.
+- **Capability gaps are normal, and must be specific.** A cloud may have no Ubuntu image, no
+  network this app can attach to, no floating-IP pool, or several regions when the caller named
+  none. Each resolves to an `Unsupported` error naming what is missing and, where useful, listing
+  what the cloud does offer. None of them is a retry.
+- **Networking comes in two shapes.** Some clouds put a routable address straight on the server;
+  others hand out RFC1918 and expect a floating IP allocated and attached afterwards. Both are
+  handled. (Algo, the closest prior art, assumed only the first and broke on clouds needing the
+  second.)
+
+It also cannot report prices, because nothing in the OpenStack API knows what an operator charges.
+It reports `monthly_usd: None` rather than zero — see the pricing note below.
+
+### Pricing is optional, because zero is a claim
+
+`ProviderPlanPricing.monthly_usd` and `hourly_usd` are `Option<f64>`. A provider that publishes no
+price reports `None`, and the UI renders that as "n/a".
+
+They were plain `f64`, which forced a provider with no price to send `0.0` — and `$0.00/mo`
+rendered on a plan card states that a paid server is free. `vpn_nodes.price_monthly_usd` had been
+nullable all along; this type was the odd one out. Sorting treats an unpriced plan as belonging at
+the end of a cheapest-first list rather than the front.
 
 ## Adding a Provider
 

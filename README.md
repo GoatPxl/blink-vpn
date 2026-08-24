@@ -16,7 +16,8 @@ Project inspiration:
 - Windows desktop workflow driving the WireGuard for Windows tunnel service
 - Rust backend + Tauri + Next.js frontend architecture
 - Multi-provider adapter model
-- DigitalOcean, Amazon EC2, Linode and Google Compute Engine cloud adapters, and a Docker local adapter
+- DigitalOcean, Amazon EC2, Linode and Google Compute Engine cloud adapters, an experimental
+  OpenStack adapter for any Keystone cloud, and a Docker local adapter
 - Secure storage for provider tokens and client keys
 - SQLite for provider, node, tunnel, and runtime metadata
 
@@ -24,7 +25,7 @@ Project inspiration:
 
 - Stores and validates provider credentials in Windows Credential Manager (no plaintext secrets in SQLite).
 - Uses a generalized provider orchestration path for node lifecycle operations.
-- Provisions a node on DigitalOcean, Amazon EC2, Linode, Google Compute Engine, or the local Docker dev provider, and connects to
+- Provisions a node on DigitalOcean, Amazon EC2, Linode, Google Compute Engine, an OpenStack cloud, or the local Docker dev provider, and connects to
   it. All paths
   are verified end to end against real infrastructure, including a completed WireGuard handshake.
 - Creates and manages local WireGuard client tunnels through the WireGuard for Windows service.

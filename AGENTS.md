@@ -19,7 +19,7 @@ connects to it. Rust backend + Tauri v2 + Next.js frontend + SQLite + Windows Cr
 |---|---|
 | Platform | Windows 10/11 desktop only |
 | Protocol | WireGuard only |
-| Production providers | DigitalOcean, Amazon EC2, Linode, Google Compute Engine |
+| Production providers | DigitalOcean, Amazon EC2, Linode, Google Compute Engine, OpenStack (experimental) |
 | Dev provider | Docker, behind feature flags, local emulation only |
 | Workflows | provision, connect, disconnect, destroy, force-cleanup, add device |
 
@@ -269,9 +269,12 @@ Run what your change touches. Report **real results**, including failures.
 | Amazon EC2 adapter or cloud-init | `npm run backend:test:ec2:real` (**creates billable instances**) |
 | Linode adapter or cloud-init | `npm run backend:test:linode:real` (**creates billable instances**) |
 | Google Compute Engine adapter or cloud-init | `npm run backend:test:gce:real` (**creates billable instances**) |
+| OpenStack adapter or cloud-init | `npm run backend:test:openstack:real` (**manual; billable on a commercial cloud**) |
 
 The Linode lane needs `GOATSTARE_LINODE_TEST_TOKEN`; the GCE lane needs
 `GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE`, a **path** to the JSON key file rather than its contents.
+The OpenStack lane needs `GOATSTARE_OPENSTACK_TEST_AUTH_URL`, `..._APPLICATION_CREDENTIAL_ID`,
+`..._APPLICATION_CREDENTIAL_SECRET` and `..._FLAVOR`, and has no default cloud to point at.
 The DigitalOcean lane needs `GOATSTARE_DO_TEST_TOKEN`; the EC2 lane needs
 `GOATSTARE_AWS_TEST_ACCESS_KEY_ID` and `GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY`. Every one of these
 tests destroys what it created on every exit path, including panics, and asserts only after teardown

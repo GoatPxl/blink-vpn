@@ -1598,8 +1598,8 @@ impl Orchestrator {
         &request.node_id,
         Some(&selected_pricing.plan_key),
         Some(&selected_pricing.size_slug),
-        Some(selected_pricing.monthly_usd),
-        Some(selected_pricing.hourly_usd),
+        selected_pricing.monthly_usd,
+        selected_pricing.hourly_usd,
         Some(&selected_pricing.source_timestamp),
       )
       .map_err(|source| OrchestratorError::Database {
@@ -3407,8 +3407,8 @@ mod tests {
           disk_gb: 25,
           transfer_tb: 1.0,
           transfer_note: "Includes up to 1.00 TB transfer before provider overage policies apply.".to_string(),
-          monthly_usd: 6.0,
-          hourly_usd: 0.00893,
+          monthly_usd: Some(6.0),
+          hourly_usd: Some(0.00893),
           estimated: false,
           source_timestamp: "0".to_string(),
         },
@@ -3422,8 +3422,8 @@ mod tests {
           disk_gb: 60,
           transfer_tb: 3.0,
           transfer_note: "Includes up to 3.00 TB transfer before provider overage policies apply.".to_string(),
-          monthly_usd: 12.0,
-          hourly_usd: 0.01786,
+          monthly_usd: Some(12.0),
+          hourly_usd: Some(0.01786),
           estimated: false,
           source_timestamp: "0".to_string(),
         },
@@ -6148,6 +6148,191 @@ mod tests {
     println!("\n=== GCE client config: {} ===", path.display());
     println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
     println!("=== instance and firewall rule destroyed; this config is kept only as a record ===\n");
+  }
+
+  /// The full backend path against a real OpenStack cloud.
+  ///
+  /// **Manual only.** Unlike the other real lanes there is no single cloud to point this at:
+  /// OpenStack is software many operators run, and they differ in exactly the ways this adapter
+  /// exists to absorb — whether a server gets a routable address directly or needs a floating IP,
+  /// what the images are called, which flavors exist. Rackspace's OpenStack Flex is the reference
+  /// target. Running this against a second cloud is worth more than running it twice against one.
+  ///
+  /// **Creates billable resources on a commercial cloud** — a server, and on most clouds a
+  /// floating IP — destroyed on every exit path, with assertions only after teardown.
+  ///
+  /// Needs `GOATSTARE_OPENSTACK_TEST_AUTH_URL`, `..._APPLICATION_CREDENTIAL_ID`,
+  /// `..._APPLICATION_CREDENTIAL_SECRET` and `..._FLAVOR`. The flavor has no default because
+  /// flavor ids are operator-defined and no guess is right across clouds.
+  /// `..._REGION` is optional for a single-region cloud and required for the rest.
+  #[test]
+  #[ignore = "Creates real, billable resources on an OpenStack cloud; needs GOATSTARE_OPENSTACK_TEST_* variables"]
+  fn real_openstack_full_backend_path_produces_a_connect_config() {
+    use crate::backend::provider::{OpenStackProviderAdapter, ProviderCredential};
+    use crate::backend::wireguard::{build_client_config, ClientConfigParams};
+
+    let required = |name: &str| {
+      std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    };
+
+    let (auth_url, credential_id, credential_secret, flavor) = match (
+      required("GOATSTARE_OPENSTACK_TEST_AUTH_URL"),
+      required("GOATSTARE_OPENSTACK_TEST_APPLICATION_CREDENTIAL_ID"),
+      required("GOATSTARE_OPENSTACK_TEST_APPLICATION_CREDENTIAL_SECRET"),
+      required("GOATSTARE_OPENSTACK_TEST_FLAVOR"),
+    ) {
+      (Some(url), Some(id), Some(secret), Some(flavor)) => (url, id, secret, flavor),
+      _ => {
+        eprintln!(
+          "GOATSTARE_OPENSTACK_TEST_AUTH_URL / _APPLICATION_CREDENTIAL_ID / _APPLICATION_CREDENTIAL_SECRET / _FLAVOR are not all set; skipping."
+        );
+        return;
+      }
+    };
+
+    let region = required("GOATSTARE_OPENSTACK_TEST_REGION").unwrap_or_default();
+
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|value| value.as_secs())
+      .unwrap_or(0);
+
+    let db = Database::new(test_db_path(&format!("real_openstack_{suffix}")));
+    db.run_migrations().expect("migrations should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    // Migration 0024 seeds this provider row.
+    const OPENSTACK_PROVIDER_ID: &str = "provider-openstack";
+    let credential = ProviderCredential::from_fields([
+      ("auth_url".to_string(), auth_url),
+      ("application_credential_id".to_string(), credential_id),
+      ("application_credential_secret".to_string(), credential_secret),
+    ]);
+    let token_ref = secure_storage
+      .store_provider_credential(OPENSTACK_PROVIDER_ID, &credential.to_stored_value())
+      .expect("credential should store");
+    db.update_provider_token_ref(OPENSTACK_PROVIDER_ID, Some(&token_ref))
+      .expect("token ref should persist");
+
+    let providers = ProviderRegistry::from_adapter(Arc::new(OpenStackProviderAdapter::new()));
+    let orchestrator = Orchestrator::new();
+    let bootstrap = Bootstrap::new();
+    let wireguard = WireGuardManager::new();
+
+    let node_id = format!("node-openstack-{suffix}");
+    let created = orchestrator.create_vpn_node_to_ready(
+      &providers,
+      &bootstrap,
+      &db,
+      &secure_storage,
+      &CreateVpnNodeRequest {
+        node_id: node_id.clone(),
+        provider_id: OPENSTACK_PROVIDER_ID.to_string(),
+        node_name: format!("goatstare-e2e-{suffix}"),
+        region: region.clone(),
+        plan_key: flavor,
+      },
+    );
+
+    // Everything needed for assertions is gathered while the node still exists, then teardown runs
+    // before anything is asserted. A panic in between would leave a server billing.
+    let findings = created.as_ref().ok().map(|created| {
+      let node = db
+        .get_vpn_node(&node_id)
+        .ok()
+        .flatten()
+        .expect("node row should exist");
+
+      let desktop = desktop_peer(&db, &node_id);
+      let client_config = desktop
+        .as_ref()
+        .and_then(|peer| {
+          secure_storage
+            .get_client_private_key(&peer.client_private_key_ref)
+            .ok()
+            .flatten()
+        })
+        .and_then(|private_key| {
+          build_client_config(&ClientConfigParams {
+            private_key,
+            client_address_cidr: desktop
+              .as_ref()
+              .map(|peer| peer.client_address_cidr.clone())
+              .unwrap_or_default(),
+            dns_server: None,
+            server_public_key: created.server_public_key.clone(),
+            server_endpoint_ip: node.public_ipv4.clone().unwrap_or_default(),
+            server_listen_port: node.endpoint_port.unwrap_or(DEFAULT_WIREGUARD_PORT),
+            allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+            persistent_keepalive_seconds: DEFAULT_CLIENT_KEEPALIVE_SECONDS,
+            preshared_key: desktop.as_ref().and_then(|peer| peer.preshared_key.clone()),
+            mtu: node.client_mtu,
+          })
+          .ok()
+        });
+
+      (node, created.server_public_key.clone(), client_config)
+    });
+
+    // Teardown first, unconditionally. This also releases any floating IP and removes the
+    // security group.
+    let cleanup = orchestrator.force_cleanup_vpn_node(
+      &providers,
+      &wireguard,
+      &db,
+      &secure_storage,
+      &node_id,
+    );
+
+    let created =
+      created.unwrap_or_else(|error| panic!("node creation should reach Ready: {error:?}"));
+    let (node, server_public_key, client_config) =
+      findings.expect("findings should exist when creation succeeded");
+
+    let cleanup = cleanup.unwrap_or_else(|error| panic!("cleanup must succeed: {error:?}"));
+    assert!(
+      cleanup.remote_droplet_delete_attempted && cleanup.remote_droplet_delete_succeeded,
+      "the server, its floating IP and its security group must all be destroyed: {cleanup:?}"
+    );
+
+    assert_eq!(node.lifecycle_status, NodeLifecycleStatus::Ready);
+    assert!(!created.server_public_key.trim().is_empty());
+
+    // The region travels with the node id, because status, exists and delete need it to pick a
+    // catalogue endpoint and the trait does not pass one.
+    let external_ref = node.external_ref.clone().expect("an external_ref should be recorded");
+    assert!(
+      external_ref.starts_with(&format!("{region}/")),
+      "the external_ref should be '<region>/<server-id>', got {external_ref}"
+    );
+
+    let endpoint = node.public_ipv4.clone().expect("a public IPv4 should be recorded");
+    assert!(
+      !endpoint_is_locally_scoped(&endpoint),
+      "an OpenStack endpoint should be publicly routable, got {endpoint}"
+    );
+    assert_eq!(node.endpoint_port, Some(DEFAULT_WIREGUARD_PORT));
+
+    let config = client_config.expect("a client config should render");
+    assert!(config.contains("[Peer]"));
+    assert!(config.contains(&format!("PublicKey = {server_public_key}")));
+    assert!(config.contains(&format!("Endpoint = {endpoint}:{DEFAULT_WIREGUARD_PORT}")));
+    assert!(
+      config.contains("AllowedIPs = 0.0.0.0/0"),
+      "full tunnel must survive for a public endpoint: {config}"
+    );
+    assert!(
+      config.contains("PresharedKey = "),
+      "the desktop peer's preshared key must reach the config: {config}"
+    );
+
+    let path = std::env::temp_dir().join(format!("goatstare-openstack-{suffix}.conf"));
+    std::fs::write(&path, config.replace("\r\n", "\n")).expect("config should be writable");
+    println!("\n=== OpenStack client config: {} ===", path.display());
+    println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
+    println!("=== server and its network resources destroyed; this config is kept only as a record ===\n");
   }
 
   /// The production path, proven by an actual handshake against a real droplet.

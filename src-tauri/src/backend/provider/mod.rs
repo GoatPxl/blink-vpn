@@ -7,6 +7,8 @@ pub mod gce;
 pub mod gce_regions;
 pub mod linode;
 pub mod linode_regions;
+pub mod openstack;
+pub mod openstack_regions;
 pub mod retry;
 
 use std::collections::HashMap;
@@ -37,6 +39,10 @@ use gce::{
 use linode::{
   CreateLinodeRequest, LinodeApiClient, LinodeConfig, LinodeError, LinodeMetadata,
   LINODE_USER_DATA_LIMIT_BYTES,
+};
+use openstack::{
+  OpenStackApiClient, OpenStackConfig, OpenStackCredentials, OpenStackError,
+  OPENSTACK_USER_DATA_LIMIT_BYTES,
 };
 use retry::RetryPolicy;
 
@@ -440,8 +446,8 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
           disk_gb: size.disk,
           transfer_tb: size.transfer,
           transfer_note: format!("Includes up to {:.2} TB transfer before provider overage policies apply.", size.transfer),
-          monthly_usd: size.price_monthly,
-          hourly_usd: size.price_hourly,
+          monthly_usd: Some(size.price_monthly),
+          hourly_usd: Some(size.price_hourly),
           estimated: false,
           source_timestamp: fetched_at_epoch_seconds.clone(),
         }
@@ -637,6 +643,19 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
       .client
       .delete_droplet(&Self::api_token(token)?, Self::droplet_id(node_id)?)
       .map_err(|source| ProviderAdapterError::api("DigitalOcean droplet delete call failed.", source))
+  }
+}
+
+/// Order two optional prices cheapest first, sorting unpriced plans last.
+///
+/// A plan whose provider publishes no price is not free, so it must not lead a list sorted by
+/// cost — it simply has no place in that ordering, and the end is the least misleading one.
+fn cheapest_first(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
+  match (left, right) {
+    (Some(left), Some(right)) => left.total_cmp(&right),
+    (Some(_), None) => std::cmp::Ordering::Less,
+    (None, Some(_)) => std::cmp::Ordering::Greater,
+    (None, None) => std::cmp::Ordering::Equal,
   }
 }
 
@@ -856,8 +875,8 @@ impl ProviderAdapter for LinodeProviderAdapter {
           transfer_note: format!(
             "Includes up to {transfer_tb:.2} TB transfer before provider overage policies apply."
           ),
-          monthly_usd,
-          hourly_usd,
+          monthly_usd: Some(monthly_usd),
+          hourly_usd: Some(hourly_usd),
           // Live prices, including any regional override.
           estimated: false,
           source_timestamp: fetched_at_epoch_seconds.clone(),
@@ -866,9 +885,7 @@ impl ProviderAdapter for LinodeProviderAdapter {
       .collect();
 
     pricing.sort_by(|left, right| {
-      left
-        .monthly_usd
-        .total_cmp(&right.monthly_usd)
+      cheapest_first(left.monthly_usd, right.monthly_usd)
         .then_with(|| left.size_slug.cmp(&right.size_slug))
     });
 
@@ -1057,6 +1074,708 @@ impl ProviderAdapter for LinodeProviderAdapter {
       .client
       .delete_instance(&Self::api_token(token)?, Self::instance_id(node_id)?)
       .map_err(|source| ProviderAdapterError::api("Linode instance delete call failed.", source))
+  }
+}
+
+/// Credential field keys for OpenStack. The secret is the only one redacted: an auth URL and a
+/// credential id name which cloud and which key are in use, which is a diagnostic (AGENTS.md §6).
+const OPENSTACK_AUTH_URL_KEY: &str = "auth_url";
+const OPENSTACK_CREDENTIAL_ID_KEY: &str = "application_credential_id";
+const OPENSTACK_CREDENTIAL_SECRET_KEY: &str = "application_credential_secret";
+
+/// Nova server names are permissive — 255 characters, and no character class it rejects outright.
+/// Control characters are still stripped, because they would travel into logs and console output.
+fn sanitize_openstack_server_name(raw: &str) -> String {
+  let cleaned: String = raw
+    .trim()
+    .chars()
+    .filter(|character| !character.is_control())
+    .take(200)
+    .collect();
+
+  let cleaned = cleaned.trim();
+  let stem = if cleaned.is_empty() { "goatstare-node" } else { cleaned };
+  let suffix = uuid::Uuid::new_v4().simple().to_string();
+
+  format!("{stem}-{}", &suffix[..8])
+}
+
+/// Security group name for a node. Uniqueness matters: a group is addressed by name at create, and
+/// two nodes sharing one would make teardown of either strand the other.
+fn openstack_security_group_name(server_name: &str) -> String {
+  let bounded: String = server_name.chars().take(200).collect();
+  format!("goatstare-{bounded}")
+}
+
+pub struct OpenStackProviderAdapter {
+  client: OpenStackApiClient,
+  config: OpenStackConfig,
+}
+
+impl OpenStackProviderAdapter {
+  /// Infallible by construction, following the EC2, Linode and GCE adapters.
+  pub fn new() -> Self {
+    let config = OpenStackConfig::defaults();
+    let client =
+      OpenStackApiClient::new_with_timeout(RetryPolicy::cloud_default(), config.request_timeout)
+        .unwrap_or_else(|_| {
+          OpenStackApiClient::new_with_timeout(RetryPolicy::cloud_default(), Duration::from_secs(20))
+            .expect("openstack client should build with default timeout")
+        });
+
+    Self { client, config }
+  }
+
+  /// The adapter with polling intervals short enough for a mock server.
+  ///
+  /// There is no `with_base_url` here, unlike every other adapter: OpenStack has no fixed endpoint
+  /// to override, because the auth URL is part of the credential and every other address comes
+  /// from the catalogue. What *does* need overriding is the timing — teardown waits for a port to
+  /// be released, and against a mock that never stops reporting the server, the real 180-second
+  /// dependency timeout turns each test into a three-minute wait.
+  #[cfg(test)]
+  fn with_fast_polling() -> Self {
+    let mut adapter = Self::new();
+    adapter.config.poll_interval = Duration::from_millis(1);
+    adapter.config.poll_max_attempts = 3;
+    adapter.config.server_ready_timeout = Duration::from_millis(50);
+    adapter.config.dependency_release_timeout = Duration::from_millis(50);
+    adapter
+  }
+
+  fn credentials(stored: &str) -> Result<OpenStackCredentials, ProviderAdapterError> {
+    let credential = ProviderCredential::parse(stored);
+
+    Ok(OpenStackCredentials {
+      auth_url: credential.require(OPENSTACK_AUTH_URL_KEY)?.to_string(),
+      application_credential_id: credential.require(OPENSTACK_CREDENTIAL_ID_KEY)?.to_string(),
+      application_credential_secret: credential
+        .require(OPENSTACK_CREDENTIAL_SECRET_KEY)?
+        .to_string(),
+    })
+  }
+
+  /// Nova scopes a server to a region, and the trait's status, exists and delete methods carry
+  /// none — so it travels inside the node id, as EC2 and GCE do.
+  ///
+  /// The security group and any floating IP are deliberately *not* encoded. They are rediscovered
+  /// at delete time, so the id stays honest if an operator removes one by hand.
+  fn join_node_id(region: &str, server_id: &str) -> String {
+    format!("{region}/{server_id}")
+  }
+
+  fn split_node_id(node_id: &str) -> Result<(String, String), ProviderAdapterError> {
+    node_id
+      .trim()
+      .split_once('/')
+      .filter(|(region, id)| !region.trim().is_empty() && !id.trim().is_empty())
+      .map(|(region, id)| (region.trim().to_string(), id.trim().to_string()))
+      .ok_or_else(|| ProviderAdapterError::Unsupported {
+        detail: format!(
+          "'{node_id}' is not an OpenStack node reference. Expected '<region>/<server-id>'; the node record may belong to another provider."
+        ),
+      })
+  }
+
+  /// Map a client error onto the adapter's own error type, keeping capability gaps distinct.
+  ///
+  /// A cloud that simply does not offer something is not a failure to retry — it is a fact the
+  /// user has to act on, and the UI keys recovery off `Unsupported` rather than message text.
+  fn adapt_error(detail: &str, source: OpenStackError) -> ProviderAdapterError {
+    match source {
+      OpenStackError::Capability { detail } => ProviderAdapterError::Unsupported { detail },
+      other => ProviderAdapterError::api(detail.to_string(), other),
+    }
+  }
+
+  /// Remove what this call created but can no longer return, folding every outcome into the error
+  /// the caller sees.
+  ///
+  /// Ordered: the server first, because it is the billable thing, then its floating IP, then the
+  /// security group — which cannot be deleted until the port referencing it is gone. Anything that
+  /// survives is named (AGENTS.md §8).
+  fn abandon_server(
+    &self,
+    credentials: &OpenStackCredentials,
+    region: &str,
+    server_id: Option<&str>,
+    floating_ip_id: Option<&str>,
+    security_group_id: Option<&str>,
+    detail: &str,
+    cause: OpenStackError,
+  ) -> ProviderAdapterError {
+    let mut leftovers = Vec::new();
+
+    if let Some(server_id) = server_id {
+      match self.client.delete_server(credentials, region, server_id) {
+        Ok(()) => {
+          // The group cannot go until the server's port is released, so the wait is not optional.
+          let _ = self.client.wait_for_server_gone(
+            credentials,
+            region,
+            server_id,
+            self.config.poll_interval,
+            self.config.dependency_release_timeout,
+          );
+        }
+        Err(error) => leftovers.push(format!(
+          "server '{server_id}' could NOT be deleted and may still be billing ({error})"
+        )),
+      }
+    }
+
+    if let Some(floating_ip_id) = floating_ip_id {
+      if let Err(error) = self.client.release_floating_ip(credentials, region, floating_ip_id) {
+        leftovers.push(format!(
+          "floating IP '{floating_ip_id}' could NOT be released and may still be billing ({error})"
+        ));
+      }
+    }
+
+    if let Some(security_group_id) = security_group_id {
+      if let Err(error) = self.delete_security_group_when_free(credentials, region, security_group_id)
+      {
+        leftovers.push(format!(
+          "security group '{security_group_id}' could NOT be removed ({error})"
+        ));
+      }
+    }
+
+    if leftovers.is_empty() {
+      ProviderAdapterError::api(
+        format!("{detail} Everything created was removed, so nothing is still billing."),
+        cause,
+      )
+    } else {
+      ProviderAdapterError::api(
+        format!("{detail} Clean up in your cloud's dashboard: {}.", leftovers.join("; ")),
+        cause,
+      )
+    }
+  }
+
+  /// Delete a security group, retrying while its port is still being released.
+  ///
+  /// Neutron answers 409 until the server's port is gone, which is the same dependency dance EC2
+  /// runs for a security group and its network interface.
+  fn delete_security_group_when_free(
+    &self,
+    credentials: &OpenStackCredentials,
+    region: &str,
+    security_group_id: &str,
+  ) -> Result<(), OpenStackError> {
+    let policy = self.client.retry_policy();
+    let started = std::time::Instant::now();
+
+    for attempt in 0..=policy.max_retries {
+      match self.client.delete_security_group(credentials, region, security_group_id) {
+        Ok(()) => return Ok(()),
+        Err(OpenStackError::Conflict { .. })
+          if started.elapsed() < self.config.dependency_release_timeout =>
+        {
+          std::thread::sleep(policy.backoff_for_attempt(attempt));
+        }
+        Err(error) => return Err(error),
+      }
+    }
+
+    self.client.delete_security_group(credentials, region, security_group_id)
+  }
+}
+
+impl ProviderAdapter for OpenStackProviderAdapter {
+  fn provider_name(&self) -> &'static str {
+    "openstack"
+  }
+
+  fn credential_fields(&self) -> Vec<CredentialField> {
+    vec![
+      CredentialField {
+        key: OPENSTACK_AUTH_URL_KEY.to_string(),
+        label: "Keystone auth URL".to_string(),
+        placeholder: "https://identity.example.com/v3".to_string(),
+        // Names which cloud is in use — a diagnostic, not a secret.
+        secret: false,
+        help: Some("The identity endpoint for your cloud, ending in /v3.".to_string()),
+      },
+      CredentialField {
+        key: OPENSTACK_CREDENTIAL_ID_KEY.to_string(),
+        label: "Application credential ID".to_string(),
+        placeholder: "8ab1...".to_string(),
+        secret: false,
+        help: Some(
+          "Create an application credential in your cloud's dashboard rather than using your own password — it is scoped and can be revoked on its own."
+            .to_string(),
+        ),
+      },
+      CredentialField {
+        key: OPENSTACK_CREDENTIAL_SECRET_KEY.to_string(),
+        label: "Application credential secret".to_string(),
+        placeholder: String::new(),
+        secret: true,
+        help: Some("Shown once when the credential is created.".to_string()),
+      },
+    ]
+  }
+
+  fn validate_token(&self, token: &str) -> Result<Account, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+
+    // Authenticating *is* the validation: it proves the credential works and that the catalogue
+    // carries the services this app needs.
+    let project_id = self
+      .client
+      .project_id(&credentials)
+      .map_err(|source| Self::adapt_error("OpenStack authentication failed.", source))?;
+
+    // `Account` is DigitalOcean-shaped and reused as the neutral validation result; the fields are
+    // filled with the closest OpenStack equivalent. Replacing this type is tracked separately.
+    Ok(Account {
+      uuid: project_id,
+      email: credentials.application_credential_id.clone(),
+      status: "active".to_string(),
+    })
+  }
+
+  fn list_regions(&self, token: &str) -> Result<Vec<ProviderRegion>, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let regions = self
+      .client
+      .regions(&credentials)
+      .map_err(|source| Self::adapt_error("OpenStack region lookup failed.", source))?;
+
+    Ok(regions.iter().map(|slug| self.describe_region(slug)).collect())
+  }
+
+  fn describe_region(&self, slug: &str) -> ProviderRegion {
+    openstack_regions::describe_region(slug)
+  }
+
+  fn list_plan_pricing(
+    &self,
+    token: &str,
+    region: &str,
+  ) -> Result<Vec<ProviderPlanPricing>, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let mut flavors = self
+      .client
+      .list_flavors(&credentials, region)
+      .map_err(|source| Self::adapt_error("OpenStack flavor list request failed.", source))?;
+
+    flavors.retain(|flavor| !flavor.disabled && flavor.is_public);
+    flavors.sort_by(|left, right| left.ram.cmp(&right.ram).then_with(|| left.name.cmp(&right.name)));
+
+    let fetched_at_epoch_seconds =
+      match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(value) => value.as_secs().to_string(),
+        Err(_) => "0".to_string(),
+      };
+
+    Ok(
+      flavors
+        .into_iter()
+        .map(|flavor| ProviderPlanPricing {
+          plan_key: flavor.id.clone(),
+          plan_label: if flavor.name.trim().is_empty() {
+            flavor.id.clone()
+          } else {
+            flavor.name.clone()
+          },
+          // Nova launches by flavor *id*; the name is a label and is not guaranteed unique.
+          size_slug: flavor.id,
+          region: region.to_string(),
+          memory_mb: flavor.ram,
+          vcpus: flavor.vcpus,
+          disk_gb: flavor.disk,
+          transfer_tb: 0.0,
+          transfer_note:
+            "Your cloud operator sets the price and any transfer allowance for this flavor — OpenStack itself publishes neither."
+              .to_string(),
+          // Not zero: nothing in the API knows what an operator charges, and a rendered 0.00 would
+          // say this flavor is free.
+          monthly_usd: None,
+          hourly_usd: None,
+          estimated: true,
+          source_timestamp: fetched_at_epoch_seconds.clone(),
+        })
+        .collect(),
+    )
+  }
+
+  fn init_delivery(&self) -> InitDelivery {
+    InitDelivery::CloudInit
+  }
+
+  fn create_node(
+    &self,
+    token: &str,
+    node_name: &str,
+    region: &str,
+    size_slug: &str,
+    init_payload: &str,
+  ) -> Result<ProvisionedNode, ProviderAdapterError> {
+    let user_data = base64_encode(init_payload.as_bytes());
+    if user_data.len() > OPENSTACK_USER_DATA_LIMIT_BYTES {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "The bootstrap payload is {} bytes once encoded, over Nova's {OPENSTACK_USER_DATA_LIMIT_BYTES}-byte user-data limit.",
+          user_data.len()
+        ),
+      });
+    }
+
+    // There is no default flavor to fall back on: flavor ids are operator-defined, so any guess
+    // would be wrong on most clouds.
+    if size_slug.trim().is_empty() {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: "Choose a plan before provisioning. OpenStack clouds define their own flavors, so there is no default to fall back on."
+          .to_string(),
+      });
+    }
+
+    let credentials = Self::credentials(token)?;
+    let region = region.trim().to_string();
+
+    let image_id = self
+      .client
+      .resolve_ubuntu_image(&credentials, &region)
+      .map_err(|source| Self::adapt_error("OpenStack image lookup failed.", source))?;
+
+    let (network_id, direct_public) = self
+      .client
+      .resolve_network(&credentials, &region)
+      .map_err(|source| Self::adapt_error("OpenStack network lookup failed.", source))?;
+
+    let server_name = sanitize_openstack_server_name(node_name);
+    let group_name = openstack_security_group_name(&server_name);
+
+    let security_group_id = self
+      .client
+      .create_security_group(&credentials, &region, &group_name)
+      .map_err(|source| {
+        Self::adapt_error("OpenStack security group create call failed.", source)
+      })?;
+
+    if let Err(source) =
+      self
+        .client
+        .authorize_udp_ingress(&credentials, &region, &security_group_id, DEFAULT_WIREGUARD_PORT)
+    {
+      return Err(self.abandon_server(
+        &credentials,
+        &region,
+        None,
+        None,
+        Some(&security_group_id),
+        "Could not open the WireGuard port on the new security group.",
+        source,
+      ));
+    }
+
+    let server_id = match self.client.create_server(
+      &credentials,
+      &region,
+      &server_name,
+      &image_id,
+      size_slug.trim(),
+      &network_id,
+      &group_name,
+      &user_data,
+    ) {
+      Ok(server_id) => server_id,
+      Err(source) => {
+        return Err(self.abandon_server(
+          &credentials,
+          &region,
+          None,
+          None,
+          Some(&security_group_id),
+          "OpenStack server create call failed.",
+          source,
+        ));
+      }
+    };
+
+    // Past this line a billable server exists. The orchestrator's rollback only fires once
+    // `create_node` has *returned* a node id, so a failure from here on must clean up itself.
+    let server = match self.client.wait_for_server_active(
+      &credentials,
+      &region,
+      &server_id,
+      self.config.poll_interval,
+      self.config.poll_max_attempts,
+      self.config.server_ready_timeout,
+    ) {
+      Ok(server) => server,
+      Err(source) => {
+        return Err(self.abandon_server(
+          &credentials,
+          &region,
+          Some(&server_id),
+          None,
+          Some(&security_group_id),
+          "The OpenStack server never became ACTIVE.",
+          source,
+        ));
+      }
+    };
+
+    // Two topologies: some clouds put a routable address straight on the server, others hand out
+    // RFC1918 and expect a floating IP allocated afterwards.
+    let (public_ipv4, floating_ip_id) = match server.reachable_address() {
+      Some(address) => (address, None),
+      None if direct_public => {
+        return Err(self.abandon_server(
+          &credentials,
+          &region,
+          Some(&server_id),
+          None,
+          Some(&security_group_id),
+          "The server was attached directly to an external network but received no routable address.",
+          OpenStackError::Capability {
+            detail: "No routable address was assigned.".to_string(),
+          },
+        ));
+      }
+      None => {
+        let ports = match self.client.ports_for_server(&credentials, &region, &server_id) {
+          Ok(ports) => ports,
+          Err(source) => {
+            return Err(self.abandon_server(
+              &credentials,
+              &region,
+              Some(&server_id),
+              None,
+              Some(&security_group_id),
+              "Could not find the new server's network port to attach a floating IP to.",
+              source,
+            ));
+          }
+        };
+
+        let Some(port_id) = ports.first() else {
+          return Err(self.abandon_server(
+            &credentials,
+            &region,
+            Some(&server_id),
+            None,
+            Some(&security_group_id),
+            "The new server has no network port, so no address can be attached to it.",
+            OpenStackError::Capability {
+              detail: "Nova reported no port for this server.".to_string(),
+            },
+          ));
+        };
+
+        match self.client.associate_floating_ip(&credentials, &region, port_id) {
+          Ok(floating) => (floating.floating_ip_address, Some(floating.id)),
+          Err(source) => {
+            return Err(self.abandon_server(
+              &credentials,
+              &region,
+              Some(&server_id),
+              None,
+              Some(&security_group_id),
+              "Could not give the server a publicly reachable address.",
+              source,
+            ));
+          }
+        }
+      }
+    };
+
+    if public_ipv4.trim().is_empty() {
+      return Err(self.abandon_server(
+        &credentials,
+        &region,
+        Some(&server_id),
+        floating_ip_id.as_deref(),
+        Some(&security_group_id),
+        "The OpenStack server exposed no usable address.",
+        OpenStackError::Capability {
+          detail: "The resolved address was empty.".to_string(),
+        },
+      ));
+    }
+
+    Ok(ProvisionedNode {
+      node_id: Self::join_node_id(&region, &server_id),
+      public_ipv4,
+      endpoint_port: DEFAULT_WIREGUARD_PORT,
+    })
+  }
+
+  /// Readiness is "the server is ACTIVE and has a reachable address".
+  ///
+  /// Nothing is read off the server: the server keypair was generated locally and baked into the
+  /// payload, so its public key is already known here (AGENTS.md §2).
+  fn wait_for_bootstrap_ready(
+    &self,
+    token: &str,
+    request: &BootstrapWaitRequest,
+  ) -> Result<BootstrapOutputContract, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let (region, server_id) = Self::split_node_id(&request.node_id)?;
+
+    let server = self
+      .client
+      .get_server(&credentials, &region, &server_id)
+      .map_err(|source| {
+        Self::adapt_error(
+          "Could not confirm the OpenStack server's state before completing provisioning.",
+          source,
+        )
+      })?;
+
+    if !server.status.eq_ignore_ascii_case("ACTIVE") {
+      return Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "The OpenStack server is '{}' rather than ACTIVE; provisioning cannot complete.",
+          server.status
+        ),
+      });
+    }
+
+    let public_ipv4 = if request.endpoint_ip.trim().is_empty() {
+      server
+        .reachable_address()
+        .ok_or_else(|| ProviderAdapterError::Unsupported {
+          detail: "The OpenStack server exposes no reachable address.".to_string(),
+        })?
+    } else {
+      request.endpoint_ip.clone()
+    };
+
+    Ok(BootstrapOutputContract {
+      server_endpoint_ip: public_ipv4,
+      // Echoed from what the caller generated and baked into the payload, not read back.
+      server_public_key: request.server_keypair.public_key.clone(),
+      listen_port: DEFAULT_WIREGUARD_PORT,
+    })
+  }
+
+  fn node_status(
+    &self,
+    token: &str,
+    node_id: &str,
+  ) -> Result<ProviderNodeStatus, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let (region, server_id) = Self::split_node_id(node_id)?;
+
+    match self.client.get_server(&credentials, &region, &server_id) {
+      Ok(server) => Ok(match server.status.to_ascii_uppercase().as_str() {
+        "BUILD" | "REBUILD" | "REBUILD_SPAWNING" => ProviderNodeStatus::New,
+        "ACTIVE" => ProviderNodeStatus::Active,
+        "SHUTOFF" | "PAUSED" | "SUSPENDED" | "STOPPED" => ProviderNodeStatus::Off,
+        "SHELVED" | "SHELVED_OFFLOADED" => ProviderNodeStatus::Archive,
+        "DELETED" | "SOFT_DELETED" => ProviderNodeStatus::Deleted,
+        _ => ProviderNodeStatus::Unknown,
+      }),
+      Err(OpenStackError::NotFound { .. }) => Ok(ProviderNodeStatus::Deleted),
+      Err(source) => Err(Self::adapt_error("OpenStack server status check failed.", source)),
+    }
+  }
+
+  fn node_exists(&self, token: &str, node_id: &str) -> Result<bool, ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let (region, server_id) = Self::split_node_id(node_id)?;
+
+    match self.client.get_server(&credentials, &region, &server_id) {
+      Ok(server) => Ok(!server.status.eq_ignore_ascii_case("DELETED")),
+      Err(OpenStackError::NotFound { .. }) => Ok(false),
+      Err(source) => Err(Self::adapt_error(
+        "OpenStack server existence check failed.",
+        source,
+      )),
+    }
+  }
+
+  /// Delete the server, then its floating IP, then its security group.
+  ///
+  /// The order is forced by Neutron: a security group cannot go while a port references it, and
+  /// the port goes with the server. The floating IP and group ids are **rediscovered** rather than
+  /// stored, so this still does the right thing if an operator removed one by hand.
+  ///
+  /// A server that will not delete aborts immediately — it is the billable thing. Anything else
+  /// that survives is accumulated and reported by id (AGENTS.md §8).
+  fn delete_node(&self, token: &str, node_id: &str) -> Result<(), ProviderAdapterError> {
+    let credentials = Self::credentials(token)?;
+    let (region, server_id) = Self::split_node_id(node_id)?;
+
+    // Read what is attached *before* deleting: the server's ports disappear with it, the floating
+    // IPs are only findable through them, and its security groups are only named on the server.
+    let ports = self
+      .client
+      .ports_for_server(&credentials, &region, &server_id)
+      .unwrap_or_default();
+    let floating_ips = self
+      .client
+      .floating_ips_for_ports(&credentials, &region, &ports)
+      .unwrap_or_default();
+
+    // Only groups this app created are candidates — a group the operator attached by hand is
+    // theirs, and deleting it would break whatever else uses it.
+    let group_names: Vec<String> = self
+      .client
+      .get_server(&credentials, &region, &server_id)
+      .map(|server| {
+        server
+          .security_groups
+          .into_iter()
+          .map(|group| group.name)
+          .filter(|name| name.starts_with("goatstare-"))
+          .collect()
+      })
+      .unwrap_or_default();
+    let groups = self
+      .client
+      .security_group_ids_by_name(&credentials, &region, &group_names)
+      .unwrap_or_default();
+
+    self
+      .client
+      .delete_server(&credentials, &region, &server_id)
+      .map_err(|source| Self::adapt_error("OpenStack server delete call failed.", source))?;
+
+    // The group cannot be removed until the server's port is released, so this wait is load
+    // bearing rather than cosmetic.
+    let _ = self.client.wait_for_server_gone(
+      &credentials,
+      &region,
+      &server_id,
+      self.config.poll_interval,
+      self.config.dependency_release_timeout,
+    );
+
+    let mut leftovers = Vec::new();
+
+    for floating in &floating_ips {
+      if let Err(error) = self.client.release_floating_ip(&credentials, &region, &floating.id) {
+        leftovers.push(format!(
+          "floating IP {} ({}) could NOT be released and may still be billing: {error}",
+          floating.floating_ip_address, floating.id
+        ));
+      }
+    }
+
+    for (group_id, group_name) in &groups {
+      if let Err(error) = self.delete_security_group_when_free(&credentials, &region, group_id) {
+        leftovers.push(format!(
+          "security group '{group_name}' ({group_id}) could NOT be removed: {error}"
+        ));
+      }
+    }
+
+    if leftovers.is_empty() {
+      Ok(())
+    } else {
+      Err(ProviderAdapterError::Unsupported {
+        detail: format!(
+          "The server was deleted, but some resources remain — remove them in your cloud's dashboard: {}.",
+          leftovers.join("; ")
+        ),
+      })
+    }
   }
 }
 
@@ -1375,8 +2094,8 @@ impl ProviderAdapter for GceProviderAdapter {
           transfer_note:
             "Egress is billed per GB with no included allowance, and the external IPv4 is billed hourly. Both are already in this estimate's monthly figure."
               .to_string(),
-          monthly_usd: spec.monthly_usd,
-          hourly_usd: spec.hourly_usd,
+          monthly_usd: Some(spec.monthly_usd),
+          hourly_usd: Some(spec.hourly_usd),
           estimated: true,
           source_timestamp: fetched_at_epoch_seconds.clone(),
         })
@@ -1993,8 +2712,8 @@ impl ProviderAdapter for Ec2ProviderAdapter {
           transfer_note:
             "Estimate. AWS bills data transfer out per GB and prices vary by region; includes the public IPv4 address charge."
               .to_string(),
-          monthly_usd: plan.monthly_usd,
-          hourly_usd: plan.hourly_usd,
+          monthly_usd: Some(plan.monthly_usd),
+          hourly_usd: Some(plan.hourly_usd),
           // List prices, not a live quote — see EC2_PLAN_SPECS.
           estimated: true,
           source_timestamp: source_timestamp.clone(),
@@ -2435,8 +3154,14 @@ pub struct ProviderPlanPricing {
   pub disk_gb: u64,
   pub transfer_tb: f64,
   pub transfer_note: String,
-  pub monthly_usd: f64,
-  pub hourly_usd: f64,
+  /// `None` where the provider publishes no price at all.
+  ///
+  /// Optional rather than zero because zero is a claim: rendered, it says the plan is free, and
+  /// an OpenStack cloud whose operator sets its own prices is emphatically not. The UI already
+  /// renders an absent price as "n/a", and `vpn_nodes.price_monthly_usd` has always been nullable
+  /// — this type was the odd one out.
+  pub monthly_usd: Option<f64>,
+  pub hourly_usd: Option<f64>,
   pub estimated: bool,
   pub source_timestamp: String,
 }
@@ -2527,6 +3252,7 @@ impl ProviderRegistry {
       Arc::new(Ec2ProviderAdapter::new()),
       Arc::new(LinodeProviderAdapter::new()),
       Arc::new(GceProviderAdapter::new()),
+      Arc::new(OpenStackProviderAdapter::new()),
       Arc::new(DockerProviderAdapter::new()),
     ];
 
@@ -3010,9 +3736,9 @@ mod tests {
     GCE_USER_DATA_LIMIT_BYTES, GceProviderAdapter, InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY,
     LINODE_USER_DATA_LIMIT_BYTES, LinodeProviderAdapter, NodeInitRequest, ProviderAdapter,
     ProviderAdapterError, ProviderCredential, ProviderNodeStatus, ProviderPlanPricing,
-    ProviderRegion, ProviderRegistry, ProvisionedNode, base64_encode, ec2_security_group_name,
-    sanitize_droplet_name, sanitize_ec2_tag_value, sanitize_gce_instance_name,
-    sanitize_linode_label,
+    OpenStackProviderAdapter, ProviderRegion, ProviderRegistry, ProvisionedNode, base64_encode,
+    ec2_security_group_name, sanitize_droplet_name, sanitize_ec2_tag_value,
+    sanitize_gce_instance_name, sanitize_linode_label,
   };
 
   fn test_db_path(test_name: &str) -> PathBuf {
@@ -3562,7 +4288,7 @@ mod tests {
       vec!["g6-nanode-1", "g6-standard-1"],
       "shared plans only, cheapest first — a GPU plan is an expensive mistake to offer"
     );
-    assert_eq!(pricing[0].monthly_usd, 5.0);
+    assert_eq!(pricing[0].monthly_usd, Some(5.0));
     assert!(!pricing[0].estimated, "these are live prices, not a curated table");
     // Linode reports disk in MB; the field is GB everywhere else.
     assert_eq!(pricing[0].disk_gb, 25);
@@ -4017,6 +4743,515 @@ mod tests {
       "payload is {} bytes, over Google's {GCE_USER_DATA_LIMIT_BYTES}-byte metadata limit",
       artifact.init_payload.len()
     );
+  }
+
+  /// An OpenStack credential pointed at a mock server.
+  ///
+  /// There is no `with_base_url` for this adapter: the auth URL *is* part of the credential, and
+  /// every other address comes from the catalogue authentication returns. Pointing the adapter at
+  /// a mock is therefore just a matter of what the credential says.
+  fn openstack_credential(base_url: &str) -> String {
+    ProviderCredential::from_fields([
+      ("auth_url".to_string(), format!("{base_url}/v3")),
+      ("application_credential_id".to_string(), "cred-id".to_string()),
+      (
+        "application_credential_secret".to_string(),
+        "cred-secret-not-real".to_string(),
+      ),
+    ])
+    .to_stored_value()
+  }
+
+  /// Keystone's answer: a token in a header, and a catalogue whose endpoints point back at this
+  /// same mock so Nova, Neutron and Glance are all served from one server.
+  fn mock_keystone(server: &mut mockito::Server, region: &str) -> mockito::Mock {
+    let base = server.url();
+    let body = serde_json::json!({
+      "token": {
+        "project": { "id": "proj-1" },
+        "catalog": [
+          { "type": "compute", "endpoints": [
+            { "interface": "public", "region": region, "url": format!("{base}/compute") }]},
+          { "type": "network", "endpoints": [
+            { "interface": "public", "region": region, "url": format!("{base}/network") }]},
+          { "type": "image", "endpoints": [
+            { "interface": "public", "region": region, "url": format!("{base}/image") }]},
+        ],
+      },
+    })
+    .to_string();
+
+    server
+      .mock("POST", "/v3/auth/tokens")
+      .with_status(201)
+      .with_header("x-subject-token", "gAAAAAtest-token")
+      .with_body(body)
+      .expect_at_least(1)
+      .create()
+  }
+
+  fn mock_os(
+    server: &mut mockito::Server,
+    method: &str,
+    path: &str,
+    body: &str,
+  ) -> mockito::Mock {
+    server
+      .mock(method, path)
+      .match_header("x-auth-token", mockito::Matcher::Any)
+      .with_status(200)
+      .with_body(body)
+      .expect_at_least(1)
+      .create()
+  }
+
+  const OS_UBUNTU_IMAGES: &str =
+    r#"{"images":[{"id":"img-1","name":"Ubuntu 24.04 LTS (Noble)"},{"id":"img-9","name":"CentOS 9"}]}"#;
+
+  /// The common shape: a tenant network, so the server comes up on a private address and needs a
+  /// floating IP allocated and attached.
+  #[test]
+  fn openstack_create_node_allocates_a_floating_ip_for_a_private_server() {
+    let mut server = mockito::Server::new();
+    let keystone = mock_keystone(&mut server, "RegionOne");
+    let _images = mock_os(&mut server, "GET", "/image/v2/images?status=active&limit=1000", OS_UBUNTU_IMAGES);
+    let _networks = mock_os(
+      &mut server,
+      "GET",
+      "/network/v2.0/networks",
+      r#"{"networks":[{"id":"net-1","name":"private","status":"ACTIVE","router:external":false,"shared":false},
+        {"id":"net-ext","name":"public","status":"ACTIVE","router:external":true,"shared":false}]}"#,
+    );
+    let group = mock_os(
+      &mut server,
+      "POST",
+      "/network/v2.0/security-groups",
+      r#"{"security_group":{"id":"sg-1"}}"#,
+    );
+    let rule = mock_os(
+      &mut server,
+      "POST",
+      "/network/v2.0/security-group-rules",
+      r#"{"security_group_rule":{"id":"rule-1"}}"#,
+    );
+    let create = mock_os(
+      &mut server,
+      "POST",
+      "/compute/servers",
+      r#"{"server":{"id":"srv-1","status":"BUILD"}}"#,
+    );
+    let _poll = mock_os(
+      &mut server,
+      "GET",
+      "/compute/servers/srv-1",
+      r#"{"server":{"id":"srv-1","status":"ACTIVE",
+        "addresses":{"private":[{"addr":"10.0.0.5","OS-EXT-IPS:type":"fixed"}]}}}"#,
+    );
+    let ports = mock_os(
+      &mut server,
+      "GET",
+      "/network/v2.0/ports?device_id=srv-1",
+      r#"{"ports":[{"id":"port-1"}]}"#,
+    );
+    let floating = mock_os(
+      &mut server,
+      "POST",
+      "/network/v2.0/floatingips",
+      r#"{"floatingip":{"id":"fip-1","floating_ip_address":"203.0.113.55","port_id":"port-1"}}"#,
+    );
+
+    let adapter = OpenStackProviderAdapter::with_fast_polling();
+    let provisioned = adapter
+      .create_node(
+        &openstack_credential(&server.url()),
+        "Primary Node",
+        "RegionOne",
+        "flavor-2",
+        "#cloud-config\npackages: [wireguard]\n",
+      )
+      .expect("provisioning should succeed against the mocked OpenStack cloud");
+
+    keystone.assert();
+    group.assert();
+    rule.assert();
+    create.assert();
+    ports.assert();
+    floating.assert();
+
+    assert_eq!(provisioned.public_ipv4, "203.0.113.55");
+    assert_eq!(provisioned.endpoint_port, DEFAULT_WIREGUARD_PORT);
+    // The region travels with the node id, because status, exists and delete need it to pick a
+    // catalogue endpoint and the trait does not pass one.
+    assert_eq!(provisioned.node_id, "RegionOne/srv-1");
+  }
+
+  /// The DreamCompute shape: attached straight to a shared external network, so the address on the
+  /// server is already routable and no floating IP is involved. Algo assumed only this shape and
+  /// broke on clouds that need the other.
+  #[test]
+  fn openstack_create_node_skips_the_floating_ip_when_the_address_is_already_routable() {
+    let mut server = mockito::Server::new();
+    let _keystone = mock_keystone(&mut server, "RegionOne");
+    let _images = mock_os(&mut server, "GET", "/image/v2/images?status=active&limit=1000", OS_UBUNTU_IMAGES);
+    let _networks = mock_os(
+      &mut server,
+      "GET",
+      "/network/v2.0/networks",
+      r#"{"networks":[{"id":"net-ext","name":"public","status":"ACTIVE","router:external":true,"shared":true}]}"#,
+    );
+    let _group = mock_os(
+      &mut server,
+      "POST",
+      "/network/v2.0/security-groups",
+      r#"{"security_group":{"id":"sg-1"}}"#,
+    );
+    let _rule = mock_os(
+      &mut server,
+      "POST",
+      "/network/v2.0/security-group-rules",
+      r#"{"security_group_rule":{"id":"rule-1"}}"#,
+    );
+    let _create = mock_os(
+      &mut server,
+      "POST",
+      "/compute/servers",
+      r#"{"server":{"id":"srv-1","status":"BUILD"}}"#,
+    );
+    let _poll = mock_os(
+      &mut server,
+      "GET",
+      "/compute/servers/srv-1",
+      r#"{"server":{"id":"srv-1","status":"ACTIVE",
+        "addresses":{"public":[{"addr":"198.51.100.8","OS-EXT-IPS:type":"fixed"}]}}}"#,
+    );
+    // Never called on this path — allocating one would leave a second billable resource behind.
+    let floating = server
+      .mock("POST", "/network/v2.0/floatingips")
+      .with_status(200)
+      .with_body(r#"{"floatingip":{"id":"fip-1","floating_ip_address":"203.0.113.55"}}"#)
+      .expect(0)
+      .create();
+
+    let adapter = OpenStackProviderAdapter::with_fast_polling();
+    let provisioned = adapter
+      .create_node(
+        &openstack_credential(&server.url()),
+        "Primary Node",
+        "RegionOne",
+        "flavor-2",
+        "#cloud-config\n",
+      )
+      .expect("provisioning should succeed");
+
+    floating.assert();
+    assert_eq!(provisioned.public_ipv4, "198.51.100.8");
+  }
+
+  /// A cloud with nothing to attach to gets a capability error naming what is missing, not a
+  /// failed create.
+  #[test]
+  fn openstack_reports_a_cloud_with_no_usable_network_as_a_capability_error() {
+    let mut server = mockito::Server::new();
+    let _keystone = mock_keystone(&mut server, "RegionOne");
+    let _images = mock_os(&mut server, "GET", "/image/v2/images?status=active&limit=1000", OS_UBUNTU_IMAGES);
+    let _networks = mock_os(&mut server, "GET", "/network/v2.0/networks", r#"{"networks":[]}"#);
+
+    let error = OpenStackProviderAdapter::with_fast_polling()
+      .create_node(
+        &openstack_credential(&server.url()),
+        "Primary Node",
+        "RegionOne",
+        "flavor-2",
+        "#cloud-config\n",
+      )
+      .expect_err("a cloud with no network must fail");
+
+    assert!(matches!(error, ProviderAdapterError::Unsupported { .. }));
+    assert!(error.to_string().contains("no network"), "was: {error}");
+  }
+
+  /// A cloud without a supported Ubuntu tells the user what it does have, which beats
+  /// "image not found" for a name only the operator knows.
+  #[test]
+  fn openstack_reports_a_missing_ubuntu_image_and_lists_what_is_available() {
+    let mut server = mockito::Server::new();
+    let _keystone = mock_keystone(&mut server, "RegionOne");
+    let _images = mock_os(
+      &mut server,
+      "GET",
+      "/image/v2/images?status=active&limit=1000",
+      r#"{"images":[{"id":"img-9","name":"CentOS Stream 9"},{"id":"img-8","name":"Debian 12"}]}"#,
+    );
+
+    let error = OpenStackProviderAdapter::with_fast_polling()
+      .create_node(
+        &openstack_credential(&server.url()),
+        "Primary Node",
+        "RegionOne",
+        "flavor-2",
+        "#cloud-config\n",
+      )
+      .expect_err("a cloud with no Ubuntu image must fail");
+
+    assert!(matches!(error, ProviderAdapterError::Unsupported { .. }));
+    let rendered = error.to_string();
+    assert!(rendered.contains("CentOS Stream 9"), "the user needs to see what is on offer: {rendered}");
+  }
+
+  /// Once the server exists it is billing, so a later failure must remove it rather than return.
+  #[test]
+  fn openstack_create_node_tears_down_everything_when_the_server_never_becomes_active() {
+    let mut server = mockito::Server::new();
+    let _keystone = mock_keystone(&mut server, "RegionOne");
+    let _images = mock_os(&mut server, "GET", "/image/v2/images?status=active&limit=1000", OS_UBUNTU_IMAGES);
+    let _networks = mock_os(
+      &mut server,
+      "GET",
+      "/network/v2.0/networks",
+      r#"{"networks":[{"id":"net-1","name":"private","status":"ACTIVE","router:external":false,"shared":false}]}"#,
+    );
+    let _group = mock_os(
+      &mut server,
+      "POST",
+      "/network/v2.0/security-groups",
+      r#"{"security_group":{"id":"sg-1"}}"#,
+    );
+    let _rule = mock_os(
+      &mut server,
+      "POST",
+      "/network/v2.0/security-group-rules",
+      r#"{"security_group_rule":{"id":"rule-1"}}"#,
+    );
+    let _create = mock_os(
+      &mut server,
+      "POST",
+      "/compute/servers",
+      r#"{"server":{"id":"srv-1","status":"BUILD"}}"#,
+    );
+    // ERROR is terminal: waiting out the timeout would only delay the same failure.
+    let _poll = mock_os(
+      &mut server,
+      "GET",
+      "/compute/servers/srv-1",
+      r#"{"server":{"id":"srv-1","status":"ERROR","fault":{"message":"No valid host was found"}}}"#,
+    );
+    let server_delete = server
+      .mock("DELETE", "/compute/servers/srv-1")
+      .with_status(204)
+      .expect_at_least(1)
+      .create();
+    let group_delete = server
+      .mock("DELETE", "/network/v2.0/security-groups/sg-1")
+      .with_status(204)
+      .expect_at_least(1)
+      .create();
+
+    let error = OpenStackProviderAdapter::with_fast_polling()
+      .create_node(
+        &openstack_credential(&server.url()),
+        "Primary Node",
+        "RegionOne",
+        "flavor-2",
+        "#cloud-config\n",
+      )
+      .expect_err("a server that errors must fail");
+
+    server_delete.assert();
+    group_delete.assert();
+    assert!(
+      error.to_string().contains("nothing is still billing"),
+      "the user must be told the cleanup succeeded: {error}"
+    );
+  }
+
+  /// Teardown order is forced by Neutron: the group cannot go while the server's port holds it.
+  #[test]
+  fn openstack_delete_node_removes_the_server_its_floating_ip_and_its_group() {
+    let mut server = mockito::Server::new();
+    let _keystone = mock_keystone(&mut server, "RegionOne");
+    let _ports = mock_os(
+      &mut server,
+      "GET",
+      "/network/v2.0/ports?device_id=srv-1",
+      r#"{"ports":[{"id":"port-1"}]}"#,
+    );
+    let _floating_list = mock_os(
+      &mut server,
+      "GET",
+      "/network/v2.0/floatingips",
+      r#"{"floatingips":[{"id":"fip-1","floating_ip_address":"203.0.113.55","port_id":"port-1"}]}"#,
+    );
+    let _server_get = mock_os(
+      &mut server,
+      "GET",
+      "/compute/servers/srv-1",
+      r#"{"server":{"id":"srv-1","status":"ACTIVE",
+        "security_groups":[{"name":"goatstare-primary-node-abc12345"},{"name":"default"}]}}"#,
+    );
+    let _groups = mock_os(
+      &mut server,
+      "GET",
+      "/network/v2.0/security-groups",
+      r#"{"security_groups":[{"id":"sg-1","name":"goatstare-primary-node-abc12345"},
+        {"id":"sg-default","name":"default"}]}"#,
+    );
+    let server_delete = server
+      .mock("DELETE", "/compute/servers/srv-1")
+      .with_status(204)
+      .expect_at_least(1)
+      .create();
+    let floating_delete = server
+      .mock("DELETE", "/network/v2.0/floatingips/fip-1")
+      .with_status(204)
+      .expect_at_least(1)
+      .create();
+    let group_delete = server
+      .mock("DELETE", "/network/v2.0/security-groups/sg-1")
+      .with_status(204)
+      .expect_at_least(1)
+      .create();
+    // The operator's own group must be left alone.
+    let default_group_delete = server
+      .mock("DELETE", "/network/v2.0/security-groups/sg-default")
+      .with_status(204)
+      .expect(0)
+      .create();
+
+    OpenStackProviderAdapter::with_fast_polling()
+      .delete_node(&openstack_credential(&server.url()), "RegionOne/srv-1")
+      .expect("delete should succeed");
+
+    server_delete.assert();
+    floating_delete.assert();
+    group_delete.assert();
+    default_group_delete.assert();
+  }
+
+  /// A floating IP that outlives its server keeps billing on most clouds, so a failure to release
+  /// one must be reported rather than swallowed.
+  #[test]
+  fn openstack_reports_a_floating_ip_it_could_not_release() {
+    let mut server = mockito::Server::new();
+    let _keystone = mock_keystone(&mut server, "RegionOne");
+    let _ports = mock_os(
+      &mut server,
+      "GET",
+      "/network/v2.0/ports?device_id=srv-1",
+      r#"{"ports":[{"id":"port-1"}]}"#,
+    );
+    let _floating_list = mock_os(
+      &mut server,
+      "GET",
+      "/network/v2.0/floatingips",
+      r#"{"floatingips":[{"id":"fip-1","floating_ip_address":"203.0.113.55","port_id":"port-1"}]}"#,
+    );
+    let _server_get = mock_os(
+      &mut server,
+      "GET",
+      "/compute/servers/srv-1",
+      r#"{"server":{"id":"srv-1","status":"ACTIVE","security_groups":[]}}"#,
+    );
+    let _groups = mock_os(&mut server, "GET", "/network/v2.0/security-groups", r#"{"security_groups":[]}"#);
+    let _server_delete = server
+      .mock("DELETE", "/compute/servers/srv-1")
+      .with_status(204)
+      .expect_at_least(1)
+      .create();
+    let _floating_delete = server
+      .mock("DELETE", "/network/v2.0/floatingips/fip-1")
+      .with_status(500)
+      .with_body(r#"{"NeutronError":{"message":"Internal error"}}"#)
+      .expect_at_least(1)
+      .create();
+
+    let error = OpenStackProviderAdapter::with_fast_polling()
+      .delete_node(&openstack_credential(&server.url()), "RegionOne/srv-1")
+      .expect_err("a stuck floating IP must surface");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("203.0.113.55"), "the address must be named: {rendered}");
+    assert!(rendered.contains("may still be billing"), "was: {rendered}");
+  }
+
+  /// OpenStack publishes no prices, and a rendered $0.00 would say a paid flavor is free.
+  #[test]
+  fn openstack_pricing_reports_no_price_rather_than_zero() {
+    let mut server = mockito::Server::new();
+    let _keystone = mock_keystone(&mut server, "RegionOne");
+    let _flavors = mock_os(
+      &mut server,
+      "GET",
+      "/compute/flavors/detail",
+      r#"{"flavors":[
+        {"id":"f-2","name":"m1.small","ram":2048,"vcpus":1,"disk":20},
+        {"id":"f-1","name":"m1.tiny","ram":512,"vcpus":1,"disk":10},
+        {"id":"f-x","name":"retired","ram":256,"vcpus":1,"disk":5,"OS-FLV-DISABLED:disabled":true},
+        {"id":"f-p","name":"operator-only","ram":128,"vcpus":1,"disk":5,"os-flavor-access:is_public":false}
+      ]}"#,
+    );
+
+    let pricing = OpenStackProviderAdapter::with_fast_polling()
+      .list_plan_pricing(&openstack_credential(&server.url()), "RegionOne")
+      .expect("flavors should list");
+
+    let slugs: Vec<&str> = pricing.iter().map(|plan| plan.size_slug.as_str()).collect();
+    // Smallest first; a disabled flavor cannot be launched and a non-public one is not ours.
+    assert_eq!(slugs, vec!["f-1", "f-2"], "was: {slugs:?}");
+    assert_eq!(pricing[0].monthly_usd, None, "a price we do not know must not be reported as zero");
+    assert_eq!(pricing[0].hourly_usd, None);
+    assert!(pricing[0].transfer_note.contains("operator"), "was: {}", pricing[0].transfer_note);
+    // Nova launches by flavor id; the name is a label and is not guaranteed unique.
+    assert_eq!(pricing[0].plan_label, "m1.tiny");
+  }
+
+  /// No flavor id is guessable across clouds, so an empty selection must be refused rather than
+  /// defaulted.
+  #[test]
+  fn openstack_refuses_to_guess_a_flavor() {
+    let error = OpenStackProviderAdapter::with_fast_polling()
+      .create_node(&openstack_credential("http://127.0.0.1:1"), "n", "RegionOne", "  ", "#cloud-config\n")
+      .expect_err("an empty flavor must be refused");
+
+    assert!(matches!(error, ProviderAdapterError::Unsupported { .. }));
+    assert!(error.to_string().contains("Choose a plan"), "was: {error}");
+  }
+
+  #[test]
+  fn openstack_rejects_a_node_reference_that_is_not_its_own() {
+    let error = OpenStackProviderAdapter::with_fast_polling()
+      .delete_node(&openstack_credential("http://127.0.0.1:1"), "12345")
+      .expect_err("a bare Linode id must not be accepted");
+
+    assert!(matches!(error, ProviderAdapterError::Unsupported { .. }));
+    assert!(error.to_string().contains("<region>/<server-id>"), "was: {error}");
+  }
+
+  #[test]
+  fn openstack_rejects_a_credential_that_is_missing_a_field() {
+    let credential = ProviderCredential::from_fields([(
+      "auth_url".to_string(),
+      "https://identity.example.com/v3".to_string(),
+    )])
+    .to_stored_value();
+
+    let error = OpenStackProviderAdapter::with_fast_polling()
+      .validate_token(&credential)
+      .expect_err("a partial credential must be rejected");
+
+    assert!(
+      error.to_string().contains("application_credential_id"),
+      "the missing field must be named: {error}"
+    );
+  }
+
+  /// An OpenStack region name means whatever its operator decided, so no geography is invented for
+  /// it — even when it collides with a name another provider owns.
+  #[test]
+  fn openstack_regions_carry_no_invented_geography() {
+    let region = OpenStackProviderAdapter::new().describe_region("RegionOne");
+    assert_eq!(region.slug, "RegionOne");
+    assert_eq!(region.city, None);
+    assert_eq!(region.country, None);
   }
 
   /// An account with no default VPC gets a capability error naming the problem, not a failed launch.
@@ -4509,6 +5744,7 @@ mod tests {
     assert!(registry.node_provider_for_slug("aws-ec2").is_some());
     assert!(registry.node_provider_for_slug("linode").is_some());
     assert!(registry.node_provider_for_slug("gce").is_some());
+    assert!(registry.node_provider_for_slug("openstack").is_some());
     assert!(registry.node_provider_for_slug("nimbus-cloud").is_none());
   }
 

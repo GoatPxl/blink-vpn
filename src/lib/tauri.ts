@@ -385,8 +385,10 @@ export interface ProviderPlanPricing {
   disk_gb: number;
   transfer_tb: number;
   transfer_note: string;
-  monthly_usd: number;
-  hourly_usd: number;
+  // `null` where the provider publishes no price. Not zero: rendered, zero says the plan is free,
+  // and an OpenStack cloud whose operator sets its own prices is emphatically not.
+  monthly_usd: number | null;
+  hourly_usd: number | null;
   estimated: boolean;
   source_timestamp: string;
 }
