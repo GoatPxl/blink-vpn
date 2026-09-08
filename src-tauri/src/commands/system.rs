@@ -2,11 +2,11 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use tauri::State;
 use tauri::{AppHandle, Manager};
 
 use crate::backend::Backend;
+use crate::backend::process::no_window_command;
 use crate::commands::error::{CommandError, CommandErrorKind};
 use crate::backend::db::{Database, ProviderRecord, ProviderStatus};
 use crate::backend::logging;
@@ -1239,7 +1239,7 @@ pub async fn check_docker_readiness(
     ));
   }
 
-  let cli_result = Command::new("docker").args(["--version"]).output();
+  let cli_result = no_window_command("docker").args(["--version"]).output();
   let (installed, cli_version, cli_error) = match cli_result {
     Ok(output) if output.status.success() => {
       let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1268,7 +1268,7 @@ pub async fn check_docker_readiness(
     });
   }
 
-  let daemon_result = Command::new("docker")
+  let daemon_result = no_window_command("docker")
     .args(["info", "--format", "{{.ServerVersion}}"])
     .output();
 
@@ -1415,7 +1415,7 @@ pub async fn reveal_app_location(key: String, app: AppHandle) -> Result<(), Comm
 
   // `/select,` highlights a file inside its folder; for a directory it opens the parent with the
   // directory selected, which is the behaviour a user expects from "reveal".
-  Command::new("explorer.exe")
+  no_window_command("explorer.exe")
     .arg(format!("/select,{}", path.display()))
     .spawn()
     .map_err(|error| format!("Could not open the folder: {error}"))?;
@@ -1435,7 +1435,7 @@ pub async fn open_wireguard_install_page() -> Result<(), CommandError> {
     ));
   }
 
-  Command::new("cmd")
+  no_window_command("cmd")
     .args(["/C", "start", "", "https://www.wireguard.com/install/"])
     .spawn()
     .map_err(|error| format!("Could not open WireGuard install page: {error}"))?;
@@ -1464,7 +1464,7 @@ pub async fn install_wireguard_with_prerequisites() -> Result<WireGuardInstallRe
 
   let script_path_str = script_path.to_string_lossy().replace('"', "`\"");
 
-  let launch_result = Command::new("powershell")
+  let launch_result = no_window_command("powershell")
     .args([
       "-NoProfile",
       "-ExecutionPolicy",

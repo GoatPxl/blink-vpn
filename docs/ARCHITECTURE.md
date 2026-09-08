@@ -57,6 +57,7 @@ flowchart LR
 - Provider adapters: low-level provider implementation details for validate, catalog, create, wait, and delete.
 - WireGuard manager: generate keys, and import, activate, deactivate, and unregister tunnels through the WireGuard for Windows service.
 - Key management: generate and store key material on the app host; never generate client keys on remote nodes.
+- Process spawning (`backend/process.rs`): the single constructor for every child process. Release builds are GUI subsystem, so a console-subsystem child (`sc`, `wg`, `wireguard`, `powershell`, `docker`, `cmd`) gets its own console window unless `CREATE_NO_WINDOW` is set; status polling spawns several processes a second, so a bare `Command::new` strobes visible black boxes throughout a connect. A guard test enforces that nothing bypasses it.
 
 ## Connection Model
 

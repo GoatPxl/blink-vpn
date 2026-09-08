@@ -157,6 +157,26 @@ SQLite sets a `busy_timeout`, `create_provider` is `INSERT OR IGNORE` because fo
 ensure the built-in rows, and connect holds a per-tunnel in-flight guard. Assume no serialization
 when adding a check-then-write.
 
+**Every child process goes through `backend::process::no_window_command`.** Never
+`std::process::Command::new` — the guard test `process_spawns_go_through_helper` fails the build if
+you do.
+
+Release builds are GUI subsystem (`main.rs`), so the app owns no console, and that attribute governs
+only *our* process. A console-subsystem child — `sc`, `wg`, `wireguard`, `powershell`, `docker`,
+`cmd` — is handed a brand-new console window by Windows unless `CREATE_NO_WINDOW` is set, and it
+flashes on screen as the child exits. Status polling makes that continuous: `sc query` runs at 10 Hz
+for six seconds while a tunnel activates, then once a second while the connect is watched, then
+three spawns per five-second health tick. Shipped without the flag, the app strobed black boxes at
+roughly ten a second through every connect.
+
+**Debug builds cannot reproduce this** — they have a console the children inherit instead of
+allocating their own — which is exactly why it reached a release. Verify anything touching process
+spawning against `npm run tauri build`, not `tauri dev`.
+
+`CREATE_NO_WINDOW` covers the process we spawn. It does **not** reach a grandchild launched by
+`Start-Process -Verb RunAs`, which needs `-WindowStyle Hidden` in the script text as well; the UAC
+consent prompt is unaffected either way, since it renders on the secure desktop.
+
 ---
 
 ## 5. No parallel implementations

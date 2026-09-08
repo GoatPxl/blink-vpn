@@ -6453,7 +6453,7 @@ mod tests {
   fn real_digitalocean_server_completes_a_wireguard_handshake() {
     use crate::backend::provider::DigitalOceanProviderAdapter;
     use crate::backend::wireguard::{build_client_config, ClientConfigParams};
-    use std::process::Command;
+    use crate::backend::process::no_window_command;
 
     let token = match std::env::var("GOATSTARE_DO_TEST_TOKEN") {
       Ok(value) if !value.trim().is_empty() => value,
@@ -6548,7 +6548,7 @@ mod tests {
 
       // Bring the client up and leave it retrying. WireGuard re-sends handshake initiations every
       // few seconds, so the client simply waits out cloud-init rather than needing to detect it.
-      let run = Command::new("docker")
+      let run = no_window_command("docker")
         .args([
           "run", "-d", "--name", &client_container,
           "--cap-add", "NET_ADMIN",
@@ -6583,7 +6583,7 @@ mod tests {
       while std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_secs(10));
 
-        let handshook = Command::new("docker")
+        let handshook = no_window_command("docker")
           .args([
             "exec", &client_container, "sh", "-c",
             "test \"$(wg show wg0 latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)\" -gt 0",
@@ -6598,13 +6598,13 @@ mod tests {
       }
 
       // Preserve the client's own view for diagnosis, again without relying on exec stdout.
-      let _ = Command::new("docker")
+      let _ = no_window_command("docker")
         .args([
           "exec", &client_container, "sh", "-c",
           "{ echo '--- wg-quick ---'; cat /tmp/up.log; echo '--- wg show ---'; wg show; } > /tmp/diag.txt 2>&1",
         ])
         .status();
-      let _ = Command::new("docker")
+      let _ = no_window_command("docker")
         .args(["cp", &format!("{client_container}:/tmp/diag.txt"), "./do-handshake-diag.txt"])
         .status();
 
@@ -6614,7 +6614,7 @@ mod tests {
     })();
 
     // Teardown, unconditionally and before any assertion.
-    let _ = Command::new("docker").args(["rm", "-f", &client_container]).output();
+    let _ = no_window_command("docker").args(["rm", "-f", &client_container]).output();
     let cleanup = orchestrator.force_cleanup_vpn_node(
       &providers,
       &wireguard,

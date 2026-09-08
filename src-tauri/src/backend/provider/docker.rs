@@ -1,9 +1,9 @@
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
 use crate::backend::bootstrap::{BootstrapOutputContract, READINESS_MARKER_PATH};
+use crate::backend::process::no_window_command;
 
 use super::{
   BootstrapWaitRequest, CredentialField, InitDelivery, LEGACY_SINGLE_CREDENTIAL_KEY,
@@ -134,7 +134,7 @@ impl DockerProviderAdapter {
   }
 
   fn run_docker(args: &[&str], action: &str) -> Result<String, ProviderAdapterError> {
-    let output = Command::new("docker")
+    let output = no_window_command("docker")
       .args(args)
       .output()
       .map_err(|error| ProviderAdapterError::Unsupported {
@@ -268,7 +268,7 @@ impl DockerProviderAdapter {
       return None;
     }
 
-    let output = Command::new("wsl.exe").args(["hostname", "-I"]).output().ok()?;
+    let output = no_window_command("wsl.exe").args(["hostname", "-I"]).output().ok()?;
     if !output.status.success() {
       return None;
     }
@@ -587,7 +587,7 @@ impl DockerProviderAdapter {
   /// reading only stdout hid the error output from a failing bootstrap — which is the half that
   /// actually explains the failure.
   fn container_log_tail(container_id: &str) -> String {
-    let output = Command::new("docker")
+    let output = no_window_command("docker")
       .args(["logs", "--tail", "40", container_id])
       .output();
 

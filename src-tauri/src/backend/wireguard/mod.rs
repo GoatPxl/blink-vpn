@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,6 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use defguard_wireguard_rs::key::Key as WireguardKey;
 use serde::Serialize;
 use thiserror::Error;
+
+use crate::backend::process::no_window_command;
 
 
 pub const DEFAULT_CLIENT_ALLOWED_IPS: &[&str] = &["0.0.0.0/0", "::/0"];
@@ -970,7 +972,7 @@ impl CommandRunner for ProcessCommandRunner {
       .map(|path| path.to_string_lossy().to_string())
       .unwrap_or_else(|| program.to_string());
 
-    let mut command = Command::new(&resolved_program);
+    let mut command = no_window_command(&resolved_program);
     command.args(args);
 
     if stdin.is_some() {
@@ -1368,8 +1370,16 @@ fn run_wireguard_via_uac(program: &str, args: &[&str]) -> Result<CommandOutput, 
     .collect::<Vec<_>>()
     .join(", ");
 
+  // `-WindowStyle Hidden` keeps the elevated child from opening its own console. Suppressing
+  // the console on the launching `powershell` is not enough on its own: `Start-Process` creates
+  // a fresh process whose window is not governed by our creation flags. The target here is
+  // `wireguard.exe /installtunnelservice` or `sc start`, both sub-second, so that window is
+  // nothing but a flash on every connect and disconnect.
+  //
+  // This does not touch the UAC consent prompt, which renders on the secure desktop regardless
+  // of the launched process's window style. Connect and disconnect still prompt exactly once.
   let script = format!(
-    "$p = Start-Process -FilePath '{}' -Verb RunAs -Wait -PassThru -ArgumentList @({}); if ($null -eq $p) {{ exit 1223 }}; exit $p.ExitCode",
+    "$p = Start-Process -FilePath '{}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @({}); if ($null -eq $p) {{ exit 1223 }}; exit $p.ExitCode",
     escaped_program, escaped_args
   );
 

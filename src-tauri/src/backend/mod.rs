@@ -4,6 +4,7 @@ pub mod db;
 pub mod feature_flags;
 pub mod logging;
 pub mod orchestrator;
+pub mod process;
 pub mod provider;
 pub mod qr;
 pub mod secure_storage;
