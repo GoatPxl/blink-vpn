@@ -160,7 +160,7 @@ else
   done
   ip link set up dev "${{WG_IFACE}}"
   # wg-quick's PostUp never ran on this path, so the forward/NAT rules it would have applied
-  # must be installed by hand — FORWARD is default-drop, so skipping them strands every peer.
+  # must be installed by hand: FORWARD is default-drop, so skipping them strands every peer.
   {forward_nat_up_commands}
 fi
 

@@ -364,6 +364,32 @@ mod tests {
     );
   }
 
+  /// Payloads must be pure ASCII, comments included. DigitalOcean's ConfigDrive path mis-decodes
+  /// UTF-8: one em dash in a shell comment became a `#x80` control character, cloud-init rejected
+  /// the whole document as YAML, and every droplet booted without WireGuard while reporting
+  /// active. Nothing surfaced it (AGENTS.md §2), so this test is the only place it can be caught.
+  #[test]
+  fn both_renderers_emit_ascii_only_payloads() {
+    let bootstrap = Bootstrap::new();
+    let server = generate_server_keypair().expect("server keypair should generate");
+    let params = params_with_peers(&generated_public_keys(DEFAULT_PEER_SLOTS));
+
+    let cloud = bootstrap
+      .render_cloud_init(&params, &server.private_key, &server.public_key)
+      .expect("cloud-init render should succeed")
+      .init_payload;
+    let docker = bootstrap
+      .render_docker_init(&params, &server.private_key, &server.public_key)
+      .expect("docker init render should succeed")
+      .init_payload;
+
+    for (name, payload) in [("cloud-init", &cloud), ("docker", &docker)] {
+      if let Some(line) = payload.lines().find(|line| !line.is_ascii()) {
+        panic!("{name} payload must be ASCII-only; offending line: {line:?}");
+      }
+    }
+  }
+
   /// Every peer's PSK must be baked into the server config — like the public keys, there is no
   /// later channel to add one, and a server without it rejects the client that presents one.
   #[test]

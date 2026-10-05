@@ -13,6 +13,10 @@ pub(crate) fn build_cloud_init_user_data(
   // ignores the whole payload with no error anywhere (write-only means nothing would ever surface
   // it). A renderer test pins this.
   //
+  // The payload must also be pure ASCII, including comments inside the embedded script.
+  // DigitalOcean mis-decodes UTF-8 on its ConfigDrive path, and cloud-init then rejects the whole
+  // document — `both_renderers_emit_ascii_only_payloads` pins that.
+  //
   // `output` tees every cloud-init stage into one log so a failed bootstrap can be read from the
   // provider's console — the only debugging channel a write-only server has.
   //

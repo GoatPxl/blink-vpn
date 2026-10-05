@@ -194,7 +194,7 @@ log_stage "firewall" "installing input chain rules"
 {firewall_rules_fragment}
 
 # Persist the ingress chain before the tunnel starts. Auto-reboot is enabled (unattended
-# upgrades), and PostUp only re-creates the forward/NAT rules — the INPUT chain must come back
+# upgrades), and PostUp only re-creates the forward/NAT rules; the INPUT chain must come back
 # from the saved rule set. Saving before wg-quick keeps its PostUp rules out of the saved file,
 # or every reboot would apply them twice.
 command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
