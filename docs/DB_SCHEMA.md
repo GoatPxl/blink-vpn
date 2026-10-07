@@ -183,6 +183,36 @@ Indexes:
 - `idx_activity_events_created`
 - `idx_activity_events_node`
 
+### saved_locations
+
+A server the user can turn off to stop billing and turn back on: everything needed to recreate it.
+Destroying a node deletes its `vpn_nodes` row; this is what survives.
+
+Columns:
+
+- `id` TEXT PRIMARY KEY
+- `provider_id` TEXT NOT NULL
+- `name` TEXT NOT NULL — the most recent server name used for this location
+- `region` TEXT NOT NULL
+- `plan_key` TEXT NOT NULL
+- `price_monthly_usd` REAL, `price_hourly_usd` REAL, `price_source_timestamp` TEXT — the price the
+  last time it was turned on. Live prices are quoted again before every turn-on.
+- `node_id` TEXT — the running server, or NULL while the location is off
+- `last_turned_on_at` TEXT
+- `created_at` TEXT, `updated_at` TEXT
+- UNIQUE (`provider_id`, `region`, `plan_key`)
+
+Written by `create_vpn_node_to_ready` whenever a node reaches Ready, as an upsert on the unique key:
+the same shape always lands on one entry, refreshed with the newest name, price and `node_id`. Two
+servers of the same shape running at once share one entry, linked to the newer.
+
+No foreign keys: this database does not enable `PRAGMA foreign_keys`. `Database::delete_vpn_node`
+clears `node_id` itself, before it deletes the node, so a failed delete never leaves a location that
+reads as on. A `node_id` that points at a missing row is read as off.
+
+Deleting a provider's key leaves its saved locations in place; turning one on then fails with the
+usual missing-credential error.
+
 ### app_settings
 
 Columns:
@@ -206,6 +236,11 @@ Keys:
 - `close_to_tray` — `"true"` / `"false"`. Whether closing the main window hides it to the system
   tray instead of exiting. Defaults to `true` when unset; a value that is neither falls back to the
   default.
+- `mobile_devices` — JSON array of device names, at most `DEFAULT_PEER_SLOTS - 1`. When a node is
+  created, these name its spare peer slots in order, so those slots are inserted already claimed.
+  Defaults to empty. Validated on write and again on read with the same rule as a slot claim
+  (trimmed, non-blank, at most 40 characters, no case-insensitive duplicates); a stored value that
+  fails is treated as empty.
 
 The table is seeded empty. It previously held `wireguard_connection_mode`, deleted by migration 0014
 along with the connection-mode toggle.
@@ -214,7 +249,8 @@ Accessed through `Database::get_setting` / `set_setting`, and reached from the f
 typed command pairs — `get_current_node_id` / `set_current_node_id`, `get_tunnel_settings` /
 `set_tunnel_settings` and `get_app_preferences` / `set_app_preferences` — never directly. Tunnel
 settings validate in the orchestrator before they are stored, so an unusable value cannot reach
-config generation. `close_to_tray` is read and written by `backend::app_preferences`.
+config generation. `close_to_tray` and `mobile_devices` are read and written by
+`backend::app_preferences`.
 
 ## Lifecycle Enums
 
@@ -265,6 +301,7 @@ Current migration sequence in [src-tauri/migrations](src-tauri/migrations):
 22. Linode provider seed
 23. Google Compute Engine provider seed
 24. OpenStack provider seed
+25. Saved locations *(backfilled from every existing node that has a plan, linked to it)*
 
 Migration rules:
 

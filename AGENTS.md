@@ -21,7 +21,7 @@ connects to it. Rust backend + Tauri v2 + Next.js frontend + SQLite + Windows Cr
 | Protocol | WireGuard only |
 | Production providers | DigitalOcean, Amazon EC2, Linode, Google Compute Engine, OpenStack (experimental) |
 | Dev provider | Docker, behind feature flags, local emulation only |
-| Workflows | provision, connect, disconnect, destroy, force-cleanup, add device |
+| Workflows | provision, connect, disconnect, destroy (turn off), turn on a saved location, forget, force-cleanup, add device |
 
 Multi-provider *architecture* is in scope. Additional provider *implementations* are not, until
 asked for.
@@ -370,7 +370,8 @@ The consequences follow directly:
 
 - Node create generates `DEFAULT_PEER_SLOTS` keypairs, not one, and bakes every public key into the
   server config. Slot 0 is the Windows desktop; the rest are spare.
-- "Add a device" is a **local claim** against an already-baked slot. It contacts nothing.
+- "Add a device" is a **local claim** against an already-baked slot. It contacts nothing. The saved
+  device list in Settings makes the same claim automatically, as the slots are inserted at create.
 - A node provisioned before multi-peer support has one peer and cannot gain more. It must be
   destroyed and recreated. The UI hides the device section for such a node rather than offering
   something that cannot work.

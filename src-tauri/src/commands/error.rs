@@ -11,6 +11,7 @@
 
 use serde::Serialize;
 
+use crate::backend::app_preferences::PreferencesError;
 use crate::backend::db::DbError;
 use crate::backend::logging;
 use crate::backend::orchestrator::{OrchestratorError, UserFacingErrorKind};
@@ -102,6 +103,19 @@ impl From<OrchestratorError> for CommandError {
       user_facing.message,
       user_facing.next_action,
     )
+  }
+}
+
+impl From<PreferencesError> for CommandError {
+  fn from(error: PreferencesError) -> Self {
+    match error {
+      PreferencesError::Invalid { detail } => Self::new(
+        CommandErrorKind::InvalidInput,
+        detail,
+        "Fix the device list and save again.",
+      ),
+      PreferencesError::Database(source) => source.into(),
+    }
   }
 }
 

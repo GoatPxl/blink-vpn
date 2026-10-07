@@ -16,6 +16,37 @@ type NodePeer = {
   claimed_at: string | null;
 };
 
+type AppPreferences = {
+  close_to_tray: boolean;
+  mobile_devices: string[];
+};
+
+/**
+ * Runs `body` with the saved device list set to `devices`, then restores whatever was saved before.
+ *
+ * Preferences live in the app's real database and persist across runs, so a test that depends on
+ * them must set them explicitly — and must not leave its own list behind for the user.
+ */
+async function withSavedDevices(
+  page: Parameters<typeof invokeCommand>[0],
+  devices: string[],
+  body: () => Promise<void>,
+): Promise<void> {
+  const original = await invokeCommand<AppPreferences>(page, "get_app_preferences");
+  await invokeCommand(page, "set_app_preferences", {
+    closeToTray: original.close_to_tray,
+    mobileDevices: devices,
+  });
+  try {
+    await body();
+  } finally {
+    await invokeCommand(page, "set_app_preferences", {
+      closeToTray: original.close_to_tray,
+      mobileDevices: original.mobile_devices,
+    });
+  }
+}
+
 /**
  * Device slots through the real app against the real Docker daemon.
  *
@@ -36,7 +67,10 @@ test.describe("Device slots (real backend)", () => {
 
     await resetNodes(tauriPage);
     await saveDockerCredential(tauriPage);
-    await createDockerNode(tauriPage, nodeId, `E2E Devices ${suffix}`);
+    // No saved devices, so every spare slot starts free.
+    await withSavedDevices(tauriPage, [], () =>
+      createDockerNode(tauriPage, nodeId, `E2E Devices ${suffix}`),
+    );
 
     const peers = await invokeCommand<NodePeer[]>(tauriPage, "list_node_peers", { nodeId });
 
@@ -96,5 +130,29 @@ test.describe("Device slots (real backend)", () => {
     expect(refusal.refused, "a loopback endpoint must not produce a device config").toBe(true);
     // Keyed on the structured kind, never on message text.
     expect(refusal.kind).toBe("invalid-input");
+  });
+
+  test("names a new server's spare slots after the saved devices", async ({ tauriPage }) => {
+    const suffix = Date.now();
+    const nodeId = `node-e2e-saved-${suffix}`;
+
+    await resetNodes(tauriPage);
+    await saveDockerCredential(tauriPage);
+    await withSavedDevices(tauriPage, ["E2E Phone", "E2E Tablet"], () =>
+      createDockerNode(tauriPage, nodeId, `E2E Saved ${suffix}`),
+    );
+
+    const peers = await invokeCommand<NodePeer[]>(tauriPage, "list_node_peers", { nodeId });
+
+    // Saved names take the spare slots in order and arrive claimed; the rest stay free.
+    expect(peers.map((peer) => peer.label)).toEqual([
+      "This PC",
+      "E2E Phone",
+      "E2E Tablet",
+      null,
+      null,
+    ]);
+    expect(peers.slice(0, 3).every((peer) => peer.claimed_at !== null)).toBe(true);
+    expect(peers.slice(3).every((peer) => peer.claimed_at === null)).toBe(true);
   });
 });

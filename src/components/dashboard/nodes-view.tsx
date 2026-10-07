@@ -431,7 +431,9 @@ function NodeDetailsDrawer({
           <section className="rounded-[18px] border border-[color:rgba(255,155,155,0.25)] bg-[color:rgba(255,155,155,0.05)] p-4">
             <div className="text-[11px] uppercase tracking-[0.24em] text-[#ff9b9b]">Danger zone</div>
             <p className="mt-2 text-xs text-[var(--on-surface-variant)]">
-              Destroying deletes the server at {providerName} and stops its billing. This cannot be undone.
+              Turning off deletes the server at {providerName} and stops its billing. Its location stays
+              saved, so you can turn it back on from Saved locations; phones will need to scan their new
+              codes.
             </p>
             <div className="mt-3 flex flex-wrap gap-2">
               {/* For a failed node this is the recovery path, not a destructive extra: the record
@@ -442,7 +444,7 @@ function NodeDetailsDrawer({
                 </Button>
               ) : null}
               <Button tone="danger" onClick={() => void onDestroyNode(node)} disabled={busyAction !== null} className="px-3 py-2 text-xs">
-                {busyAction === "destroy-node" ? "Destroying" : "Destroy server"}
+                {busyAction === "destroy-node" ? "Turning off" : "Turn off"}
               </Button>
             </div>
           </section>

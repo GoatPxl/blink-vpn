@@ -92,8 +92,9 @@ cleared when its node is destroyed. This is a fourth status axis, deliberately s
 three below — "the server I mean" is not the same fact as "the VM is on", "the app finished
 provisioning it", or "a tunnel is up right now". See `docs/DB_SCHEMA.md` for the exact semantics.
 
-It also holds `close_to_tray`, a desktop-shell preference rather than a tunnel parameter, owned by
-`backend/app_preferences.rs`. It defaults to on, so it needs no migration.
+It also holds `close_to_tray` and `mobile_devices`, app preferences rather than tunnel parameters,
+owned by `backend/app_preferences.rs`. Both default in code (on, and empty), so neither needs a
+migration. `mobile_devices` is read once per node create; see "Device slots" below.
 
 It previously also held `wireguard_connection_mode`, removed in migration 0014 along with the
 connection-mode toggle (see Connection Model above).
@@ -248,6 +249,29 @@ noted.
 No frontend change is required. The credential form, provider picker, region list and pricing table
 are all driven by what the adapter reports.
 
+## Saved Locations
+
+GoatStare servers are meant to be short-lived: turned on when needed and destroyed afterwards so they
+stop billing. Destroying a node deletes its `vpn_nodes` row, so `saved_locations` keeps what is needed
+to bring it back — provider, region, plan, and the last price.
+
+- **Saved on ready.** Every create that reaches Ready upserts the location for its (provider, region,
+  plan). No separate save step exists.
+- **Turn off is destroy.** The UI calls it Turn off; the location is unlinked rather than removed.
+- **Turn on is an ordinary create** with the saved inputs. Nothing is reused from the last server:
+  new keys, new device slots, new IP. That keeps §2 and the short-lived-keys reasoning in §6 intact,
+  and it means phones must scan their new codes after every turn-on — the dashboard's Mobile devices
+  card shows them.
+- **Today's price is quoted before turn-on.** The stored price is from the last time; the UI reads the
+  live catalog and asks before billing starts, and refuses if the plan is no longer offered.
+- **A separate table, not a stopped status.** Every query, reconcile pass and lifecycle table treats a
+  `vpn_nodes` row as a server that exists. An "off" row there would need special handling in all of
+  them.
+
+Destroy deletes at the provider before touching anything local. If the provider refuses, destroy fails
+and removes nothing, so a server that is still billing stays visible and the user can retry. Force
+cleanup keeps its old behaviour — remove locally regardless, and report that the remote delete failed.
+
 ## Lifecycle Model
 
 ### Node states
@@ -308,6 +332,11 @@ the server, because nothing can be.
 That shape is forced by the write-only contract above. A peer cannot be registered on a running
 server, so the only way to have one later is to bake it up front. Running out of slots means
 recreating the node, and raising the constant only affects servers created afterwards.
+
+Saved devices (`mobile_devices` in app settings) name spare slots 1..=N in the same insert that
+creates them, so a new server's devices are claimed from the start and their QR codes show on the
+dashboard as soon as it is ready. This is still the same local claim: the names never leave this
+machine, and a server that already exists is not touched when the list changes.
 
 Two consequences worth knowing:
 

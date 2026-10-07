@@ -16,7 +16,8 @@ use crate::backend::provider::{
 };
 use crate::backend::orchestrator::{
   ConnectTunnelRequest, CreateClientTunnelRequest, CreateVpnNodeRequest, DisconnectTunnelRequest,
-  ForceCleanupResult, KillSwitchState, TunnelPhase, TunnelSettings, UnexpectedDrop,
+  ForceCleanupResult, KillSwitchState, SavedLocationView, TunnelPhase, TunnelSettings,
+  UnexpectedDrop,
 };
 use crate::backend::db::{NodePeerRecord, TunnelRecord, VpnNodeRecord};
 use crate::backend::secure_storage::SecureStorage;
@@ -565,20 +566,22 @@ pub async fn get_app_preferences(backend: State<'_, Backend>) -> Result<AppPrefe
   run_blocking(move || app_preferences::get(&backend.db).map_err(CommandError::from)).await
 }
 
+/// Stores the preferences and returns them as stored, with device names trimmed.
 #[tauri::command]
 pub async fn set_app_preferences(
   close_to_tray: bool,
+  mobile_devices: Vec<String>,
   app: AppHandle,
   backend: State<'_, Backend>,
-) -> Result<(), CommandError> {
+) -> Result<AppPreferences, CommandError> {
   let backend = backend.inner().clone();
   run_blocking(move || {
-    app_preferences::set(&backend.db, &AppPreferences { close_to_tray })
+    let stored = app_preferences::set(&backend.db, &AppPreferences { close_to_tray, mobile_devices })
       .map_err(CommandError::from)?;
     // Updated only after the write lands, so the window never behaves differently from what a
     // restart would load.
-    app.state::<CloseToTray>().set(close_to_tray);
-    Ok(())
+    app.state::<CloseToTray>().set(stored.close_to_tray);
+    Ok(stored)
   })
   .await
 }
@@ -689,6 +692,85 @@ pub async fn delete_provider(provider_id: String, backend: State<'_, Backend>) -
   let backend = backend.inner().clone();
   run_blocking(move || {
   clear_provider_credential(&backend.db, &backend.secure_storage, &provider_id)
+  })
+  .await
+}
+
+/// Servers the user can turn back on, with whether each is on right now.
+#[tauri::command]
+pub async fn list_saved_locations(
+  backend: State<'_, Backend>,
+) -> Result<Vec<SavedLocationView>, CommandError> {
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+    backend
+      .orchestrator
+      .list_saved_locations(&backend.provider, &backend.db)
+      .map_err(CommandError::from)
+  })
+  .await
+}
+
+/// Provisions a saved location again. Blocks until the server is ready, like any create; the UI
+/// follows progress by polling `node_id`.
+#[tauri::command]
+pub async fn turn_on_saved_location(
+  saved_location_id: String,
+  node_id: String,
+  backend: State<'_, Backend>,
+) -> Result<String, CommandError> {
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+    let result = backend
+      .orchestrator
+      .turn_on_saved_location(
+        &backend.provider,
+        &backend.bootstrap,
+        &backend.db,
+        &backend.secure_storage,
+        &saved_location_id,
+        &node_id,
+      )
+      .map_err(CommandError::from)?;
+    Ok(result.node_id)
+  })
+  .await
+}
+
+/// Deletes a saved location's server to stop billing. The location stays.
+#[tauri::command]
+pub async fn turn_off_saved_location(
+  saved_location_id: String,
+  backend: State<'_, Backend>,
+) -> Result<(), CommandError> {
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+    backend
+      .orchestrator
+      .turn_off_saved_location(
+        &backend.provider,
+        &backend.wireguard,
+        &backend.db,
+        &backend.secure_storage,
+        &saved_location_id,
+      )
+      .map_err(CommandError::from)
+  })
+  .await
+}
+
+/// Removes a saved location. Refused while it is on.
+#[tauri::command]
+pub async fn forget_saved_location(
+  saved_location_id: String,
+  backend: State<'_, Backend>,
+) -> Result<(), CommandError> {
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+    backend
+      .orchestrator
+      .forget_saved_location(&backend.db, &saved_location_id)
+      .map_err(CommandError::from)
   })
   .await
 }

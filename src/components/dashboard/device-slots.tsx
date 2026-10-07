@@ -154,7 +154,7 @@ export function DeviceSlots({
   );
 }
 
-function DeviceQrModal({
+export function DeviceQrModal({
   nodeId,
   peer,
   busyAction,
@@ -192,8 +192,6 @@ function DeviceQrModal({
     };
   }, [nodeId, peer.id, onLoadDeviceConfig]);
 
-  const qrPath = payload ? buildQrPath(payload.qr_modules, payload.qr_size) : "";
-
   return (
     <Modal onClose={onClose} labelledBy="device-qr-title">
       <>
@@ -212,18 +210,12 @@ function DeviceQrModal({
             <div className="flex h-[260px] w-[260px] items-center justify-center rounded-[16px] border border-dashed border-[color:var(--outline-variant)] text-sm text-[var(--on-surface-variant)]">
               Building code
             </div>
-          ) : qrPath ? (
-            // White quiet zone regardless of theme: scanners expect dark-on-light with a margin,
-            // and a code drawn straight onto the dark surface reads poorly or not at all.
-            <svg
-              viewBox={`-2 -2 ${payload!.qr_size + 4} ${payload!.qr_size + 4}`}
-              role="img"
-              aria-label={`WireGuard configuration for ${peer.label}`}
-              className="h-[260px] w-[260px] rounded-[16px] bg-white p-2"
-              shapeRendering="crispEdges"
-            >
-              <path d={qrPath} fill="#000000" />
-            </svg>
+          ) : payload && buildQrPath(payload.qr_modules, payload.qr_size) !== "" ? (
+            <QrCode
+              payload={payload}
+              label={`WireGuard configuration for ${peer.label}`}
+              className="h-[260px] w-[260px]"
+            />
           ) : (
             <div className="flex h-[260px] w-[260px] items-center justify-center rounded-[16px] border border-dashed border-[color:rgba(255,107,107,0.4)] px-4 text-center text-sm text-[var(--danger)]">
               The code could not be built. Copy or save the configuration instead.
@@ -260,5 +252,37 @@ function DeviceQrModal({
         </div>
       </>
     </Modal>
+  );
+}
+
+/**
+ * A device config drawn as a QR code. The one renderer, shared by the enlarged dialog and the
+ * dashboard's device tiles.
+ */
+export function QrCode({
+  payload,
+  label,
+  className,
+}: {
+  payload: PeerConfigPayload;
+  /** Accessible name for the image. */
+  label: string;
+  /** Sizing classes. */
+  className: string;
+}) {
+  const path = buildQrPath(payload.qr_modules, payload.qr_size);
+
+  return (
+    // White quiet zone regardless of theme: scanners expect dark-on-light with a margin, and a code
+    // drawn straight onto the dark surface reads poorly or not at all.
+    <svg
+      viewBox={`-2 -2 ${payload.qr_size + 4} ${payload.qr_size + 4}`}
+      role="img"
+      aria-label={label}
+      className={`${className} rounded-[16px] bg-white p-2`}
+      shapeRendering="crispEdges"
+    >
+      <path d={path} fill="#000000" />
+    </svg>
   );
 }

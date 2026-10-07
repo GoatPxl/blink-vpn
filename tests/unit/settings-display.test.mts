@@ -9,6 +9,9 @@ import {
   describeKeyState,
   validateDnsServer,
   validateKeepalive,
+  validateMobileDevices,
+  MAX_DEVICE_NAME_CHARS,
+  MAX_MOBILE_DEVICES,
 } from "../../src/lib/settings-display.ts";
 import type { ProviderRecord, VpnNodeRecord } from "../../src/lib/tauri.ts";
 
@@ -217,5 +220,36 @@ describe("describeKeepalive", () => {
 
   it("names the interval", () => {
     assert.match(describeKeepalive(25), /every 25s/);
+  });
+});
+
+describe("validateMobileDevices", () => {
+  it("accepts an empty list and a list of distinct names", () => {
+    assert.deepEqual(validateMobileDevices([]), { valid: true });
+    assert.deepEqual(validateMobileDevices(["Pixel 9", "  iPad "]), { valid: true });
+  });
+
+  it("refuses more devices than a server has spare slots", () => {
+    const names = Array.from({ length: MAX_MOBILE_DEVICES + 1 }, (_, index) => `Phone ${index}`);
+    const result = validateMobileDevices(names);
+    assert.equal(result.valid, false);
+    assert.match(!result.valid ? result.message : "", /room for 4 devices/);
+  });
+
+  it("refuses a blank name", () => {
+    const result = validateMobileDevices(["Pixel 9", "   "]);
+    assert.equal(result.valid, false);
+    assert.match(!result.valid ? result.message : "", /Give every device a name/);
+  });
+
+  it("refuses a name over the limit, counting characters rather than bytes", () => {
+    assert.deepEqual(validateMobileDevices(["é".repeat(MAX_DEVICE_NAME_CHARS)]), { valid: true });
+    assert.equal(validateMobileDevices(["n".repeat(MAX_DEVICE_NAME_CHARS + 1)]).valid, false);
+  });
+
+  it("refuses the same name twice, ignoring case and surrounding spaces", () => {
+    const result = validateMobileDevices(["Pixel 9", " pixel 9"]);
+    assert.equal(result.valid, false);
+    assert.match(!result.valid ? result.message : "", /in the list twice/);
   });
 });

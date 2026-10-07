@@ -4,6 +4,7 @@ import { DashboardEmptyState } from "@/components/dashboard-empty-state";
 import { AppIcon, Button, ConnectionTimer, PageChrome, formatHandshakeAge, type AppView, type HealthPanelData, type RecoveryState, type DashboardBusyAction, type TunnelRecord, type VpnNodeRecord } from "./shared";
 import { describeEgress, describeIpv6, handshakeFreshness, type EgressTone } from "@/lib/connection-display";
 import type { ConnectAttempt } from "./dashboard-provider";
+import type { ReactNode } from "react";
 
 /** Maps an egress verdict onto the theme's colour tokens. */
 const EGRESS_TONE_VAR: Record<EgressTone, string> = {
@@ -114,6 +115,8 @@ export function DashboardOverview({
   onDisconnectTunnel,
   onRefresh,
   onRefreshHealth,
+  devices,
+  emptyState,
 }: {
   activeView: AppView;
   noServerConfigured: boolean;
@@ -130,9 +133,13 @@ export function DashboardOverview({
   onDisconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onRefresh: () => Promise<void>;
   onRefreshHealth: () => Promise<void>;
+  /** The mobile devices card, rendered beneath the overview. */
+  devices?: ReactNode;
+  /** Replaces the default first-run prompt when no server exists. */
+  emptyState?: ReactNode;
 }) {
   if (noServerConfigured && activeView === "dashboard") {
-    return <DashboardEmptyState />;
+    return emptyState ?? <DashboardEmptyState />;
   }
 
   if (!(noServerConfigured && activeView === "dashboard") && activeView === "dashboard") {
@@ -344,6 +351,7 @@ export function DashboardOverview({
             )}
           </div>
         </div>
+        {devices}
       </PageChrome>
     );
   }

@@ -19,6 +19,9 @@ import {
   countAttachedNodes,
   deriveProviderKeyStatus,
   describeKeepalive,
+  MAX_DEVICE_NAME_CHARS,
+  MAX_MOBILE_DEVICES,
+  validateMobileDevices,
   describeKeyState,
   validateDnsServer,
   validateKeepalive,
@@ -187,6 +190,18 @@ export function SettingsView({
         </Card>
       )}
 
+      {appPreferences ? (
+        <MobileDevicesSettingsCard
+          preferences={appPreferences}
+          onSave={onSaveAppPreferences}
+          busyAction={busyAction}
+        />
+      ) : (
+        <Card title="Mobile devices" description="Loading saved devices…">
+          <div className="h-16" />
+        </Card>
+      )}
+
       <Card title="Window" description="How GoatStare behaves when you close its window.">
         <div className="flex items-start justify-between gap-6">
           <div>
@@ -200,7 +215,11 @@ export function SettingsView({
             label="Close to system tray"
             checked={appPreferences?.close_to_tray ?? true}
             disabled={appPreferences === null || busyAction !== null}
-            onChange={(checked) => void onSaveAppPreferences({ close_to_tray: checked })}
+            onChange={(checked) => {
+              if (appPreferences) {
+                void onSaveAppPreferences({ ...appPreferences, close_to_tray: checked });
+              }
+            }}
           />
         </div>
       </Card>
@@ -411,6 +430,107 @@ function WireGuardSettingsCard({
           disabled={!canSave}
         >
           {busyAction === "save-tunnel-settings" ? "Saving" : "Save changes"}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * The devices every new server should come with.
+ *
+ * Saved names are given to a new server's spare peer slots when it is created, so its QR codes
+ * are on the dashboard the moment it is ready. Slots are fixed at creation (AGENTS.md §12), so a
+ * change here reaches only servers created afterwards.
+ */
+function MobileDevicesSettingsCard({
+  preferences,
+  onSave,
+  busyAction,
+}: {
+  preferences: AppPreferences;
+  onSave: (preferences: AppPreferences) => Promise<boolean>;
+  busyAction: DashboardBusyAction;
+}) {
+  // Initialised once from the loaded preferences, like the WireGuard card, so a refresh cannot
+  // overwrite a list the user is editing.
+  const [names, setNames] = useState<string[]>(preferences.mobile_devices);
+  const [dirty, setDirty] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const validation = validateMobileDevices(names);
+  const canSave = validation.valid && dirty && busyAction === null;
+
+  function update(next: string[]) {
+    setNames(next);
+    setDirty(true);
+    setSaved(false);
+  }
+
+  return (
+    <Card
+      title="Mobile devices"
+      description="New servers come with these devices already set up, with QR codes ready on the dashboard. Servers you already have keep their current devices."
+    >
+      {names.length === 0 ? (
+        <p className="text-sm text-[var(--on-surface-variant)]">
+          No devices saved. Add the phones and tablets you use with the WireGuard app.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {names.map((name, index) => (
+            <li key={index} className="flex items-center gap-2">
+              <input
+                value={name}
+                maxLength={MAX_DEVICE_NAME_CHARS}
+                placeholder="Pixel 9"
+                aria-label={`Device ${index + 1} name`}
+                onChange={(event) => update(names.map((current, at) => (at === index ? event.target.value : current)))}
+                className="w-full max-w-sm rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2 text-sm text-[var(--on-surface)] outline-none"
+              />
+              <Button
+                tone="secondary"
+                className="px-3 py-2 text-xs"
+                onClick={() => update(names.filter((_, at) => at !== index))}
+              >
+                Remove
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {!validation.valid ? (
+        <p className="mt-2 text-xs text-[#ff9b9b]">{validation.message}</p>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+        {saved ? (
+          <span className="mr-auto text-xs text-[var(--on-surface-variant)]">
+            Saved. Your next server will include these devices.
+          </span>
+        ) : null}
+        <Button
+          tone="secondary"
+          disabled={names.length >= MAX_MOBILE_DEVICES}
+          onClick={() => update([...names, ""])}
+        >
+          Add device
+        </Button>
+        <Button
+          disabled={!canSave}
+          onClick={() => {
+            void (async () => {
+              const stored = await onSave({ ...preferences, mobile_devices: names.map((name) => name.trim()) });
+              if (stored) {
+                setNames((current) => current.map((name) => name.trim()));
+                setDirty(false);
+                setSaved(true);
+              }
+            })();
+          }}
+        >
+          {busyAction === "save-app-preferences" ? "Saving" : "Save devices"}
         </Button>
       </div>
     </Card>

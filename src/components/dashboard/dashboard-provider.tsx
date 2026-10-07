@@ -8,6 +8,13 @@ import {
   deleteProvider as deleteProviderCommand,
   createVpnNode,
   destroyVpnNode,
+  forgetSavedLocation,
+  listProviderPricing,
+  listSavedLocations,
+  turnOffSavedLocation,
+  turnOnSavedLocation,
+  type ProviderPlanPricing,
+  type SavedLocationRecord,
   disconnectTunnel as disconnectTunnelCommand,
   forceDisconnectNodeService as forceDisconnectNodeServiceCommand,
   exportDiagnosticsBundle,
@@ -59,6 +66,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { describeTurnOn } from "@/lib/saved-location-display";
 import {
   categorizeError,
   DEFAULT_PROVIDER_ID,
@@ -154,6 +162,13 @@ type DashboardContextValue = {
   toasts: Toast[];
   recovery: RecoveryState | null;
   nodes: VpnNodeRecord[];
+  /** Servers the user can turn back on, with whether each is on now. */
+  savedLocations: SavedLocationRecord[];
+  /** Quotes today's price, asks, then provisions the location. */
+  turnOnLocation: (location: SavedLocationRecord) => Promise<void>;
+  /** Deletes the location's server to stop billing; the location stays. */
+  turnOffLocation: (location: SavedLocationRecord) => Promise<void>;
+  forgetLocation: (location: SavedLocationRecord) => Promise<void>;
   providers: ProviderRecord[];
   tunnels: TunnelRecord[];
   /** Baked device slots for the selected node. Empty for a node provisioned before them. */
@@ -254,6 +269,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [nodes, setNodes] = useState<VpnNodeRecord[]>([]);
+  const [savedLocations, setSavedLocations] = useState<SavedLocationRecord[]>([]);
   const [providers, setProviders] = useState<ProviderRecord[]>([]);
   const [tunnels, setTunnels] = useState<TunnelRecord[]>([]);
   const [nodePeers, setNodePeers] = useState<NodePeerRecord[]>([]);
@@ -521,8 +537,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const saveAppPreferences = useCallback(async (preferences: AppPreferences) => {
     setBusyAction("save-app-preferences");
     try {
-      await setAppPreferencesCommand(preferences);
-      setAppPreferencesState(preferences);
+      setAppPreferencesState(await setAppPreferencesCommand(preferences));
       return true;
     } catch (error) {
       handleError(error);
@@ -572,6 +587,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         loadedTunnelSettings,
         loadedAppPreferences,
         loadedLocations,
+        loadedSavedLocations,
       ] = await Promise.all([
         listVpnNodes(),
         getDiagnosticsBundle(),
@@ -580,9 +596,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         getTunnelSettings(),
         getAppPreferences(),
         listAppLocations(),
+        listSavedLocations(),
       ]);
 
       setNodes(loadedNodes);
+      setSavedLocations(loadedSavedLocations);
       setDiagnostics(loadedDiagnostics);
       setProviders(loadedProviders);
       setCurrentNodeIdState(loadedCurrentNodeId);
@@ -1237,7 +1255,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     // is the question a user needs answered before deleting a server they pay for.
     const where = node.region_geo?.city ?? node.region;
     const confirmed = window.confirm(
-      `Destroy ${node.name} in ${where}?\n\nThis deletes the server at your provider and stops its billing. It cannot be undone.`,
+      `Turn off ${node.name} in ${where}?\n\nThis deletes the server at your provider and stops its billing. The location stays saved, so you can turn it back on later.`,
     );
     if (!confirmed) {
       return;
@@ -1254,7 +1272,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     try {
       await destroyVpnNode(node.id);
       setRecovery(null);
-      pushToast("warning", "Node destroyed", `${node.name} has been removed.`);
+      pushToast("success", "Server turned off", `${node.name} was deleted at the provider and is no longer billing.`);
       await loadDashboard();
     } catch (error) {
       handleError(error);
@@ -1264,6 +1282,103 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, loadDashboard, providerNameFor, pushToast]);
 
+
+  const turnOnLocation = useCallback(async (location: SavedLocationRecord) => {
+    // Billing starts the moment the server exists, so the quote is today's price. A catalog that
+    // cannot be read falls back to the last price seen, said as such; a plan the provider no longer
+    // offers is refused here rather than failing at the provider.
+    let livePlan: ProviderPlanPricing | null | undefined;
+    try {
+      const pricing = await listProviderPricing(location.provider_id, location.region);
+      livePlan = pricing.plans.find((plan) => plan.plan_key === location.plan_key) ?? null;
+    } catch {
+      livePlan = undefined;
+    }
+
+    const question = describeTurnOn(location, livePlan);
+    if (question === null) {
+      pushToast(
+        "warning",
+        "Plan no longer offered",
+        `${location.provider_name ?? "The provider"} no longer offers this plan in ${location.name}. Create a new server there instead, then forget this one.`,
+      );
+      return;
+    }
+    if (!window.confirm(question)) {
+      return;
+    }
+
+    const nodeId = `node-${crypto.randomUUID().slice(0, 8)}`;
+    setBusyAction("create-node");
+    setOperationAttempt({
+      kind: "provision",
+      nodeId,
+      nodeName: location.name,
+      providerName: location.provider_name ?? providerNameFor(location.provider_id),
+      startedAt: Date.now(),
+      status: null,
+      bootstrappingSince: null,
+    });
+    try {
+      await turnOnSavedLocation(location.id, nodeId);
+      setRecovery(null);
+      pushToast("success", "Server on", `${location.name} is ready to connect.`);
+      await loadDashboard(nodeId);
+    } catch (error) {
+      handleError(error);
+      // A failed create leaves its node in error; the list shows that rather than "starting".
+      await loadDashboard();
+    } finally {
+      setOperationAttempt(null);
+      setBusyAction(null);
+    }
+  }, [handleError, loadDashboard, providerNameFor, pushToast]);
+
+  const turnOffLocation = useCallback(async (location: SavedLocationRecord) => {
+    if (!location.node_id) return;
+
+    const confirmed = window.confirm(
+      `Turn off ${location.name}?\n\nThis deletes the server at your provider and stops its billing. The location stays saved, so you can turn it back on later.`,
+    );
+    if (!confirmed) return;
+
+    setBusyAction("destroy-node");
+    setOperationAttempt({
+      kind: "destroy",
+      nodeId: location.node_id,
+      nodeName: location.name,
+      providerName: location.provider_name ?? providerNameFor(location.provider_id),
+      startedAt: Date.now(),
+    });
+    try {
+      await turnOffSavedLocation(location.id);
+      setRecovery(null);
+      pushToast("success", "Server turned off", `${location.name} was deleted at the provider and is no longer billing.`);
+      await loadDashboard();
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setOperationAttempt(null);
+      setBusyAction(null);
+    }
+  }, [handleError, loadDashboard, providerNameFor, pushToast]);
+
+  const forgetLocation = useCallback(async (location: SavedLocationRecord) => {
+    const confirmed = window.confirm(
+      `Forget ${location.name}?\n\nIt is removed from your saved locations. Nothing at the provider changes.`,
+    );
+    if (!confirmed) return;
+
+    setBusyAction("forget-location");
+    try {
+      await forgetSavedLocation(location.id);
+      setSavedLocations((current) => current.filter((candidate) => candidate.id !== location.id));
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [handleError]);
 
   /**
    * Force cleanup for a node named by id.
@@ -1647,6 +1762,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     toasts,
     recovery,
     nodes,
+    savedLocations,
+    turnOnLocation,
+    turnOffLocation,
+    forgetLocation,
     providers,
     tunnels,
     nodePeers,

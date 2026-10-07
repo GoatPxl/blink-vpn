@@ -517,19 +517,26 @@ export async function setTunnelSettings(settings: TunnelSettings): Promise<void>
   });
 }
 
-/** Desktop-shell preferences. Unset values default in the backend. */
+/** App-wide preferences that are not tunnel parameters. Unset values default in the backend. */
 export interface AppPreferences {
   /** Closing the window hides it to the system tray instead of exiting. Defaults to true. */
   close_to_tray: boolean;
+  /**
+   * Device names given to a new server's spare peer slots, in order, so their QR codes are ready
+   * when the server is. At most four (see `settings-display.ts`). Existing servers are unaffected.
+   */
+  mobile_devices: string[];
 }
 
 export async function getAppPreferences(): Promise<AppPreferences> {
   return invokeCommand<AppPreferences>("get_app_preferences");
 }
 
-export async function setAppPreferences(preferences: AppPreferences): Promise<void> {
-  return invokeCommand<void>("set_app_preferences", {
+/** Resolves with the preferences as stored, device names trimmed. */
+export async function setAppPreferences(preferences: AppPreferences): Promise<AppPreferences> {
+  return invokeCommand<AppPreferences>("set_app_preferences", {
     closeToTray: preferences.close_to_tray,
+    mobileDevices: preferences.mobile_devices,
   });
 }
 
@@ -636,6 +643,57 @@ export async function exportPeerConfig(params: {
   });
 }
 
+/**
+ * A server the user can turn off to stop billing and turn back on: provider, region, plan and the
+ * last price seen. Saved automatically whenever a server reaches ready.
+ */
+export interface SavedLocationRecord {
+  id: string;
+  provider_id: string;
+  /** Display name of the provider; null if its row is gone. */
+  provider_name: string | null;
+  name: string;
+  region: string;
+  plan_key: string;
+  /** Geography for `region`; absent when the adapter cannot place it. */
+  region_geo?: ProviderRegion;
+  /** Prices from the last time it was on. Live prices may have moved since. */
+  price_monthly_usd: number | null;
+  price_hourly_usd: number | null;
+  price_source_timestamp: string | null;
+  /** The running server for this location, or null while it is off. */
+  node_id: string | null;
+  /** That server's status, or null while off. */
+  node_status: NodeLifecycleStatus | null;
+  last_turned_on_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listSavedLocations(): Promise<SavedLocationRecord[]> {
+  return invokeCommand<SavedLocationRecord[]>("list_saved_locations");
+}
+
+/** Provisions the location again under `nodeId`. Resolves with the node id once it is ready. */
+export async function turnOnSavedLocation(savedLocationId: string, nodeId: string): Promise<string> {
+  return invokeCommand<string>("turn_on_saved_location", { savedLocationId, nodeId });
+}
+
+/** Deletes the location's server to stop billing. Rejects if the provider refuses the delete. */
+export async function turnOffSavedLocation(savedLocationId: string): Promise<void> {
+  await invokeCommand<void>("turn_off_saved_location", { savedLocationId });
+}
+
+/** Removes a saved location. Rejected with `invalid-state` while it is on. */
+export async function forgetSavedLocation(savedLocationId: string): Promise<void> {
+  await invokeCommand<void>("forget_saved_location", { savedLocationId });
+}
+
+/**
+ * Deletes the server at its provider, then everything local about it. If the provider refuses the
+ * delete, rejects with `provider` and removes nothing, so a server that is still billing stays
+ * listed.
+ */
 export async function destroyVpnNode(nodeId: string): Promise<void> {
   await invokeCommand<void>("destroy_vpn_node", { nodeId });
 }

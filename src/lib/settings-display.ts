@@ -179,3 +179,38 @@ export function describeKeepalive(seconds: number): string {
   }
   return `Sends a packet every ${seconds}s to keep the tunnel reachable through NAT.`;
 }
+
+/** A server has five peer slots and slot 0 is this PC. Mirrors `MAX_MOBILE_DEVICES` in Rust. */
+export const MAX_MOBILE_DEVICES = 4;
+
+/** Mirrors `MAX_PEER_LABEL_CHARS` in Rust. */
+export const MAX_DEVICE_NAME_CHARS = 40;
+
+/**
+ * Validates the saved device list before it is sent, with the same rules the backend applies:
+ * it fits in the spare slots, every name is non-blank and short enough, and no two names match
+ * ignoring case — identical names could not be told apart on the dashboard.
+ */
+export function validateMobileDevices(names: readonly string[]): SettingsValidation {
+  if (names.length > MAX_MOBILE_DEVICES) {
+    return { valid: false, message: `A server has room for ${MAX_MOBILE_DEVICES} devices besides this PC.` };
+  }
+
+  const seen = new Set<string>();
+  for (const raw of names) {
+    const name = raw.trim();
+    if (name === "") {
+      return { valid: false, message: "Give every device a name, or remove the empty row." };
+    }
+    if ([...name].length > MAX_DEVICE_NAME_CHARS) {
+      return { valid: false, message: `A device name can be at most ${MAX_DEVICE_NAME_CHARS} characters.` };
+    }
+    const key = name.toLowerCase();
+    if (seen.has(key)) {
+      return { valid: false, message: `"${name}" is in the list twice. Give each device its own name.` };
+    }
+    seen.add(key);
+  }
+
+  return { valid: true };
+}

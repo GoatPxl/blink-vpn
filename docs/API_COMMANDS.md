@@ -28,7 +28,8 @@ Provider adapters currently included:
 | `edit` | Update mutable node metadata/settings | Implemented through provider/state flows and ready for expansion |
 | `suspend` | Pause provider or node operations | `suspend_provider` |
 | `resume` | Resume provider or node operations | `resume_provider` |
-| `delete` | Deprovision remote and local state | `destroy_vpn_node`, `force_cleanup_vpn_node` |
+| `delete` | Deprovision remote and local state | `destroy_vpn_node`, `force_cleanup_vpn_node`, `turn_off_saved_location` |
+| `saved locations` | Turn a server off to stop billing and back on with the same provider, region and plan | `list_saved_locations`, `turn_on_saved_location`, `turn_off_saved_location`, `forget_saved_location` |
 | `get_system_info` | Retrieve runtime health and diagnostics | `get_health_panel_data`, `get_tunnel_phase`, diagnostics commands |
 | `list` / `get` | Query local metadata | `list_providers`, `list_vpn_nodes`, `list_tunnels_for_node` |
 
@@ -54,15 +55,19 @@ Provider adapters currently included:
 | `suspend_provider` | `provider_id` | `void` | Suspends provider operations |
 | `resume_provider` | `provider_id` | `void` | Resumes provider operations |
 | `delete_provider` | `provider_id` | `void` | Deletes provider when dependencies are clear |
-| `destroy_vpn_node` | `node_id` | `void` | Standard destroy path |
+| `destroy_vpn_node` | `node_id` | `void` | Standard destroy path ("Turn off" in the UI). Deletes at the provider **first**; if the provider refuses, fails with `provider` and removes nothing, so a server that is still billing stays listed. The node's saved location is kept, turned off |
+| `list_saved_locations` | none | `SavedLocationView[]` | Saved locations, most recently used first, each with `provider_name`, `region_geo` and the linked server's `node_status` (`null` while off) |
+| `turn_on_saved_location` | `saved_location_id`, `node_id` | `string` | Provisions the location again under `node_id` — an ordinary create, so fresh keys and a new IP. Blocks until ready. `invalid-state` if it is already on |
+| `turn_off_saved_location` | `saved_location_id` | `void` | Destroys the location's server, with `destroy_vpn_node`'s failure semantics. A location that is already off is left alone |
+| `forget_saved_location` | `saved_location_id` | `void` | Removes the location. `invalid-state` while it is on |
 | `force_cleanup_vpn_node` | `node_id` | `ForceCleanupResult` | Recovery cleanup path — see the note below on reading its result |
 | `list_vpn_nodes` | none | `VpnNodeRecord[]` | Local node records, enriched with live `provider_status` and adapter-supplied `region_geo` |
 | `get_current_node_id` | none | `string \| null` | The default node; `null` when several exist and none was chosen |
 | `set_current_node_id` | `node_id` (nullable) | `void` | Sets or clears the default node; rejects an unknown id |
 | `get_tunnel_settings` | none | `TunnelSettings` | DNS server and keepalive used when a tunnel next starts |
 | `set_tunnel_settings` | `dns_server` (nullable), `keepalive_seconds` | `void` | Validates before storing; a non-IP DNS value is rejected with `invalid-input` |
-| `get_app_preferences` | none | `AppPreferences` | Desktop-shell preferences: `close_to_tray` (default `true`) |
-| `set_app_preferences` | `close_to_tray` | `void` | Stores the preference and applies it to the running window immediately |
+| `get_app_preferences` | none | `AppPreferences` | `close_to_tray` (default `true`) and `mobile_devices` (default empty) |
+| `set_app_preferences` | `close_to_tray`, `mobile_devices` | `AppPreferences` | Validates and stores both, returning them as stored (names trimmed). `close_to_tray` applies to the running window immediately; `mobile_devices` applies to servers created afterwards. An unusable device list is rejected with `invalid-input` |
 | `list_providers` | none | `ProviderRecord[]` | Local provider records, including `last_validation_status` / `last_validated_at` from the last key check |
 | `list_tunnels_for_node` | `node_id` | `TunnelRecord[]` | Local tunnels for node |
 | `get_tunnel_phase` | `node_id`, `tunnel_id` | `TunnelPhaseSnapshot` | How far along a connect is. Cheap enough to poll at 1 Hz — see below |

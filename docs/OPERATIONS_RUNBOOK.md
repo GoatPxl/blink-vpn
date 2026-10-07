@@ -25,11 +25,18 @@
 3. Connect tunnel.
 4. Confirm health panel reports `connected`.
 
-### Disconnect and Destroy
+### Turn off and turn on
 
-1. Disconnect tunnel.
-2. Destroy node when no longer needed.
-3. Confirm local tunnel rows and provider resources are cleaned up.
+1. Disconnect the tunnel.
+2. Turn the server off (Nodes → Saved locations, or Turn off in the server's details). This deletes it
+   at the provider and stops billing; the location stays saved.
+3. To use it again, choose Turn on. The current price is shown before anything is created. It
+   provisions a new server with new keys and a new IP, so phones must scan their new codes.
+4. Forget removes a location that is off. It never touches the provider.
+
+If turning off fails with "could not be deleted at the provider", nothing was removed locally and the
+server is still billing. Retry; if it keeps failing, delete it in the provider's console and then use
+Force cleanup on the node.
 
 ### Closing and quitting
 

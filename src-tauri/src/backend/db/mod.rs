@@ -45,6 +45,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
   (22, include_str!("../../../migrations/0022_seed_linode_provider.sql")),
   (23, include_str!("../../../migrations/0023_seed_gce_provider.sql")),
   (24, include_str!("../../../migrations/0024_seed_openstack_provider.sql")),
+  (25, include_str!("../../../migrations/0025_saved_locations.sql")),
 ];
 
 
@@ -273,6 +274,41 @@ pub struct VpnNodeRecord {
   /// `None` means the provider needs no MTU line. Not serialized: the UI never renders configs.
   #[serde(skip_serializing)]
   pub client_mtu: Option<u16>,
+}
+
+/// A server the user can turn off and back on: everything needed to recreate it.
+///
+/// `node_id` is the running server for this location, or `None` while it is off. It is a link, not
+/// an owner — destroying the node clears it and leaves the location in place.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SavedLocationRecord {
+  pub id: String,
+  pub provider_id: String,
+  pub name: String,
+  pub region: String,
+  pub plan_key: String,
+  pub price_monthly_usd: Option<f64>,
+  pub price_hourly_usd: Option<f64>,
+  pub price_source_timestamp: Option<String>,
+  pub node_id: Option<String>,
+  pub last_turned_on_at: Option<String>,
+  pub created_at: String,
+  pub updated_at: String,
+}
+
+/// The fields a create writes into a saved location.
+#[derive(Debug, Clone, Copy)]
+pub struct SavedLocationUpsert<'a> {
+  /// Used only when no location of this shape exists yet.
+  pub new_id: &'a str,
+  pub provider_id: &'a str,
+  pub name: &'a str,
+  pub region: &'a str,
+  pub plan_key: &'a str,
+  pub price_monthly_usd: Option<f64>,
+  pub price_hourly_usd: Option<f64>,
+  pub price_source_timestamp: Option<&'a str>,
+  pub node_id: &'a str,
 }
 
 /// A peer slot about to be written. Borrowed rather than owned: every field already exists in the
@@ -1070,6 +1106,24 @@ impl Database {
 
   pub fn delete_vpn_node(&self, id: &str) -> Result<(), DbError> {
     let connection = self.open_connection()?;
+
+    // The node's saved location outlives it, turned off rather than removed. Done here rather than
+    // by a foreign key because this database does not enable them, and done first so that a
+    // failed delete leaves a location that reads as off — never one pointing at a missing node
+    // that reads as on.
+    connection
+      .execute(
+        "UPDATE saved_locations
+         SET node_id = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE node_id = ?1",
+        params![id],
+      )
+      .map_err(|source| DbError::Query {
+        action: "unlink_saved_location",
+        detail: "Failed detaching the node from its saved location.".to_string(),
+        source,
+      })?;
+
     let changed = connection
       .execute("DELETE FROM vpn_nodes WHERE id = ?1", params![id])
       .map_err(|source| DbError::Query {
@@ -1085,6 +1139,116 @@ impl Database {
         id: id.to_string(),
         detail: "Delete skipped because no row matched the id."
           .to_string(),
+      });
+    }
+
+    Ok(())
+  }
+
+  /// Records a location for a server that just reached ready, or refreshes the existing one of the
+  /// same shape (provider, region, plan) with its latest name, price and running node.
+  pub fn upsert_saved_location(&self, location: &SavedLocationUpsert<'_>) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    connection
+      .execute(
+        "INSERT INTO saved_locations (
+           id, provider_id, name, region, plan_key,
+           price_monthly_usd, price_hourly_usd, price_source_timestamp, node_id, last_turned_on_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(provider_id, region, plan_key) DO UPDATE SET
+           name = excluded.name,
+           price_monthly_usd = excluded.price_monthly_usd,
+           price_hourly_usd = excluded.price_hourly_usd,
+           price_source_timestamp = excluded.price_source_timestamp,
+           node_id = excluded.node_id,
+           last_turned_on_at = excluded.last_turned_on_at,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        params![
+          location.new_id,
+          location.provider_id,
+          location.name,
+          location.region,
+          location.plan_key,
+          location.price_monthly_usd,
+          location.price_hourly_usd,
+          location.price_source_timestamp,
+          location.node_id,
+        ],
+      )
+      .map_err(|source| DbError::Query {
+        action: "upsert_saved_location",
+        detail: "Failed saving the server's location.".to_string(),
+        source,
+      })?;
+
+    Ok(())
+  }
+
+  /// Every saved location, most recently used first.
+  pub fn list_saved_locations(&self) -> Result<Vec<SavedLocationRecord>, DbError> {
+    let connection = self.open_connection()?;
+    let mut statement = connection
+      .prepare(&format!(
+        "SELECT {SAVED_LOCATION_COLUMNS} FROM saved_locations
+         ORDER BY COALESCE(last_turned_on_at, created_at) DESC, id ASC"
+      ))
+      .map_err(|source| DbError::Query {
+        action: "list_saved_locations_prepare",
+        detail: "Failed preparing saved locations query.".to_string(),
+        source,
+      })?;
+
+    let rows = statement
+      .query_map([], map_saved_location_row)
+      .map_err(|source| DbError::Query {
+        action: "list_saved_locations_query",
+        detail: "Failed running saved locations query.".to_string(),
+        source,
+      })?;
+
+    let mut output = Vec::new();
+    for row in rows {
+      output.push(row.map_err(|source| DbError::Query {
+        action: "list_saved_locations_collect",
+        detail: "Failed decoding saved location rows.".to_string(),
+        source,
+      })?);
+    }
+    Ok(output)
+  }
+
+  pub fn get_saved_location(&self, id: &str) -> Result<Option<SavedLocationRecord>, DbError> {
+    let connection = self.open_connection()?;
+    connection
+      .query_row(
+        &format!("SELECT {SAVED_LOCATION_COLUMNS} FROM saved_locations WHERE id = ?1"),
+        params![id],
+        map_saved_location_row,
+      )
+      .optional()
+      .map_err(|source| DbError::Query {
+        action: "get_saved_location",
+        detail: "Failed reading saved location.".to_string(),
+        source,
+      })
+  }
+
+  pub fn delete_saved_location(&self, id: &str) -> Result<(), DbError> {
+    let connection = self.open_connection()?;
+    let changed = connection
+      .execute("DELETE FROM saved_locations WHERE id = ?1", params![id])
+      .map_err(|source| DbError::Query {
+        action: "delete_saved_location",
+        detail: "Failed removing the saved location.".to_string(),
+        source,
+      })?;
+
+    if changed == 0 {
+      return Err(DbError::NotFound {
+        entity: "saved_location",
+        id: id.to_string(),
+        detail: "Delete skipped because no row matched the id.".to_string(),
       });
     }
 
@@ -1584,6 +1748,26 @@ fn map_provider_row(row: &Row<'_>) -> rusqlite::Result<ProviderRecord> {
   })
 }
 
+const SAVED_LOCATION_COLUMNS: &str = "id, provider_id, name, region, plan_key, price_monthly_usd,
+  price_hourly_usd, price_source_timestamp, node_id, last_turned_on_at, created_at, updated_at";
+
+fn map_saved_location_row(row: &Row<'_>) -> rusqlite::Result<SavedLocationRecord> {
+  Ok(SavedLocationRecord {
+    id: row.get(0)?,
+    provider_id: row.get(1)?,
+    name: row.get(2)?,
+    region: row.get(3)?,
+    plan_key: row.get(4)?,
+    price_monthly_usd: row.get(5)?,
+    price_hourly_usd: row.get(6)?,
+    price_source_timestamp: row.get(7)?,
+    node_id: row.get(8)?,
+    last_turned_on_at: row.get(9)?,
+    created_at: row.get(10)?,
+    updated_at: row.get(11)?,
+  })
+}
+
 fn map_vpn_node_row(row: &Row<'_>) -> rusqlite::Result<VpnNodeRecord> {
   let raw_status: String = row.get(9)?;
   let lifecycle_status = NodeLifecycleStatus::try_from(raw_status.as_str()).map_err(|err| {
@@ -1682,7 +1866,7 @@ fn map_activity_event_row(row: &Row<'_>) -> rusqlite::Result<ActivityEvent> {
 mod tests {
   use super::{
     ActivityEvent, Database, DbError, NewActivityEvent, NodeLifecycleStatus, ProviderStatus,
-    TunnelStatus,
+    SavedLocationUpsert, TunnelStatus,
   };
 
   use std::path::PathBuf;
@@ -1855,6 +2039,87 @@ mod tests {
     let cleared = db.get_provider("provider-v").expect("query").expect("row");
     assert_eq!(cleared.last_validation_status, None);
     assert_eq!(cleared.last_validated_at, None);
+  }
+
+  fn saved(db: &Database, new_id: &str, region: &str, node_id: &str, monthly: f64) {
+    db.upsert_saved_location(&SavedLocationUpsert {
+      new_id,
+      provider_id: "provider-1",
+      name: "Frankfurt",
+      region,
+      plan_key: "s-1vcpu-1gb",
+      price_monthly_usd: Some(monthly),
+      price_hourly_usd: Some(monthly / 730.0),
+      price_source_timestamp: Some("2026-10-06T00:00:00Z"),
+      node_id,
+    })
+    .expect("upsert should succeed");
+  }
+
+  #[test]
+  fn saved_locations_upsert_by_shape_and_survive_their_node() {
+    let db = setup_db("saved_locations");
+    db.create_provider("provider-1", "DigitalOcean", "digitalocean", None).expect("provider");
+    db.create_vpn_node("node-a", "provider-1", "Frankfurt", "fra1").expect("node a");
+    db.create_vpn_node("node-b", "provider-1", "Frankfurt", "fra1").expect("node b");
+
+    saved(&db, "loc-1", "fra1", "node-a", 6.0);
+    // Same provider, region and plan: refreshes the one entry rather than adding a second.
+    saved(&db, "loc-2", "fra1", "node-b", 7.0);
+
+    let locations = db.list_saved_locations().expect("list");
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].id, "loc-1", "the first id is kept");
+    assert_eq!(locations[0].node_id.as_deref(), Some("node-b"));
+    assert_eq!(locations[0].price_monthly_usd, Some(7.0));
+
+    // Destroying the node turns the location off; it does not remove it.
+    db.delete_vpn_node("node-b").expect("delete");
+    let location = db.get_saved_location("loc-1").expect("get").expect("still saved");
+    assert_eq!(location.node_id, None);
+    assert_eq!(location.price_monthly_usd, Some(7.0));
+
+    db.delete_saved_location("loc-1").expect("forget");
+    assert!(db.list_saved_locations().expect("list").is_empty());
+    assert!(matches!(
+      db.delete_saved_location("loc-1"),
+      Err(DbError::NotFound { .. })
+    ));
+  }
+
+  /// Servers that existed before saved locations become saved locations, linked to themselves.
+  #[test]
+  fn migration_0025_saves_existing_servers_as_locations() {
+    let db = setup_db("saved_locations_backfill");
+    db.create_provider("provider-1", "DigitalOcean", "digitalocean", None).expect("provider");
+    db.create_vpn_node("node-old", "provider-1", "Amsterdam", "ams3").expect("node");
+    db.update_vpn_node_pricing_snapshot(
+      "node-old",
+      Some("s-1vcpu-1gb"),
+      Some("s-1vcpu-1gb"),
+      Some(6.0),
+      Some(0.009),
+      Some("2026-10-01T00:00:00Z"),
+    )
+    .expect("pricing");
+    // A row that never got as far as choosing a plan has nothing to bring back.
+    db.create_vpn_node("node-planless", "provider-1", "Paris", "par1").expect("node");
+
+    // Replay 0025 as an upgrade would meet it: the servers exist, the migration has not run.
+    {
+      let connection = db.open_connection().expect("connection");
+      connection
+        .execute_batch("DROP TABLE saved_locations; DELETE FROM schema_migrations WHERE version = 25;")
+        .expect("rewind");
+    }
+    db.run_migrations().expect("0025 should apply over existing servers");
+
+    let locations = db.list_saved_locations().expect("list");
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].node_id.as_deref(), Some("node-old"));
+    assert_eq!(locations[0].region, "ams3");
+    assert_eq!(locations[0].plan_key, "s-1vcpu-1gb");
+    assert_eq!(locations[0].price_monthly_usd, Some(6.0));
   }
 
   #[test]
@@ -2044,6 +2309,14 @@ mod tests {
            -- impossible one.
            CREATE TABLE vpn_nodes (
              id TEXT PRIMARY KEY,
+             provider_id TEXT NOT NULL,
+             name TEXT NOT NULL,
+             region TEXT NOT NULL,
+             plan_key TEXT,
+             price_monthly_usd REAL,
+             price_hourly_usd REAL,
+             price_source_timestamp TEXT,
+             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
              client_private_key_ref TEXT,
              client_public_key TEXT
            );
@@ -2163,6 +2436,14 @@ mod tests {
            -- impossible one.
            CREATE TABLE vpn_nodes (
              id TEXT PRIMARY KEY,
+             provider_id TEXT NOT NULL,
+             name TEXT NOT NULL,
+             region TEXT NOT NULL,
+             plan_key TEXT,
+             price_monthly_usd REAL,
+             price_hourly_usd REAL,
+             price_source_timestamp TEXT,
+             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
              client_private_key_ref TEXT,
              client_public_key TEXT
            );

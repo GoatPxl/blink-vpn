@@ -6,6 +6,16 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// What a teardown does when the provider refuses to delete the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeardownPolicy {
+  /// Destroy: stop and change nothing, so a server that is still billing stays visible.
+  StopIfRemoteDeleteFails,
+  /// Force cleanup: the user's explicit "remove it from this app no matter what". The result
+  /// still reports that the remote delete failed.
+  RemoveLocallyRegardless,
+}
+
 /// The peer slot belonging to this Windows machine. Always index 0 of a node’s baked list.
 const DESKTOP_PEER_SLOT: i64 = 0;
 
@@ -14,7 +24,32 @@ const DESKTOP_PEER_LABEL: &str = "This PC";
 
 /// Upper bound on a device name. Long enough for "Sam’s work phone", short enough that the
 /// device list stays readable.
-const MAX_PEER_LABEL_CHARS: usize = 40;
+pub(crate) const MAX_PEER_LABEL_CHARS: usize = 40;
+
+/// Why a device name was refused.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PeerLabelError {
+  #[error("Give the device a name so it can be told apart from the others.")]
+  Empty,
+  #[error("A device name can be at most {MAX_PEER_LABEL_CHARS} characters.")]
+  TooLong,
+}
+
+/// The one rule for a device name, shared by claiming a slot and by the saved device list that
+/// names slots at create time. Returns the name trimmed.
+pub fn validate_peer_label(label: &str) -> Result<&str, PeerLabelError> {
+  let label = label.trim();
+
+  if label.is_empty() {
+    return Err(PeerLabelError::Empty);
+  }
+
+  if label.chars().count() > MAX_PEER_LABEL_CHARS {
+    return Err(PeerLabelError::TooLong);
+  }
+
+  Ok(label)
+}
 
 /// A peer generated during provisioning, held only until its row is written.
 struct GeneratedPeer {
@@ -43,7 +78,8 @@ use crate::backend::bootstrap::{
 use crate::backend::crypto::keypair::{
   generate_client_keypair, generate_preshared_key, generate_server_keypair, KeygenError,
 };
-use crate::backend::db::Database;
+use crate::backend::app_preferences;
+use crate::backend::db::{Database, SavedLocationRecord, SavedLocationUpsert};
 use crate::backend::db::{
   DbError, NewActivityEvent, NewNodePeer, NodeLifecycleStatus, NodePeerRecord, TunnelRecord,
   TunnelStatus,
@@ -170,6 +206,19 @@ pub struct CreateVpnNodeRequest {
   pub node_name: String,
   pub region: String,
   pub plan_key: String,
+}
+
+/// A saved location as the UI needs it: the stored row plus what it means right now.
+#[derive(Debug, Clone, Serialize)]
+pub struct SavedLocationView {
+  #[serde(flatten)]
+  pub location: SavedLocationRecord,
+  pub provider_name: Option<String>,
+  /// Geography for `region`, from the owning adapter. No network call.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub region_geo: Option<ProviderRegion>,
+  /// The linked server's status, or `None` while the location is off.
+  pub node_status: Option<NodeLifecycleStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -996,8 +1045,165 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     node_id: &str,
   ) -> Result<(), OrchestratorError> {
-    let _ = self.cleanup_vpn_node(providers, wireguard, db, secure_storage, node_id, "destroy");
-    Ok(())
+    // Destroy used to discard this result and report success unconditionally, so a provider that
+    // refused the delete left a server billing behind a "Node destroyed" toast (AGENTS.md §8).
+    self
+      .cleanup_vpn_node(
+        providers,
+        wireguard,
+        db,
+        secure_storage,
+        node_id,
+        "destroy",
+        TeardownPolicy::StopIfRemoteDeleteFails,
+      )
+      .map(|_| ())
+  }
+
+  /// Every saved location, with its live state, most recently used first.
+  pub fn list_saved_locations(
+    &self,
+    providers: &ProviderRegistry,
+    db: &Database,
+  ) -> Result<Vec<SavedLocationView>, OrchestratorError> {
+    let locations = db.list_saved_locations().map_err(|source| OrchestratorError::Database {
+      detail: "Failed listing saved locations.".to_string(),
+      source,
+    })?;
+
+    let mut provider_names: HashMap<String, Option<String>> = HashMap::new();
+    let mut regions: HashMap<(String, String), Option<ProviderRegion>> = HashMap::new();
+    let mut views = Vec::with_capacity(locations.len());
+
+    for location in locations {
+      let provider_name = provider_names
+        .entry(location.provider_id.clone())
+        .or_insert_with(|| {
+          db.get_provider(&location.provider_id).ok().flatten().map(|provider| provider.name)
+        })
+        .clone();
+      let region_geo = regions
+        .entry((location.provider_id.clone(), location.region.clone()))
+        .or_insert_with(|| providers.describe_provider_region(db, &location.provider_id, &location.region))
+        .clone();
+      let node_status = self.linked_node(db, &location)?.map(|node| node.lifecycle_status);
+
+      views.push(SavedLocationView { location, provider_name, region_geo, node_status });
+    }
+
+    Ok(views)
+  }
+
+  /// Brings a saved location back: an ordinary create with the saved provider, region and plan,
+  /// so it gets fresh keys and a fresh server exactly as the first time did (AGENTS.md §2).
+  ///
+  /// `node_id` comes from the caller, as it does for any create, so the UI can follow progress.
+  pub fn turn_on_saved_location(
+    &self,
+    providers: &ProviderRegistry,
+    bootstrap: &Bootstrap,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    location_id: &str,
+    node_id: &str,
+  ) -> Result<CreateVpnNodeResult, OrchestratorError> {
+    let location = self.load_saved_location(db, location_id)?;
+
+    if let Some(node) = self.linked_node(db, &location)? {
+      return Err(OrchestratorError::InvalidState {
+        node_id: node.id,
+        detail: format!("{} is already on.", location.name),
+      });
+    }
+
+    // The create links the new server to this location when it reaches ready, matched on
+    // provider, region and plan — the same key the location is stored under.
+    self.create_vpn_node_to_ready(
+      providers,
+      bootstrap,
+      db,
+      secure_storage,
+      &CreateVpnNodeRequest {
+        node_id: node_id.to_string(),
+        provider_id: location.provider_id,
+        node_name: location.name,
+        region: location.region,
+        plan_key: location.plan_key,
+      },
+    )
+  }
+
+  /// Deletes the location's server to stop billing, keeping the location. A location that is
+  /// already off is left as it is.
+  pub fn turn_off_saved_location(
+    &self,
+    providers: &ProviderRegistry,
+    wireguard: &WireGuardManager,
+    db: &Database,
+    secure_storage: &SecureStorage,
+    location_id: &str,
+  ) -> Result<(), OrchestratorError> {
+    let location = self.load_saved_location(db, location_id)?;
+
+    match self.linked_node(db, &location)? {
+      Some(node) => self.destroy_vpn_node(providers, wireguard, db, secure_storage, &node.id),
+      None => Ok(()),
+    }
+  }
+
+  /// Removes a saved location. Refused while it is on: forgetting a running server would leave it
+  /// billing with one less place in the app that shows it.
+  pub fn forget_saved_location(&self, db: &Database, location_id: &str) -> Result<(), OrchestratorError> {
+    let location = self.load_saved_location(db, location_id)?;
+
+    if let Some(node) = self.linked_node(db, &location)? {
+      return Err(OrchestratorError::InvalidState {
+        node_id: node.id,
+        detail: format!("{} is on. Turn it off before forgetting it.", location.name),
+      });
+    }
+
+    db.delete_saved_location(&location.id).map_err(|source| OrchestratorError::Database {
+      detail: "Failed removing the saved location.".to_string(),
+      source,
+    })
+  }
+
+  fn load_saved_location(
+    &self,
+    db: &Database,
+    location_id: &str,
+  ) -> Result<SavedLocationRecord, OrchestratorError> {
+    db.get_saved_location(location_id)
+      .map_err(|source| OrchestratorError::Database {
+        detail: "Failed reading the saved location.".to_string(),
+        source,
+      })?
+      .ok_or_else(|| OrchestratorError::Database {
+        detail: "That saved location no longer exists. Refresh the list.".to_string(),
+        source: DbError::NotFound {
+          entity: "saved_location",
+          id: location_id.to_string(),
+          detail: "No saved location matched the id.".to_string(),
+        },
+      })
+  }
+
+  /// The running server a location points at. A link to a node that no longer exists reads as
+  /// off: the link is a pointer, and a stale one must not block turning the location back on.
+  fn linked_node(
+    &self,
+    db: &Database,
+    location: &SavedLocationRecord,
+  ) -> Result<Option<crate::backend::db::VpnNodeRecord>, OrchestratorError> {
+    let Some(node_id) = location.node_id.as_deref() else {
+      return Ok(None);
+    };
+
+    db.get_vpn_node(node_id).map_err(|source| OrchestratorError::Database {
+      detail: "Failed reading the saved location's server.".to_string(),
+      source,
+    })
   }
 
   /// Every peer slot on a node, claimed and unclaimed, in slot order.
@@ -1024,19 +1230,8 @@ impl Orchestrator {
     peer_id: &str,
     label: &str,
   ) -> Result<NodePeerRecord, OrchestratorError> {
-    let label = label.trim();
-
-    if label.is_empty() {
-      return Err(OrchestratorError::InvalidInput {
-        detail: "Give the device a name so it can be told apart from the others.".to_string(),
-      });
-    }
-
-    if label.chars().count() > MAX_PEER_LABEL_CHARS {
-      return Err(OrchestratorError::InvalidInput {
-        detail: format!("A device name can be at most {MAX_PEER_LABEL_CHARS} characters."),
-      });
-    }
+    let label = validate_peer_label(label)
+      .map_err(|error| OrchestratorError::InvalidInput { detail: error.to_string() })?;
 
     let peer = self.load_node_peer(db, node_id, peer_id)?;
 
@@ -1174,13 +1369,24 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     node_id: &str,
   ) -> Result<ForceCleanupResult, OrchestratorError> {
-    self.cleanup_vpn_node(providers, wireguard, db, secure_storage, node_id, "cleanup")
+    self.cleanup_vpn_node(
+      providers,
+      wireguard,
+      db,
+      secure_storage,
+      node_id,
+      "cleanup",
+      TeardownPolicy::RemoveLocallyRegardless,
+    )
   }
 
   /// Shared teardown for both Destroy and Force Cleanup.
   ///
-  /// `category` only labels the activity trail — the two entry points do the same work, and the
-  /// user needs to be able to tell which one they asked for when reading the history back.
+  /// `category` labels the activity trail, so the user can tell which one they asked for when
+  /// reading the history back. `policy` is the one real difference between them: what to do when
+  /// the provider refuses the delete. The remote delete runs first so that either answer is still
+  /// available when it fails — nothing local has been touched yet.
+  #[allow(clippy::too_many_arguments)]
   fn cleanup_vpn_node(
     &self,
     providers: &ProviderRegistry,
@@ -1189,6 +1395,7 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     node_id: &str,
     category: &str,
+    policy: TeardownPolicy,
   ) -> Result<ForceCleanupResult, OrchestratorError> {
     let correlation_id = Uuid::new_v4().to_string();
     let activity = ActivityRecorder::new(db, category, Some(&correlation_id)).for_node(node_id);
@@ -1211,6 +1418,35 @@ impl Orchestrator {
     })
     .inspect_err(|error| activity.failure("cleanup.error", error))?;
 
+    let mut remote_node_delete_attempted = false;
+    let mut remote_node_delete_succeeded = false;
+    if let Some(node) = node.as_ref() {
+      if let Some(external_ref) = node.external_ref.as_deref() {
+        // Every stored external_ref is attempted. This used to be guarded by a `u64` parse, so a
+        // node whose provider does not use numeric ids would skip the remote delete *and* report
+        // cleanup as successful — leaving a billable resource behind with nothing on screen to
+        // say so (AGENTS.md §8).
+        remote_node_delete_attempted = true;
+        match providers.delete_provider_node(db, secure_storage, &node.provider_id, external_ref) {
+          Ok(()) => remote_node_delete_succeeded = true,
+          Err(source) if policy == TeardownPolicy::StopIfRemoteDeleteFails => {
+            // Nothing local has been removed, so the server stays listed and the user can retry.
+            // Removing it here would hide a server that is still billing.
+            let error = OrchestratorError::Provider {
+              detail: "The server could not be deleted at the provider, so it is still running \
+                and billing. Nothing was removed from this app; try again, or delete it in the \
+                provider's console."
+                .to_string(),
+              source,
+            };
+            activity.failure("cleanup.error", &error);
+            return Err(error);
+          }
+          Err(_) => {}
+        }
+      }
+    }
+
     for tunnel in &tunnels {
       let _ = wireguard.unregister_tunnel(&tunnel.name);
     }
@@ -1229,21 +1465,6 @@ impl Orchestrator {
       }
     }
     let _ = db.delete_node_peers_for_node(node_id);
-
-    let mut remote_node_delete_attempted = false;
-    let mut remote_node_delete_succeeded = false;
-    if let Some(node) = node.as_ref() {
-      if let Some(external_ref) = node.external_ref.as_deref() {
-        // Every stored external_ref is attempted. This used to be guarded by a `u64` parse, so a
-        // node whose provider does not use numeric ids would skip the remote delete *and* report
-        // cleanup as successful — leaving a billable resource behind with nothing on screen to
-        // say so (AGENTS.md §8).
-        remote_node_delete_attempted = true;
-        remote_node_delete_succeeded = providers
-          .delete_provider_node(db, secure_storage, &node.provider_id, external_ref)
-          .is_ok();
-      }
-    }
 
     let node_record_removed = node
       .as_ref()
@@ -1514,18 +1735,33 @@ impl Orchestrator {
       return Err(error);
     }
 
+    // The user's saved devices take the spare slots in order, claimed in the same insert, so a new
+    // server arrives with their phones ready to scan. Still a purely local claim (AGENTS.md §12).
+    // A preference that cannot be read must not fail a provision: the slots simply stay free.
+    let saved_devices = match app_preferences::get(db) {
+      Ok(preferences) => preferences.mobile_devices,
+      Err(err) => {
+        log::warn!(
+          "event=vpn_node.create.saved_devices_unreadable node_id={} error={}",
+          request.node_id,
+          logging::redact_sensitive_text(&err.to_string())
+        );
+        Vec::new()
+      }
+    };
+
     let peer_rows: Vec<NewNodePeer> = generated
       .iter()
       .enumerate()
       .map(|(slot_index, peer)| NewNodePeer {
         id: &peer.id,
         slot_index: slot_index as i64,
-        // Slot 0 is this machine, claimed on creation. The rest stay free until a device
-        // takes one.
+        // Slot 0 is this machine, claimed on creation. Saved devices take the next slots; the
+        // rest stay free until a device takes one.
         label: if slot_index == DESKTOP_PEER_SLOT as usize {
           Some(DESKTOP_PEER_LABEL)
         } else {
-          None
+          saved_devices.get(slot_index - 1).map(String::as_str)
         },
         client_public_key: &peer.public_key,
         client_private_key_ref: &peer.private_key_ref,
@@ -1740,6 +1976,28 @@ impl Orchestrator {
           detail: "Failed transitioning node to Ready state.".to_string(),
           source,
         })?;
+
+      // Every server that comes up is remembered, so it can be turned off to stop billing and
+      // brought back without choosing provider, region and plan again. A failure here loses only
+      // that convenience, never a working server, so it is logged rather than returned.
+      if let Err(err) = db.upsert_saved_location(&SavedLocationUpsert {
+        new_id: &format!("loc-{}", Uuid::new_v4()),
+        provider_id: &request.provider_id,
+        name: &request.node_name,
+        region: &request.region,
+        plan_key: &selected_pricing.plan_key,
+        price_monthly_usd: selected_pricing.monthly_usd,
+        price_hourly_usd: selected_pricing.hourly_usd,
+        price_source_timestamp: Some(&selected_pricing.source_timestamp),
+        node_id: &request.node_id,
+      }) {
+        log::warn!(
+          "event=vpn_node.create.save_location_failed correlation_id={} node_id={} error={}",
+          correlation_id,
+          request.node_id,
+          logging::redact_sensitive_text(&err.to_string())
+        );
+      }
 
       log::info!(
         "event=vpn_node.create.ready correlation_id={} node_id={} external_ref={} endpoint_ip={}",
@@ -4580,6 +4838,164 @@ mod tests {
     );
   }
 
+  /// Destroy, unlike force cleanup, must not hide a server the provider refused to delete.
+  ///
+  /// It used to discard the cleanup result and return success, removing the local row either way,
+  /// so the server kept billing while the app showed nothing. Now it stops before touching anything
+  /// local and reports the failure, leaving the server listed so the user can retry.
+  #[test]
+  fn destroy_reports_a_refused_delete_and_keeps_the_server_listed() {
+    let db = Database::new(test_db_path("destroy_remote_delete_failed"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    db
+      .create_vpn_node("node-stuck", TEST_PROVIDER_ID, "Node Stuck", "nyc1")
+      .expect("node should insert");
+    db
+      .update_vpn_node_runtime_details("node-stuck", Some("42"), Some("203.0.113.5"), None, Some(51820), None)
+      .expect("runtime details should persist");
+
+    let adapter = Arc::new(MockProviderAdapter::new(false));
+    adapter.state.lock().expect("lock must work").fail_delete = true;
+    let providers = ProviderRegistry::from_adapter(adapter);
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+
+    let error = Orchestrator::new()
+      .destroy_vpn_node(&providers, &wireguard, &db, &secure_storage, "node-stuck")
+      .expect_err("a refused delete must not read as success");
+    assert!(matches!(error, OrchestratorError::Provider { .. }), "got: {error:?}");
+
+    assert!(
+      db.get_vpn_node("node-stuck").expect("query should succeed").is_some(),
+      "the server is still billing, so it must stay visible"
+    );
+  }
+
+  /// The whole saved-location cycle: saved on ready, off keeps it, on brings it back, and forget
+  /// is refused while it is on.
+  #[test]
+  fn a_saved_location_turns_off_and_back_on() {
+    let db = Database::new(test_db_path("saved_location_cycle"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    let adapter = Arc::new(MockProviderAdapter::new(false));
+    let providers = ProviderRegistry::from_adapter(adapter.clone());
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+    let orchestrator = Orchestrator::new();
+
+    orchestrator
+      .create_vpn_node_to_ready(
+        &providers,
+        &Bootstrap::new(),
+        &db,
+        &secure_storage,
+        &CreateVpnNodeRequest {
+          node_id: "node-first".to_string(),
+          provider_id: TEST_PROVIDER_ID.to_string(),
+          node_name: "New York".to_string(),
+          region: "nyc1".to_string(),
+          plan_key: "s-1vcpu-1gb".to_string(),
+        },
+      )
+      .expect("create flow should succeed");
+
+    // Reaching ready saved exactly one location, linked to the new server, with its price.
+    let locations = orchestrator.list_saved_locations(&providers, &db).expect("list");
+    assert_eq!(locations.len(), 1);
+    let location = &locations[0];
+    let location_id = location.location.id.clone();
+    assert_eq!(location.location.name, "New York");
+    assert_eq!(location.location.region, "nyc1");
+    assert_eq!(location.location.plan_key, "s-1vcpu-1gb");
+    assert_eq!(location.location.node_id.as_deref(), Some("node-first"));
+    assert!(location.location.price_monthly_usd.is_some());
+    assert_eq!(location.node_status, Some(NodeLifecycleStatus::Ready));
+
+    let error = orchestrator
+      .forget_saved_location(&db, &location_id)
+      .expect_err("a running server must not be forgotten");
+    assert!(matches!(error, OrchestratorError::InvalidState { .. }), "got: {error:?}");
+
+    // Off: the server goes, the location stays.
+    orchestrator
+      .turn_off_saved_location(&providers, &wireguard, &db, &secure_storage, &location_id)
+      .expect("turn off should succeed");
+    assert!(db.get_vpn_node("node-first").expect("query").is_none());
+    assert_eq!(adapter.state.lock().expect("lock").delete_calls, 1);
+    let off = orchestrator.list_saved_locations(&providers, &db).expect("list");
+    assert_eq!(off.len(), 1);
+    assert_eq!(off[0].location.node_id, None);
+    assert_eq!(off[0].node_status, None);
+
+    // On again: a new server, linked to the same location rather than a second one.
+    orchestrator
+      .turn_on_saved_location(&providers, &Bootstrap::new(), &db, &secure_storage, &location_id, "node-second")
+      .expect("turn on should succeed");
+    let on = orchestrator.list_saved_locations(&providers, &db).expect("list");
+    assert_eq!(on.len(), 1);
+    assert_eq!(on[0].location.id, location_id);
+    assert_eq!(on[0].location.node_id.as_deref(), Some("node-second"));
+    assert_eq!(on[0].node_status, Some(NodeLifecycleStatus::Ready));
+
+    let error = orchestrator
+      .turn_on_saved_location(&providers, &Bootstrap::new(), &db, &secure_storage, &location_id, "node-third")
+      .expect_err("a location that is on cannot be turned on again");
+    assert!(matches!(error, OrchestratorError::InvalidState { .. }), "got: {error:?}");
+    assert!(db.get_vpn_node("node-third").expect("query").is_none(), "nothing was created");
+
+    // Off, then forget.
+    orchestrator
+      .turn_off_saved_location(&providers, &wireguard, &db, &secure_storage, &location_id)
+      .expect("turn off should succeed");
+    orchestrator.forget_saved_location(&db, &location_id).expect("forget should succeed");
+    assert!(orchestrator.list_saved_locations(&providers, &db).expect("list").is_empty());
+  }
+
+  /// Turning off a location whose server the provider will not delete must say so, and leave the
+  /// location on — off would be a claim that billing stopped.
+  #[test]
+  fn turning_off_reports_a_refused_delete_and_stays_on() {
+    let db = Database::new(test_db_path("saved_location_off_refused"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    let adapter = Arc::new(MockProviderAdapter::new(false));
+    let providers = ProviderRegistry::from_adapter(adapter.clone());
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::stopped()));
+    let orchestrator = Orchestrator::new();
+
+    orchestrator
+      .create_vpn_node_to_ready(
+        &providers,
+        &Bootstrap::new(),
+        &db,
+        &secure_storage,
+        &CreateVpnNodeRequest {
+          node_id: "node-sticky".to_string(),
+          provider_id: TEST_PROVIDER_ID.to_string(),
+          node_name: "New York".to_string(),
+          region: "nyc1".to_string(),
+          plan_key: "s-1vcpu-1gb".to_string(),
+        },
+      )
+      .expect("create flow should succeed");
+    let location_id = orchestrator.list_saved_locations(&providers, &db).expect("list")[0]
+      .location
+      .id
+      .clone();
+
+    adapter.state.lock().expect("lock").fail_delete = true;
+    orchestrator
+      .turn_off_saved_location(&providers, &wireguard, &db, &secure_storage, &location_id)
+      .expect_err("a refused delete must not read as off");
+
+    let after = orchestrator.list_saved_locations(&providers, &db).expect("list");
+    assert_eq!(after[0].location.node_id.as_deref(), Some("node-sticky"));
+    assert_eq!(after[0].node_status, Some(NodeLifecycleStatus::Ready));
+  }
+
   #[test]
   fn diagnostics_bundle_redacts_provider_token_refs() {
     let db = Database::new(test_db_path("diagnostics_redaction"));
@@ -6855,6 +7271,51 @@ mod tests {
         peer.slot_index
       );
     }
+  }
+
+  /// Saved devices take the spare slots in order and arrive claimed, so their QR codes are ready
+  /// as soon as the server is. Slots beyond the list stay free.
+  #[test]
+  fn provisioning_names_spare_slots_after_the_saved_devices() {
+    let db = Database::new(test_db_path("peer_slots_saved_devices"));
+    db.run_migrations().expect("migrations should succeed");
+    app_preferences::set(
+      &db,
+      &app_preferences::AppPreferences {
+        close_to_tray: true,
+        mobile_devices: vec!["Pixel 9".to_string(), "iPad".to_string()],
+      },
+    )
+    .expect("saving devices should succeed");
+
+    let secure_storage = SecureStorage::dev_mock();
+    setup_provider_and_token(&db, &secure_storage);
+    let providers = ProviderRegistry::from_adapter(Arc::new(MockProviderAdapter::new(false)));
+
+    Orchestrator::new()
+      .create_vpn_node_to_ready(
+        &providers,
+        &Bootstrap::new(),
+        &db,
+        &secure_storage,
+        &CreateVpnNodeRequest {
+          node_id: "node-saved-devices".to_string(),
+          provider_id: TEST_PROVIDER_ID.to_string(),
+          node_name: "node-main".to_string(),
+          region: "nyc1".to_string(),
+          plan_key: "s-1vcpu-1gb".to_string(),
+        },
+      )
+      .expect("create flow should succeed");
+
+    let peers = db.list_node_peers("node-saved-devices").expect("query should succeed");
+    let labels: Vec<Option<&str>> = peers.iter().map(|peer| peer.label.as_deref()).collect();
+    assert_eq!(
+      labels,
+      vec![Some(DESKTOP_PEER_LABEL), Some("Pixel 9"), Some("iPad"), None, None]
+    );
+    assert!(peers[..3].iter().all(|peer| peer.claimed_at.is_some()));
+    assert!(peers[3..].iter().all(|peer| peer.claimed_at.is_none()));
   }
 
   /// A failed provision must not leave key material behind.

@@ -1,8 +1,9 @@
 "use client";
 
 import { NodesView } from "@/components/dashboard/nodes-view";
+import { SavedLocationsView } from "@/components/dashboard/saved-locations-view";
 import { useDashboard } from "@/components/dashboard/dashboard-provider";
-import { getNodePricingDisplay, NODE_CREATE_ROUTE } from "@/components/dashboard/shared";
+import { getNodePricingDisplay, NODE_CREATE_ROUTE, PageChrome } from "@/components/dashboard/shared";
 import {
   NODE_STATUS_ORDER,
   buildRegionOptions,
@@ -49,6 +50,10 @@ export default function DashboardNodesPage() {
     loadDeviceConfig,
     exportDeviceConfig,
     copyText,
+    savedLocations,
+    turnOnLocation,
+    turnOffLocation,
+    forgetLocation,
   } = useDashboard();
   const [statusFilter, setStatusFilter] = useState<NodeStatus | "all">("all");
   const [regionFilter, setRegionFilter] = useState<string>("all");
@@ -159,47 +164,56 @@ export default function DashboardNodesPage() {
   }
 
   return (
-    <NodesView
-      providerAccessState={providerAccessState}
-      providers={providers}
-      nodes={nodes}
-      rows={rows}
-      diagnostics={diagnostics}
-      pricingByRegion={pricingByRegion}
-      statusFilter={statusFilter}
-      setStatusFilter={setStatusFilter}
-      regionFilter={regionFilter}
-      setRegionFilter={setRegionFilter}
-      sort={sort}
-      setSort={setSort}
-      statusOptions={statusOptions}
-      regionOptions={regionOptions}
-      duplicatedRegionSlugs={duplicatedRegionSlugs}
-      currentNodeId={currentNodeId}
-      selectedNodeId={selectedNodeId}
-      selectedNode={selectedNode}
-      health={health}
-      selectedNodePricing={selectedNodePricing}
-      selectedNodeActionMessage={selectedNodeActionMessage}
-      selectedNodeTunnel={selectedNodeTunnel}
-      busyAction={busyAction}
-      onNavigateToCreate={handleNavigateToCreate}
-      onInstallHost={installHostForNode}
-      onDestroyNode={destroyNode}
-      onSetCurrentNode={setCurrentNode}
-      onConnectNode={connectNode}
-      onConnectTunnel={connectTunnel}
-      onDisconnectTunnel={disconnectTunnel}
-      onForceDisconnectNodeService={forceDisconnectNodeService}
-      nodePeers={nodePeers}
-      onClaimDevice={claimDevice}
-      onLoadDeviceConfig={loadDeviceConfig}
-      onExportDeviceConfig={exportDeviceConfig}
-      onCopyText={copyText}
-      onForceCleanupSelectedNode={forceCleanupSelectedNode}
-      isDetailsModalOpen={isDetailsModalOpen}
-      onOpenNodeDetails={handleOpenNodeDetails}
-      onCloseNodeDetails={handleCloseNodeDetails}
-    />
+    <PageChrome>
+      <SavedLocationsView
+        locations={savedLocations}
+        busyAction={busyAction}
+        onTurnOn={turnOnLocation}
+        onTurnOff={turnOffLocation}
+        onForget={forgetLocation}
+      />
+      <NodesView
+        providerAccessState={providerAccessState}
+        providers={providers}
+        nodes={nodes}
+        rows={rows}
+        diagnostics={diagnostics}
+        pricingByRegion={pricingByRegion}
+        statusFilter={statusFilter}
+        setStatusFilter={setStatusFilter}
+        regionFilter={regionFilter}
+        setRegionFilter={setRegionFilter}
+        sort={sort}
+        setSort={setSort}
+        statusOptions={statusOptions}
+        regionOptions={regionOptions}
+        duplicatedRegionSlugs={duplicatedRegionSlugs}
+        currentNodeId={currentNodeId}
+        selectedNodeId={selectedNodeId}
+        selectedNode={selectedNode}
+        health={health}
+        selectedNodePricing={selectedNodePricing}
+        selectedNodeActionMessage={selectedNodeActionMessage}
+        selectedNodeTunnel={selectedNodeTunnel}
+        busyAction={busyAction}
+        onNavigateToCreate={handleNavigateToCreate}
+        onInstallHost={installHostForNode}
+        onDestroyNode={destroyNode}
+        onSetCurrentNode={setCurrentNode}
+        onConnectNode={connectNode}
+        onConnectTunnel={connectTunnel}
+        onDisconnectTunnel={disconnectTunnel}
+        onForceDisconnectNodeService={forceDisconnectNodeService}
+        nodePeers={nodePeers}
+        onClaimDevice={claimDevice}
+        onLoadDeviceConfig={loadDeviceConfig}
+        onExportDeviceConfig={exportDeviceConfig}
+        onCopyText={copyText}
+        onForceCleanupSelectedNode={forceCleanupSelectedNode}
+        isDetailsModalOpen={isDetailsModalOpen}
+        onOpenNodeDetails={handleOpenNodeDetails}
+        onCloseNodeDetails={handleCloseNodeDetails}
+      />
+    </PageChrome>
   );
 }

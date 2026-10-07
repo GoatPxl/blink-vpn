@@ -30,6 +30,7 @@ export type DashboardBusyAction =
   // the user most needs to understand. Connects are tracked by `ConnectAttempt` instead.
   | "disconnect-tunnel"
   | "destroy-node"
+  | "forget-location"
   | "force-cleanup"
   | "copy-diagnostics"
   | "export-diagnostics"

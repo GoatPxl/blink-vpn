@@ -7,7 +7,7 @@ import { AppIcon, ProgressBar, useNow } from "./shared";
 
 const HEADLINE: Record<OperationAttempt["kind"], string> = {
   provision: "Provisioning server",
-  destroy: "Destroying server",
+  destroy: "Turning off",
   "force-cleanup": "Forcing cleanup",
 };
 
