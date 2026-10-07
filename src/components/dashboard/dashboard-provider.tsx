@@ -16,6 +16,8 @@ import {
   setCurrentNodeId,
   getTunnelSettings,
   setTunnelSettings as setTunnelSettingsCommand,
+  getAppPreferences,
+  setAppPreferences as setAppPreferencesCommand,
   getDiagnosticsBundle,
   getHealthPanelData,
   getTunnelPhase,
@@ -35,6 +37,8 @@ import {
   suspendProvider as suspendProviderCommand,
   validateProviderToken,
   type AppLocation,
+  type AppPreferences,
+  type NodeLifecycleStatus,
   type DockerReadiness,
   type ProviderRecord,
   type TunnelMetricsSource,
@@ -111,8 +115,38 @@ export type ConnectAttempt = {
   snapshot: TunnelPhaseSnapshot | null;
 };
 
+/**
+ * A provision, destroy or force cleanup in flight, for the progress card.
+ *
+ * These already hold `busyAction`, which is exclusive, so at most one exists at a time. Tracked
+ * here rather than in the page that started it because the card outlives navigation — a finished
+ * provision sends the user back to the server list.
+ */
+export type OperationAttempt =
+  | {
+      kind: "provision";
+      nodeId: string;
+      nodeName: string;
+      providerName: string;
+      /** `Date.now()` at the click. */
+      startedAt: number;
+      /** Latest polled lifecycle status; null until the first poll lands. */
+      status: NodeLifecycleStatus | null;
+      /** `Date.now()` when `bootstrapping` was first seen, so that stage's clock starts there. */
+      bootstrappingSince: number | null;
+    }
+  | {
+      kind: "destroy" | "force-cleanup";
+      nodeId: string;
+      nodeName: string;
+      providerName: string;
+      startedAt: number;
+    };
+
 type DashboardContextValue = {
   busyAction: DashboardBusyAction;
+  /** The in-flight provision, destroy or cleanup, or null. Drives the operation progress card. */
+  operationAttempt: OperationAttempt | null;
   /** The in-flight connect, or null. Drives the progress card and gates connect controls. */
   connectAttempt: ConnectAttempt | null;
   /** Tears down a connect that is taking too long, restoring the user's normal connection. */
@@ -176,6 +210,10 @@ type DashboardContextValue = {
   tunnelSettings: TunnelSettings | null;
   /** Resolves true when the settings were accepted and stored. */
   saveTunnelSettings: (settings: TunnelSettings) => Promise<boolean>;
+  /** Desktop-shell preferences; null until first loaded. */
+  appPreferences: AppPreferences | null;
+  /** Resolves true when the preferences were stored. */
+  saveAppPreferences: (preferences: AppPreferences) => Promise<boolean>;
   throughputSamples: ThroughputSample[];
   loadDashboard: (preferredSelectedNodeId?: string) => Promise<void>;
   refreshHealth: () => Promise<void>;
@@ -189,7 +227,8 @@ type DashboardContextValue = {
   resumeProvider: (provider: ProviderRecord) => Promise<void>;
   deleteProvider: (provider: ProviderRecord) => Promise<void>;
   validateDockerReadiness: (options?: { silent?: boolean }) => Promise<void>;
-  createNode: (input: CreateNodeInput) => Promise<void>;
+  /** Resolves true only when the server reached ready. */
+  createNode: (input: CreateNodeInput) => Promise<boolean>;
   installHostForNode: (node: VpnNodeRecord) => Promise<void>;
   connectPrimary: () => Promise<void>;
   connectTunnel: (tunnel: TunnelRecord) => Promise<void>;
@@ -211,6 +250,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const dockerDevEnabled = process.env.NEXT_PUBLIC_DEV_DOCKER === "1";
   const [busyAction, setBusyAction] = useState<DashboardBusyAction>(null);
   const [connectAttempt, setConnectAttempt] = useState<ConnectAttempt | null>(null);
+  const [operationAttempt, setOperationAttempt] = useState<OperationAttempt | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [nodes, setNodes] = useState<VpnNodeRecord[]>([]);
@@ -225,6 +265,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [wireguardReadiness, setWireguardReadiness] = useState<WireGuardReadiness | null>(null);
   const [healthUpdatedAt, setHealthUpdatedAt] = useState<number | null>(null);
   const [tunnelSettings, setTunnelSettings] = useState<TunnelSettings | null>(null);
+  const [appPreferences, setAppPreferencesState] = useState<AppPreferences | null>(null);
   const [throughputSamples, setThroughputSamples] = useState<ThroughputSample[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsBundle | null>(null);
   // Null rather than a "No export yet." sentinel: the UI hides the row instead of printing prose
@@ -329,6 +370,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
     return `${commandError.message} ${commandError.nextAction}`;
   }, [pushToast]);
+
+  /** Display name of a provider by id, for progress copy. Falls back to the selected provider. */
+  const providerNameFor = useCallback((id: string | null) => {
+    return providers.find((provider) => provider.id === id)?.name ?? providerName;
+  }, [providerName, providers]);
 
   const clearThroughputSamples = useCallback(() => {
     lastTrafficSampleRef.current = null;
@@ -472,6 +518,20 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, pushToast]);
 
+  const saveAppPreferences = useCallback(async (preferences: AppPreferences) => {
+    setBusyAction("save-app-preferences");
+    try {
+      await setAppPreferencesCommand(preferences);
+      setAppPreferencesState(preferences);
+      return true;
+    } catch (error) {
+      handleError(error);
+      return false;
+    } finally {
+      setBusyAction(null);
+    }
+  }, [handleError]);
+
   const refreshWireGuardReadiness = useCallback(async () => {
     try {
       setWireguardReadiness(await checkWireGuardReadiness());
@@ -510,6 +570,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         loadedProviders,
         loadedCurrentNodeId,
         loadedTunnelSettings,
+        loadedAppPreferences,
         loadedLocations,
       ] = await Promise.all([
         listVpnNodes(),
@@ -517,6 +578,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         listProviders(),
         getCurrentNodeId(),
         getTunnelSettings(),
+        getAppPreferences(),
         listAppLocations(),
       ]);
 
@@ -525,6 +587,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setProviders(loadedProviders);
       setCurrentNodeIdState(loadedCurrentNodeId);
       setTunnelSettings(loadedTunnelSettings);
+      setAppPreferencesState(loadedAppPreferences);
       setAppLocations(loadedLocations);
 
       const configuredProvider = loadedProviders.find((provider) => provider.id === providerIdRef.current)
@@ -844,6 +907,15 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const createNode = useCallback(async (input: CreateNodeInput) => {
     setBusyAction("create-node");
+    setOperationAttempt({
+      kind: "provision",
+      nodeId: input.nodeId,
+      nodeName: input.nodeName,
+      providerName: providerNameFor(providerId),
+      startedAt: Date.now(),
+      status: null,
+      bootstrappingSince: null,
+    });
     try {
       const result = await createVpnNode({
         nodeId: input.nodeId,
@@ -855,12 +927,15 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setRecovery(null);
       pushToast("success", "Node created", result);
       await loadDashboard(input.nodeId);
+      return true;
     } catch (error) {
       handleError(error);
+      return false;
     } finally {
+      setOperationAttempt(null);
       setBusyAction(null);
     }
-  }, [handleError, loadDashboard, providerId, pushToast]);
+  }, [handleError, loadDashboard, providerId, providerNameFor, pushToast]);
 
   const installHostForNode = useCallback(async (node: VpnNodeRecord) => {
     if (node.lifecycle_status !== "new") {
@@ -875,6 +950,15 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
 
     setBusyAction("create-node");
+    setOperationAttempt({
+      kind: "provision",
+      nodeId: node.id,
+      nodeName: node.name,
+      providerName: providerNameFor(node.provider_id),
+      startedAt: Date.now(),
+      status: node.lifecycle_status,
+      bootstrappingSince: null,
+    });
     try {
       const result = await createVpnNode({
         nodeId: node.id,
@@ -890,9 +974,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       handleError(error);
     } finally {
+      setOperationAttempt(null);
       setBusyAction(null);
     }
-  }, [handleError, loadDashboard, pushToast]);
+  }, [handleError, loadDashboard, providerNameFor, pushToast]);
 
   const connectNode = useCallback(async (node: VpnNodeRecord) => {
     if (!node) {
@@ -1159,6 +1244,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
 
     setBusyAction("destroy-node");
+    setOperationAttempt({
+      kind: "destroy",
+      nodeId: node.id,
+      nodeName: node.name,
+      providerName: providerNameFor(node.provider_id),
+      startedAt: Date.now(),
+    });
     try {
       await destroyVpnNode(node.id);
       setRecovery(null);
@@ -1167,9 +1259,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       handleError(error);
     } finally {
+      setOperationAttempt(null);
       setBusyAction(null);
     }
-  }, [handleError, loadDashboard, pushToast]);
+  }, [handleError, loadDashboard, providerNameFor, pushToast]);
 
 
   /**
@@ -1182,6 +1275,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const node = nodes.find((candidate) => candidate.id === nodeId) ?? null;
 
     setBusyAction("force-cleanup");
+    setOperationAttempt({
+      kind: "force-cleanup",
+      nodeId,
+      nodeName: node?.name ?? nodeId,
+      providerName: providerNameFor(node?.provider_id ?? null),
+      startedAt: Date.now(),
+    });
     try {
       const result = await forceCleanupVpnNode(nodeId);
       setRecovery(null);
@@ -1208,9 +1308,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       handleError(error);
     } finally {
+      setOperationAttempt(null);
       setBusyAction(null);
     }
-  }, [handleError, loadDashboard, nodes, pushToast]);
+  }, [handleError, loadDashboard, nodes, providerNameFor, pushToast]);
 
   const forceCleanupSelectedNode = useCallback(async () => {
     if (!selectedNode) {
@@ -1408,6 +1509,54 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     };
   }, [connectAttempt?.nodeId, connectAttempt?.tunnelId, pushToast, refreshHealthSnapshot]);
 
+  /**
+   * Follows a provision's lifecycle status so the progress bar can jump to the stage the backend
+   * has reached. `create_vpn_node_to_ready` blocks until the server is ready and reports nothing
+   * on the way, but it writes each status transition to SQLite, and `list_vpn_nodes` reads that.
+   */
+  const provisionNodeId = operationAttempt?.kind === "provision" ? operationAttempt.nodeId : null;
+  useEffect(() => {
+    if (!provisionNodeId) {
+      return;
+    }
+
+    let cancelled = false;
+    let inFlight = false;
+
+    const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
+
+      try {
+        const node = (await listVpnNodes()).find((candidate) => candidate.id === provisionNodeId);
+        if (cancelled || !node) return;
+
+        setOperationAttempt((current) => {
+          if (current?.kind !== "provision" || current.nodeId !== provisionNodeId) return current;
+          const bootstrappingSince =
+            current.bootstrappingSince ?? (node.lifecycle_status === "bootstrapping" ? Date.now() : null);
+          if (current.status === node.lifecycle_status && current.bootstrappingSince === bootstrappingSince) {
+            return current;
+          }
+          return { ...current, status: node.lifecycle_status, bootstrappingSince };
+        });
+      } catch (error) {
+        // The bar keeps estimating on the clock; the provision itself reports its own failure.
+        if (!cancelled) console.warn("provision status poll failed", error);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void poll();
+    const intervalId = window.setInterval(() => void poll(), 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [provisionNodeId]);
+
   useEffect(() => {
     if (!dockerDevEnabled) {
       return;
@@ -1492,6 +1641,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const value: DashboardContextValue = {
     busyAction,
+    operationAttempt,
     connectAttempt,
     cancelConnect,
     toasts,
@@ -1538,6 +1688,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     refreshDiagnostics,
     tunnelSettings,
     saveTunnelSettings,
+    appPreferences,
+    saveAppPreferences,
     throughputSamples,
     loadDashboard,
     refreshHealth,

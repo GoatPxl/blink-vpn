@@ -197,6 +197,16 @@ export async function createDockerNode(
 
   await settleToasts(page);
   await page.getByRole("button", { name: "Create Node", exact: true }).click();
+
+  // The progress card must name this provision while it runs.
+  const progress = page.getByTestId("operation-progress");
+  await expect(progress).toHaveAttribute("data-kind", "provision", { timeout: 10_000 });
+  await expect(progress).toContainText(nodeName);
+
   // Provisioning pulls an image and runs apt inside the container on a cold cache.
   await expectSuccess(page, "Node created", 240_000);
+
+  // A finished provision returns to the server list, and the card goes away with it.
+  await expect(page).toHaveURL(/\/dashboard\/nodes\/?$/, { timeout: 15_000 });
+  await expect(progress).toHaveCount(0);
 }

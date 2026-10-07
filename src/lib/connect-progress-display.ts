@@ -43,8 +43,6 @@ export const CONNECT_STEP_LABEL: Record<ConnectStep, string> = {
   verifying: "Verifying traffic",
 };
 
-export type StepState = "pending" | "active" | "done" | "failed";
-
 /**
  * Which step a connect is currently on.
  *
@@ -73,34 +71,6 @@ export function deriveConnectStep(input: {
     case "stalled":
       return snapshot.service_state === "starting" ? "starting-service" : "waiting-handshake";
   }
-}
-
-/**
- * The state of every step, given where the connect has reached.
- *
- * Returns all steps rather than just the current one so the UI renders a stable list instead of
- * items appearing and disappearing.
- */
-export function connectStepStates(
-  step: ConnectStep,
-  phase: TunnelPhase | null,
-): Record<ConnectStep, StepState> {
-  const currentIndex = CONNECT_STEPS.indexOf(step);
-
-  const states = {} as Record<ConnectStep, StepState>;
-  for (const [index, candidate] of CONNECT_STEPS.entries()) {
-    if (index < currentIndex) {
-      states[candidate] = "done";
-    } else if (index > currentIndex) {
-      states[candidate] = "pending";
-    } else {
-      // A stall is a step that has not failed — the server may still answer — but it has stopped
-      // looking healthy, and rendering it as merely "active" hides that from the user.
-      states[candidate] = phase === "stalled" ? "failed" : "active";
-    }
-  }
-
-  return states;
 }
 
 export type ConnectTone = "info" | "warning" | "positive";

@@ -7,6 +7,7 @@ import {
   Field,
   Modal,
   PageChrome,
+  Toggle,
   useNow,
   type DashboardBusyAction,
   type ProviderRecord,
@@ -23,7 +24,7 @@ import {
   validateKeepalive,
   type ProviderKeyStatus,
 } from "@/lib/settings-display";
-import { listProviderCredentialFields, type CredentialField, type TunnelSettings, type WireGuardReadiness } from "@/lib/tauri";
+import { listProviderCredentialFields, type AppPreferences, type CredentialField, type TunnelSettings, type WireGuardReadiness } from "@/lib/tauri";
 
 const STATUS_CLASSES: Record<ProviderKeyStatus, string> = {
   verified: "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]",
@@ -50,6 +51,8 @@ export function SettingsView({
   readiness,
   busyAction,
   reconnecting,
+  appPreferences,
+  onSaveAppPreferences,
 }: {
   dockerDevEnabled: boolean;
   providers: ProviderRecord[];
@@ -68,6 +71,8 @@ export function SettingsView({
   busyAction: DashboardBusyAction;
   /** A reconnect started from this page is still in flight. */
   reconnecting: boolean;
+  appPreferences: AppPreferences | null;
+  onSaveAppPreferences: (preferences: AppPreferences) => Promise<boolean>;
 }) {
   const [keyModalProviderId, setKeyModalProviderId] = useState<string | null>(null);
   const [openMenuProviderId, setOpenMenuProviderId] = useState<string | null>(null);
@@ -181,6 +186,24 @@ export function SettingsView({
           <div className="h-16" />
         </Card>
       )}
+
+      <Card title="Window" description="How GoatStare behaves when you close its window.">
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="text-sm font-medium text-[var(--on-surface)]">Close to system tray</div>
+            <p className="mt-1 text-sm text-[var(--on-surface-variant)]">
+              Closing the window keeps GoatStare running in the notification area. Open it again from the
+              tray icon; choose Quit there to exit. A connected tunnel stays up either way.
+            </p>
+          </div>
+          <Toggle
+            label="Close to system tray"
+            checked={appPreferences?.close_to_tray ?? true}
+            disabled={appPreferences === null || busyAction !== null}
+            onChange={(checked) => void onSaveAppPreferences({ close_to_tray: checked })}
+          />
+        </div>
+      </Card>
 
       <Card title="About" description="Versions of the app and the WireGuard runtime it drives.">
         <dl className="grid gap-3 sm:grid-cols-2">

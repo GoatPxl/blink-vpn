@@ -92,8 +92,27 @@ cleared when its node is destroyed. This is a fourth status axis, deliberately s
 three below — "the server I mean" is not the same fact as "the VM is on", "the app finished
 provisioning it", or "a tunnel is up right now". See `docs/DB_SCHEMA.md` for the exact semantics.
 
+It also holds `close_to_tray`, a desktop-shell preference rather than a tunnel parameter, owned by
+`backend/app_preferences.rs`. It defaults to on, so it needs no migration.
+
 It previously also held `wireguard_connection_mode`, removed in migration 0014 along with the
 connection-mode toggle (see Connection Model above).
+
+## Window and Tray
+
+The app always shows a notification-area icon (`lib.rs`, `build_tray`). Left-clicking it, or
+choosing "Open GoatStare", restores the window; "Quit" exits the process.
+
+With `close_to_tray` on, the default, closing the main window hides it instead of exiting. The close
+handler runs on the event-loop thread, so it reads a cached `CloseToTray` flag rather than SQLite;
+`set_app_preferences` updates the cache after the write succeeds.
+
+Exiting never touches a connected tunnel: it is a Windows service and outlives the app, the same as
+before the tray existed.
+
+`tauri-plugin-single-instance` is registered first on the builder. A second launch, for example from
+the Start menu while the window is hidden in the tray, focuses the running window and exits, instead
+of starting a second process against the same database.
 
 ## Unified NodeProvider Contract
 

@@ -141,7 +141,7 @@ export default function DashboardNodesPage() {
       : selectedNode.lifecycle_status === "provisioning"
         ? "Provisioning is in progress. Avoid submitting another create request until this record moves to Ready or Error."
         : selectedNode.lifecycle_status === "bootstrapping"
-          ? "Bootstrap is still running. Keep this page open or refresh to follow the progress updates."
+          ? "The server is booting and starting WireGuard. This record moves to Ready once it is up."
           : "This server is provisioned and ready to connect."
     : "Select a node to inspect health, pricing, and recovery options.";
 

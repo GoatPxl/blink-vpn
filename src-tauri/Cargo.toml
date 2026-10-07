@@ -21,8 +21,15 @@ tauri-build = { version = "2.6.3", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.3", features = [] }
+# `tray-icon`: closing the window hides the app to the notification area (see lib.rs).
+tauri = { version = "2.11.3", features = ["tray-icon"] }
 tauri-plugin-log = "2"
+# Closing hides the window rather than exiting, so a Start-menu relaunch would otherwise start a
+# second process against the same SQLite database, with a second tray icon. This plugin makes the
+# relaunch focus the existing window instead. Official Tauri plugin, maintained with Tauri itself.
+# The alternative, a hand-rolled named mutex plus a window-message handshake to raise the first
+# instance, re-implements exactly what this crate does.
+tauri-plugin-single-instance = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }

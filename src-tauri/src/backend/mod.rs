@@ -1,3 +1,4 @@
+pub mod app_preferences;
 pub mod bootstrap;
 pub mod crypto;
 pub mod db;

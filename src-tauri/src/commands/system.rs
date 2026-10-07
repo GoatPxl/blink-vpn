@@ -6,6 +6,7 @@ use tauri::State;
 use tauri::{AppHandle, Manager};
 
 use crate::backend::Backend;
+use crate::backend::app_preferences::{self, AppPreferences, CloseToTray};
 use crate::backend::process::no_window_command;
 use crate::commands::error::{CommandError, CommandErrorKind};
 use crate::backend::db::{Database, ProviderRecord, ProviderStatus};
@@ -553,6 +554,31 @@ pub async fn set_tunnel_settings(
     .orchestrator
     .set_tunnel_settings(&backend.db, &TunnelSettings { dns_server, keepalive_seconds })
     .map_err(CommandError::from)
+  })
+  .await
+}
+
+/// Desktop-shell preferences — currently only whether closing the window hides it to the tray.
+#[tauri::command]
+pub async fn get_app_preferences(backend: State<'_, Backend>) -> Result<AppPreferences, CommandError> {
+  let backend = backend.inner().clone();
+  run_blocking(move || app_preferences::get(&backend.db).map_err(CommandError::from)).await
+}
+
+#[tauri::command]
+pub async fn set_app_preferences(
+  close_to_tray: bool,
+  app: AppHandle,
+  backend: State<'_, Backend>,
+) -> Result<(), CommandError> {
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+    app_preferences::set(&backend.db, &AppPreferences { close_to_tray })
+      .map_err(CommandError::from)?;
+    // Updated only after the write lands, so the window never behaves differently from what a
+    // restart would load.
+    app.state::<CloseToTray>().set(close_to_tray);
+    Ok(())
   })
   .await
 }

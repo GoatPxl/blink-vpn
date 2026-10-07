@@ -203,14 +203,18 @@ Keys:
   id against the node list, so a dangling pointer resolves to "unset" rather than aiming connect at a
   server that no longer exists. Absent when the user has several nodes and has not chosen between
   them; a single node needs no key, since it is unambiguously the current one.
+- `close_to_tray` — `"true"` / `"false"`. Whether closing the main window hides it to the system
+  tray instead of exiting. Defaults to `true` when unset; a value that is neither falls back to the
+  default.
 
 The table is seeded empty. It previously held `wireguard_connection_mode`, deleted by migration 0014
 along with the connection-mode toggle.
 
 Accessed through `Database::get_setting` / `set_setting`, and reached from the frontend only via
-typed command pairs — `get_current_node_id` / `set_current_node_id` and `get_tunnel_settings` /
-`set_tunnel_settings` — never directly. Each setting validates in the orchestrator before it is
-stored, so an unusable value cannot reach config generation.
+typed command pairs — `get_current_node_id` / `set_current_node_id`, `get_tunnel_settings` /
+`set_tunnel_settings` and `get_app_preferences` / `set_app_preferences` — never directly. Tunnel
+settings validate in the orchestrator before they are stored, so an unusable value cannot reach
+config generation. `close_to_tray` is read and written by `backend::app_preferences`.
 
 ## Lifecycle Enums
 

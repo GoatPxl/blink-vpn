@@ -20,6 +20,8 @@ import {
   type WireGuardReadiness,
 } from "@/lib/tauri";
 import { describeLocation } from "@/lib/node-display";
+import { describeProvisionProgress } from "@/lib/progress-estimate";
+import { ProgressBar, useNow } from "@/components/dashboard/shared";
 import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
 import {
   DEFAULT_ONBOARDING_STATE,
@@ -64,6 +66,9 @@ export function OnboardingWizard() {
   const [provisionPhase, setProvisionPhase] = useState<"idle" | "provisioning" | "bootstrapping" | "ready" | "error">("idle");
   const [provisionMessage, setProvisionMessage] = useState("Not started.");
   const [provisionNode, setProvisionNode] = useState<VpnNodeRecord | null>(null);
+  const [provisionStartedAt, setProvisionStartedAt] = useState<number | null>(null);
+  const [provisionBootstrappingSince, setProvisionBootstrappingSince] = useState<number | null>(null);
+  const provisionNow = useNow(provisionBusy);
 
   const [finalCheckBusy, setFinalCheckBusy] = useState(false);
 
@@ -380,6 +385,8 @@ export function OnboardingWizard() {
 
   async function startProvision() {
     setProvisionBusy(true);
+    setProvisionStartedAt(Date.now());
+    setProvisionBootstrappingSince(null);
     setProvisionPhase("provisioning");
     setProvisionMessage("Provisioning server resources...");
 
@@ -399,6 +406,7 @@ export function OnboardingWizard() {
           setProvisionMessage("Provisioning in progress...");
         } else if (status === "bootstrapping") {
           setProvisionPhase("bootstrapping");
+          setProvisionBootstrappingSince((current) => current ?? Date.now());
           setProvisionMessage("Bootstrapping WireGuard server configuration...");
         } else if (status === "ready" || status === "connected") {
           setProvisionPhase("ready");
@@ -695,7 +703,22 @@ export function OnboardingWizard() {
               </div>
               <div className={`rounded-xl border px-4 py-3 text-sm ${provisionPhase === "ready" ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.08)] text-[var(--secondary)]" : provisionPhase === "error" ? "border-[color:rgba(255,107,107,0.25)] bg-[color:rgba(255,107,107,0.08)] text-[#ffd5d5]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>
                 <div className="font-medium">{provisionPhase === "idle" ? "Not started" : provisionPhase === "provisioning" ? "Provisioning" : provisionPhase === "bootstrapping" ? "Bootstrapping" : provisionPhase === "ready" ? "Ready" : "Error"}</div>
-                <div className="mt-1 text-xs opacity-90">{provisionMessage}</div>
+                {provisionBusy && provisionStartedAt !== null ? (
+                  <div className="mt-3">
+                    <ProgressBar
+                      {...describeProvisionProgress({
+                        status: provisionPhase === "bootstrapping" ? "bootstrapping" : provisionPhase === "ready" ? "ready" : "provisioning",
+                        startedAt: provisionStartedAt,
+                        bootstrappingSince: provisionBootstrappingSince,
+                        now: provisionNow,
+                        providerName: currentProviderName,
+                      })}
+                      tone="currentColor"
+                    />
+                  </div>
+                ) : (
+                  <div className="mt-1 text-xs opacity-90">{provisionMessage}</div>
+                )}
               </div>
               <button type="button" onClick={() => void startProvision()} disabled={provisionBusy || provisionPhase === "ready" || !selectedPlanPricing || !!pricingError} className="inline-flex items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[#10131b] disabled:opacity-50">
                 {provisionBusy ? "Provisioning..." : provisionPhase === "ready" ? "Provisioned" : "Start Provisioning"}

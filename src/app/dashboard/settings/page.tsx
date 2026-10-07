@@ -7,6 +7,7 @@ import { useCallback } from "react";
 
 export default function DashboardSettingsPage() {
   const {
+    appPreferences,
     busyAction,
     connectAttempt,
     connectedTunnel,
@@ -16,6 +17,7 @@ export default function DashboardSettingsPage() {
     nodes,
     providers,
     resumeProvider,
+    saveAppPreferences,
     saveToken,
     saveTunnelSettings,
     suspendProvider,
@@ -62,6 +64,8 @@ export default function DashboardSettingsPage() {
       readiness={wireguardReadiness}
       busyAction={busyAction}
       reconnecting={connectAttempt !== null}
+      appPreferences={appPreferences}
+      onSaveAppPreferences={saveAppPreferences}
     />
   );
 }

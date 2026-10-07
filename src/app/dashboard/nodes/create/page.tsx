@@ -5,12 +5,13 @@ import { useDashboard } from "@/components/dashboard/dashboard-provider";
 import {
   planDisplayFromPricing,
   providerAccessBadge,
+  VIEW_ROUTE,
   type ProviderPlanPricing,
 } from "@/components/dashboard/shared";
 import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
 import type { ProviderRegion } from "@/lib/tauri";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function DashboardNodesCreatePage() {
   const router = useRouter();
@@ -25,6 +26,16 @@ export default function DashboardNodesCreatePage() {
     providers,
     selectProviderId,
   } = useDashboard();
+
+  // A provision runs for minutes and the user may wander off meanwhile; only a user still on this
+  // page is sent back to the list when it finishes.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const [nodeId, setNodeId] = useState("node-1");
   const [nodeName, setNodeName] = useState("Primary Node");
@@ -133,11 +144,14 @@ export default function DashboardNodesCreatePage() {
     if (!region || !planKey) {
       return;
     }
-    await createNode({ nodeId, nodeName, region, planKey });
+    const created = await createNode({ nodeId, nodeName, region, planKey });
+    if (created && mountedRef.current) {
+      router.push(VIEW_ROUTE.nodes);
+    }
   }
 
   function handleNavigateToNodes() {
-    router.push("/dashboard/nodes");
+    router.push(VIEW_ROUTE.nodes);
   }
 
   function handleNavigateToSettings() {

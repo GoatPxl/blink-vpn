@@ -517,6 +517,22 @@ export async function setTunnelSettings(settings: TunnelSettings): Promise<void>
   });
 }
 
+/** Desktop-shell preferences. Unset values default in the backend. */
+export interface AppPreferences {
+  /** Closing the window hides it to the system tray instead of exiting. Defaults to true. */
+  close_to_tray: boolean;
+}
+
+export async function getAppPreferences(): Promise<AppPreferences> {
+  return invokeCommand<AppPreferences>("get_app_preferences");
+}
+
+export async function setAppPreferences(preferences: AppPreferences): Promise<void> {
+  return invokeCommand<void>("set_app_preferences", {
+    closeToTray: preferences.close_to_tray,
+  });
+}
+
 export async function createVpnNode(params: {
   nodeId: string;
   providerId: string;

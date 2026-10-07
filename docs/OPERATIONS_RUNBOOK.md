@@ -14,10 +14,12 @@
 1. Register token in Settings.
 2. Validate token.
 3. Select provider, region, and plan.
-4. Create node and wait for `ready`.
+4. Create node. A progress card in the corner follows it to `ready`; the percentage is an estimate
+   from typical durations, and the line beneath it names the real stage. On success the app returns
+   to the server list.
 
 ### Connect
-1. Confirm WireGuard for Windows is installed and the app can reach `wireguard.exe`.
+
 1. Confirm WireGuard for Windows is installed and the app can reach `wireguard.exe`.
 2. Create and activate tunnel.
 3. Connect tunnel.
@@ -28,6 +30,11 @@
 1. Disconnect tunnel.
 2. Destroy node when no longer needed.
 3. Confirm local tunnel rows and provider resources are cleaned up.
+
+### Closing and quitting
+
+Closing the window hides GoatStare to the system tray by default; the tray icon restores it, and its
+"Quit" item exits. Turn this off in Settings → Window. Quitting leaves a connected tunnel running.
 
 ## Recovery Workflow
 

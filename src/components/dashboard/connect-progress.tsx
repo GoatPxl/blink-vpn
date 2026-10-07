@@ -1,15 +1,14 @@
 "use client";
 
 import {
-  CONNECT_STEPS,
   CONNECT_STEP_LABEL,
-  connectStepStates,
   deriveConnectStep,
   describeConnectProgress,
   formatElapsedMs,
 } from "@/lib/connect-progress-display";
+import { estimateConnectProgress } from "@/lib/progress-estimate";
 import { useDashboard } from "./dashboard-provider";
-import { AppIcon, Button, useNow } from "./shared";
+import { AppIcon, Button, ProgressBar, useNow } from "./shared";
 
 /** Tone tokens, matching the treatment the rest of the dashboard uses for each meaning. */
 const TONE_VAR = {
@@ -43,7 +42,6 @@ export function ConnectProgress() {
     creatingTunnel: connectAttempt.creatingTunnel,
     snapshot: connectAttempt.snapshot,
   });
-  const stepStates = connectStepStates(step, phase);
   const tone = TONE_VAR[copy.tone];
 
   return (
@@ -70,39 +68,18 @@ export function ConnectProgress() {
 
       <p className="mt-2 text-sm leading-6 text-[var(--on-surface-variant)]">{copy.detail}</p>
 
-      <ol className="mt-4 space-y-2">
-        {CONNECT_STEPS.map((candidate) => {
-          const state = stepStates[candidate];
-          const color =
-            state === "done"
-              ? "var(--secondary)"
-              : state === "active"
-                ? tone
-                : state === "failed"
-                  ? "var(--tertiary)"
-                  : "var(--on-surface-variant)";
-
-          return (
-            <li key={candidate} className="flex items-center gap-2.5 text-xs" style={{ color }}>
-              <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                {state === "done" ? (
-                  <AppIcon name="check" className="h-3.5 w-3.5" />
-                ) : state === "active" ? (
-                  <AppIcon name="refresh" className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <span
-                    className="h-1.5 w-1.5 rounded-full"
-                    style={{ backgroundColor: "currentColor", opacity: state === "pending" ? 0.4 : 1 }}
-                  />
-                )}
-              </span>
-              <span className={state === "pending" ? "opacity-60" : undefined}>
-                {CONNECT_STEP_LABEL[candidate]}
-              </span>
-            </li>
-          );
-        })}
-      </ol>
+      <div className="mt-4">
+        <ProgressBar
+          testId="connect-progress-bar"
+          percent={estimateConnectProgress({
+            step,
+            elapsedMs: now - connectAttempt.startedAt,
+            done: phase === "connected" || phase === "degraded",
+          })}
+          line={`${CONNECT_STEP_LABEL[step]}…`}
+          tone={tone}
+        />
+      </div>
 
       {/* Offered only once waiting has stopped looking normal. Shown earlier it would read as an
           invitation to abandon a connect that is progressing fine — and cancelling means tearing

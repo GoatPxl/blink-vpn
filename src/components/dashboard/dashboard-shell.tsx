@@ -6,6 +6,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useDashboard } from "./dashboard-provider";
 import { AppIcon, useNow, type AppView, type DashboardBusyAction, VIEW_ROUTE } from "./shared";
 import { ConnectProgress } from "./connect-progress";
+import { OperationProgress } from "./operation-progress";
 
 const navItems: Array<{ id: AppView; label: string; icon: string; eyebrow: string }> = [
   { id: "dashboard", label: "Dashboard", icon: "grid", eyebrow: "Overview" },
@@ -336,6 +337,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         {/* Mounted at the shell so a connect started on one page keeps explaining itself after the
             user navigates away from it. */}
         <ConnectProgress />
+        <OperationProgress />
       </div>
     </div>
   );

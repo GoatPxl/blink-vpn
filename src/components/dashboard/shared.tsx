@@ -15,6 +15,7 @@ export type DashboardBusyAction =
   // Replaces "save-wireguard-mode", left behind when the admin/user connection-mode toggle was
   // removed in migration 0014 and referenced by nothing since.
   | "save-tunnel-settings"
+  | "save-app-preferences"
   | "save-token"
   | "save-docker-token"
   | "validate-token"
@@ -355,6 +356,88 @@ export function Button({ children, onClick, disabled, tone = "primary", classNam
   };
 
   return <button type="button" onClick={onClick} disabled={disabled} className={`inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed ${toneClasses[tone]} ${className}`}>{children}</button>;
+}
+
+/**
+ * A thin bar with one line beneath it saying what is happening.
+ *
+ * The percentage is usually an estimate (see `progress-estimate.ts`); the line is what makes the
+ * bar honest, by naming the step actually in progress.
+ */
+export function ProgressBar({
+  percent,
+  line,
+  trailing,
+  tone = "var(--primary)",
+  testId,
+}: {
+  percent: number;
+  line: string;
+  /** Right-aligned on the text row, typically an elapsed clock. */
+  trailing?: ReactNode;
+  /** A CSS color value. */
+  tone?: string;
+  testId?: string;
+}) {
+  const clamped = Math.min(100, Math.max(0, percent));
+
+  return (
+    <div data-testid={testId} className="space-y-1.5">
+      <div
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(clamped)}
+        aria-valuetext={line}
+        className="h-1.5 overflow-hidden rounded-full bg-[color:rgba(255,255,255,0.07)]"
+      >
+        <div
+          className="h-full rounded-full transition-[width] duration-700 ease-out"
+          style={{ width: `${clamped.toFixed(1)}%`, backgroundColor: tone }}
+        />
+      </div>
+      <div className="flex items-center justify-between gap-3 text-xs text-[var(--on-surface-variant)]">
+        <span className="truncate">{line}</span>
+        {trailing ? <span className="shrink-0 font-mono tabular-nums">{trailing}</span> : null}
+      </div>
+    </div>
+  );
+}
+
+/** An on/off switch. A labelled button with `role="switch"`, so it is one tab stop and keyboard-operable. */
+export function Toggle({
+  checked,
+  onChange,
+  disabled,
+  label,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  /** Accessible name; the visible label is the caller's. */
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+        checked
+          ? "border-[color:rgba(171,199,255,0.35)] bg-[var(--primary)]"
+          : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.06)]"
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 rounded-full transition-transform ${
+          checked ? "translate-x-6 bg-[#10131b]" : "translate-x-1 bg-[var(--on-surface-variant)]"
+        }`}
+      />
+    </button>
+  );
 }
 
 export function MetricCard({ title, value, detail, tone = "primary" }: { title: string; value: string; detail: string; tone?: "primary" | "secondary" | "tertiary" }) {

@@ -2,14 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  CONNECT_STEPS,
-  connectStepStates,
   deriveConnectStep,
   describeConnectProgress,
   formatElapsedMs,
-  type ConnectStep,
 } from "../../src/lib/connect-progress-display.ts";
-import type { TunnelPhase, TunnelPhaseSnapshot } from "../../src/lib/tauri.ts";
+import type { TunnelPhaseSnapshot } from "../../src/lib/tauri.ts";
 
 function snapshot(overrides: Partial<TunnelPhaseSnapshot> = {}): TunnelPhaseSnapshot {
   return {
@@ -118,32 +115,6 @@ describe("deriveConnectStep", () => {
       snapshot: snapshot({ phase: "connected", rx_bytes: 4096 }),
     });
     assert.equal(step, "verifying");
-  });
-});
-
-describe("connectStepStates", () => {
-  it("marks earlier steps done, the current step active and later steps pending", () => {
-    const states = connectStepStates("starting-service", "connecting");
-
-    assert.equal(states["creating-tunnel"], "done");
-    assert.equal(states.authorizing, "done");
-    assert.equal(states["starting-service"], "active");
-    assert.equal(states["waiting-handshake"], "pending");
-    assert.equal(states.verifying, "pending");
-  });
-
-  it("marks the current step failed when the connect has stalled", () => {
-    const states = connectStepStates("waiting-handshake", "stalled");
-    assert.equal(states["waiting-handshake"], "failed");
-  });
-
-  it("covers every step for any input, so the list never changes length", () => {
-    for (const step of CONNECT_STEPS) {
-      for (const phase of [null, "connecting", "stalled", "connected"] as (TunnelPhase | null)[]) {
-        const states = connectStepStates(step as ConnectStep, phase);
-        assert.equal(Object.keys(states).length, CONNECT_STEPS.length, `${step}/${phase}`);
-      }
-    }
   });
 });
 

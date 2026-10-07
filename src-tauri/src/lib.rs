@@ -3,7 +3,15 @@ mod commands;
 
 use std::path::PathBuf;
 
-use tauri::Manager;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, WindowEvent};
+
+use backend::app_preferences::{self, CloseToTray};
+
+const MAIN_WINDOW_LABEL: &str = "main";
+const TRAY_MENU_OPEN: &str = "tray-open";
+const TRAY_MENU_QUIT: &str = "tray-quit";
 
 pub fn run() {
   // One builder, no test-only variant.
@@ -13,6 +21,11 @@ pub fn run() {
   // second mechanism kept alive by a feature flag — and it shipped a capability reference that a
   // production build could not resolve.
   tauri::Builder::default()
+    // Must be the first plugin registered: it decides, before anything else starts, whether this
+    // process is a relaunch that should hand off to the window already running in the tray.
+    .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+      show_main_window(app);
+    }))
     .setup(move |app| {
       app.handle().plugin(
         tauri_plugin_log::Builder::default()
@@ -46,6 +59,18 @@ pub fn run() {
 
       backend.db.run_migrations()?;
 
+      let close_to_tray = app_preferences::get(&backend.db)
+        .unwrap_or_else(|err| {
+          log::warn!(
+            "event=app_preferences.load_failed error={}",
+            crate::backend::logging::redact_sensitive_text(&err.to_string())
+          );
+          app_preferences::AppPreferences::default()
+        })
+        .close_to_tray;
+      app.manage(CloseToTray::new(close_to_tray));
+      build_tray(app.handle())?;
+
       match backend.orchestrator.reconcile_startup(
         &backend.provider,
         &backend.wireguard,
@@ -78,6 +103,18 @@ pub fn run() {
       app.manage(backend.clone());
       Ok(())
     })
+    .on_window_event(|window, event| {
+      if let WindowEvent::CloseRequested { api, .. } = event {
+        let hide_to_tray = window.label() == MAIN_WINDOW_LABEL
+          && window.try_state::<CloseToTray>().is_some_and(|state| state.enabled());
+        if hide_to_tray {
+          api.prevent_close();
+          if let Err(err) = window.hide() {
+            log::warn!("event=window.hide_failed error={err}");
+          }
+        }
+      }
+    })
     .invoke_handler(tauri::generate_handler![
       commands::system::open_wireguard_install_page,
       commands::system::install_wireguard_with_prerequisites,
@@ -96,6 +133,8 @@ pub fn run() {
       commands::system::set_current_node_id,
       commands::system::get_tunnel_settings,
       commands::system::set_tunnel_settings,
+      commands::system::get_app_preferences,
+      commands::system::set_app_preferences,
       commands::system::list_tunnels_for_node,
       commands::system::destroy_vpn_node,
       commands::system::force_cleanup_vpn_node,
@@ -122,6 +161,60 @@ pub fn run() {
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
+}
+
+/// The notification-area icon. It is what a window closed to the tray comes back from, so it
+/// exists whether or not close-to-tray is on — turning the setting on later must not need a restart.
+///
+/// "Quit" exits the app only. A connected tunnel is a Windows service and keeps running, exactly as
+/// it does when the window is closed with the setting off.
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+  let open = MenuItem::with_id(app, TRAY_MENU_OPEN, "Open GoatStare", true, None::<&str>)?;
+  let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "Quit", true, None::<&str>)?;
+  let menu = Menu::with_items(app, &[&open, &quit])?;
+
+  let mut builder = TrayIconBuilder::with_id("main")
+    .tooltip("GoatStare VPN")
+    .menu(&menu)
+    // Left click restores the window; the menu is on right click, the Windows convention.
+    .show_menu_on_left_click(false)
+    .on_menu_event(|app, event| match event.id.as_ref() {
+      TRAY_MENU_OPEN => show_main_window(app),
+      TRAY_MENU_QUIT => app.exit(0),
+      _ => {}
+    })
+    .on_tray_icon_event(|tray, event| {
+      if let TrayIconEvent::Click {
+        button: MouseButton::Left,
+        button_state: MouseButtonState::Up,
+        ..
+      } = event
+      {
+        show_main_window(tray.app_handle());
+      }
+    });
+
+  if let Some(icon) = app.default_window_icon() {
+    builder = builder.icon(icon.clone());
+  }
+
+  builder.build(app)?;
+  Ok(())
+}
+
+fn show_main_window(app: &AppHandle) {
+  let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+    log::warn!("event=window.restore_failed reason=main_window_missing");
+    return;
+  };
+
+  let restore = window
+    .show()
+    .and_then(|()| window.unminimize())
+    .and_then(|()| window.set_focus());
+  if let Err(err) = restore {
+    log::warn!("event=window.restore_failed error={err}");
+  }
 }
 
 fn summarize_path_for_log(path_value: Option<&str>) -> String {
