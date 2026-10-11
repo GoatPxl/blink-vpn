@@ -26,7 +26,7 @@
     "backend:test:openstack:real": "cargo test --manifest-path src-tauri/Cargo.toml real_openstack -- --ignored --nocapture"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/api": "~2.11.1",
     "@tauri-apps/plugin-notification": "~2.4.0",
     "next": "16.2.12",
     "react": "19.2.4",

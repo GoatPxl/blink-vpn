@@ -171,7 +171,7 @@ roughly ten a second through every connect.
 
 **Debug builds cannot reproduce this** — they have a console the children inherit instead of
 allocating their own — which is exactly why it reached a release. Verify anything touching process
-spawning against `npm run tauri build`, not `tauri dev`.
+spawning against `npm run tauri:build`, not `tauri dev`.
 
 `CREATE_NO_WINDOW` covers the process we spawn. It does **not** reach a grandchild launched by
 `Start-Process -Verb RunAs`, which needs `-WindowStyle Hidden` in the script text as well; the UAC
