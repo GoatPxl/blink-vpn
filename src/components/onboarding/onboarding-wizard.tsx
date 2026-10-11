@@ -1,777 +1,398 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
+
+import { Button, INPUT_CLASS, Panel, Tag, Tile } from "@/components/dashboard/shared";
+import { GoatMark, PixelIcon } from "@/components/ui/pixel-icon";
+import { formatHourly, regionCode } from "@/lib/home-display";
+import { buildMapRegions, type MapRegion } from "@/lib/map/map-regions";
+import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
+import { hasUsableKey, visibleProviders } from "@/lib/settings-display";
+import { localTimeZone, suggestRegion } from "@/lib/suggest-region";
 import {
   checkWireGuardReadiness,
-  createVpnNode,
   installWireGuardWithPrerequisites,
   listProviderCredentialFields,
   listProviders,
-  listVpnNodes,
+  openProviderTokenPage,
   openWireGuardInstallPage,
   registerProviderCredential,
+  toCommandError,
   validateProviderToken,
   type CredentialField,
-  type ProviderPlanPricing,
-  type ProviderRegion,
-  type WireGuardInstallResult,
-  type VpnNodeRecord,
+  type ProviderRecord,
   type WireGuardReadiness,
 } from "@/lib/tauri";
-import { describeLocation } from "@/lib/node-display";
-import { describeProvisionProgress } from "@/lib/progress-estimate";
-import { BlockProgress, useNow } from "@/components/dashboard/shared";
-import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
-import {
-  DEFAULT_ONBOARDING_STATE,
-  loadOnboardingState,
-  saveOnboardingState,
-  type OnboardingState,
-} from "@/lib/onboarding-state";
+import { buildHandoffUrl } from "./build-handoff";
 
-function stepTitle(step: number): string {
-  if (step === 1) return "WireGuard Readiness";
-  if (step === 2) return "Provider Token";
-  if (step === 3) return "Server Configuration";
-  if (step === 4) return "Provision Server";
-  return "Ready";
+type KeyStatus =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "verified" }
+  | { kind: "failed"; message: string };
+
+/** "DO" for DigitalOcean, "EC2" for Amazon EC2, "GCE" for Google Compute Engine — from the name. */
+function providerCode(name: string): string {
+  const words = name.split(/\s+/).filter(Boolean);
+  const last = words[words.length - 1] ?? name;
+  if (words.length > 1 && /^[A-Z0-9]{2,4}$/.test(last)) return last;
+  const initials = words.length > 1 ? words.map((word) => word[0]).join("") : (name.match(/[A-Z]/g) ?? []).join("");
+  return (initials.length >= 2 ? initials : name.slice(0, 2)).toUpperCase().slice(0, 3);
 }
 
+function isReady(readiness: WireGuardReadiness | null): boolean {
+  return !!readiness && readiness.installed && readiness.executable_found && readiness.service_available;
+}
+
+function StepIndicator({ step }: { step: 1 | 2 | 3 }) {
+  return (
+    <div className="flex items-center gap-3" aria-label={`Step ${step} of 3`}>
+      {[1, 2, 3].map((index) => (
+        <span
+          key={index}
+          className={`flex h-11 w-11 items-center justify-center border-2 font-mono text-[15px] ${index < step ? "border-lime bg-lime text-ink" : index === step ? "border-lime text-lime" : "border-line-3 text-stone"}`}
+        >
+          {index < step ? <PixelIcon name="check" className="h-4 w-4" label="done" /> : index}
+        </span>
+      ))}
+      <span className="ml-2 font-display text-[12px] uppercase text-stone">key → build → connect</span>
+    </div>
+  );
+}
+
+/**
+ * First run: one key, one suggested city, one button.
+ *
+ * WireGuard readiness is checked on arrival and only becomes a screen if it fails. The build itself
+ * is handed to the dashboard, which owns the build screen and the auto-connect — the wizard used to
+ * run a second, parallel provisioning loop of its own.
+ */
 export function OnboardingWizard() {
   const router = useRouter();
-  const [state, setState] = useState<OnboardingState>(DEFAULT_ONBOARDING_STATE);
-  const [step, setStep] = useState(1);
-  const [isHydrated, setIsHydrated] = useState(false);
+  const dockerDevEnabled = process.env.NEXT_PUBLIC_DEV_DOCKER === "1";
 
-  const [wireGuardReadiness, setWireGuardReadiness] = useState<WireGuardReadiness | null>(null);
-  const [wireGuardBusy, setWireGuardBusy] = useState(false);
-  const [wireGuardInstallBusy, setWireGuardInstallBusy] = useState(false);
-  const [wireGuardInstallMessage, setWireGuardInstallMessage] = useState("");
+  const [readiness, setReadiness] = useState<WireGuardReadiness | null>(null);
+  const [readinessChecked, setReadinessChecked] = useState(false);
+  const [installMessage, setInstallMessage] = useState<string | null>(null);
+  const [installing, setInstalling] = useState(false);
 
-  // Credential inputs are declared by the provider's adapter, so this step renders one field for
-  // DigitalOcean and two for AWS without branching on a provider slug here.
-  const [credentialFields, setCredentialFields] = useState<CredentialField[]>([]);
-  const [credentialValues, setCredentialValues] = useState<Record<string, string>>({});
-  const [tokenMessage, setTokenMessage] = useState("No token action yet.");
-  const [tokenBusy, setTokenBusy] = useState(false);
-  const [storedProviderTokenRef, setStoredProviderTokenRef] = useState<string | null>(null);
+  const [providers, setProviders] = useState<ProviderRecord[]>([]);
+  const [providerId, setProviderId] = useState<string | null>(null);
+  const [fields, setFields] = useState<CredentialField[]>([]);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [status, setStatus] = useState<KeyStatus>({ kind: "idle" });
 
-  const [pricingBusy, setPricingBusy] = useState(false);
-  const [pricingError, setPricingError] = useState<string | null>(null);
-  const [availableRegions, setAvailableRegions] = useState<ProviderRegion[]>([]);
-  const [pricingByRegion, setPricingByRegion] = useState<Record<string, ProviderPlanPricing[]>>({});
+  const [suggestion, setSuggestion] = useState<MapRegion | null>(null);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
 
-  const [provisionBusy, setProvisionBusy] = useState(false);
-  const [provisionPhase, setProvisionPhase] = useState<"idle" | "provisioning" | "bootstrapping" | "ready" | "error">("idle");
-  const [provisionMessage, setProvisionMessage] = useState("Not started.");
-  const [provisionNode, setProvisionNode] = useState<VpnNodeRecord | null>(null);
-  const [provisionStartedAt, setProvisionStartedAt] = useState<number | null>(null);
-  const [provisionBootstrappingSince, setProvisionBootstrappingSince] = useState<number | null>(null);
-  const provisionNow = useNow(provisionBusy);
-
-  const [finalCheckBusy, setFinalCheckBusy] = useState(false);
-
-  useEffect(() => {
-    const loaded = loadOnboardingState();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState(loaded);
-    setStep(Math.min(Math.max(loaded.currentStep, 1), 5));
-    setIsHydrated(true);
+  const refreshReadiness = useCallback(async () => {
+    try {
+      setReadiness(await checkWireGuardReadiness());
+    } catch {
+      setReadiness(null);
+    } finally {
+      setReadinessChecked(true);
+    }
   }, []);
 
   useEffect(() => {
-    if (!isHydrated) return;
-    saveOnboardingState({ ...state, currentStep: step, status: step >= 5 ? state.status : "in_progress" });
-  }, [isHydrated, state, step]);
+    const timer = window.setTimeout(() => void refreshReadiness(), 0);
+    return () => window.clearTimeout(timer);
+  }, [refreshReadiness]);
 
+  // Providers once; preselect one that already has a working key, else the first.
   useEffect(() => {
-    if (!isHydrated) return;
-    if (step < 2) return;
-
-    const timeoutId = window.setTimeout(() => {
-      void syncStoredProviderTokenState(true);
-    }, 0);
-
-    return () => window.clearTimeout(timeoutId);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isHydrated, state.providerId, step]);
-
-  // The adapter decides which credential inputs this provider needs.
-  useEffect(() => {
-    if (!isHydrated) return;
-    if (step < 2) return;
-
-    let cancelled = false;
-    void (async () => {
-      try {
-        const fields = await listProviderCredentialFields(state.providerId);
-        if (cancelled) return;
-        setCredentialFields(fields);
-        setCredentialValues({});
-      } catch (error) {
-        if (cancelled) return;
-        setTokenMessage(error instanceof Error ? error.message : String(error));
-      }
-    })();
-
+    let active = true;
+    void listProviders().then((loaded) => {
+      if (!active) return;
+      const offered = visibleProviders(loaded, dockerDevEnabled);
+      setProviders(offered);
+      const preferred = offered.find(hasUsableKey) ?? offered[0] ?? null;
+      setProviderId(preferred?.id ?? null);
+      if (preferred && hasUsableKey(preferred)) setStatus({ kind: "verified" });
+    }).catch((error) => {
+      if (active) setStatus({ kind: "failed", message: toCommandError(error).message });
+    });
     return () => {
-      cancelled = true;
+      active = false;
     };
-  }, [isHydrated, state.providerId, step]);
+  }, [dockerDevEnabled]);
 
+  const provider = providers.find((candidate) => candidate.id === providerId) ?? null;
+
+  // The adapter declares its inputs, so one token or a key and secret render without branching here.
   useEffect(() => {
-    if (!isHydrated) return;
-    if (step !== 3) return;
-    if (!state.tokenSaved && !state.tokenValidated) return;
-    const timeoutId = window.setTimeout(() => {
-      void loadLivePricing();
-    }, 0);
-    return () => window.clearTimeout(timeoutId);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isHydrated, step, state.region, state.providerId, state.tokenSaved, state.tokenValidated]);
-
-  const selectedRegionPricing = useMemo(() => pricingByRegion[state.region] ?? [], [pricingByRegion, state.region]);
-
-  const selectedPlanPricing = useMemo(() => {
-    return selectedRegionPricing.find((entry) => entry.plan_key === state.plan) ?? null;
-  }, [selectedRegionPricing, state.plan]);
-
-  const hasUnsavedTokenInput = Object.values(credentialValues).some((value) => value.trim().length > 0);
-  const hasStoredProviderToken = !!storedProviderTokenRef;
-  const currentProviderName = state.providerName || "Provider";
-  const allCredentialFieldsFilled =
-    credentialFields.length > 0 &&
-    credentialFields.every((field) => (credentialValues[field.key] ?? "").trim().length > 0);
-
-  async function syncStoredProviderTokenState(validateStoredToken = false) {
-    try {
-      const providers = await listProviders();
-      const currentProvider = providers.find((provider) => provider.id === state.providerId) ?? null;
-      const tokenRef = currentProvider?.token_ref ?? null;
-
-      setStoredProviderTokenRef(tokenRef);
-
-      if (!tokenRef) {
-        return;
-      }
-
-      setState((current) => ({
-        ...current,
-        tokenSaved: true,
-      }));
-
-      setTokenMessage((current) => (
-        current === "No token action yet."
-          ? "Stored provider token found. Click Validate Token to continue, or enter a new token to replace it."
-          : current
-      ));
-
-      if (!validateStoredToken || hasUnsavedTokenInput) {
-        return;
-      }
-
-      const validateResult = await validateProviderToken(state.providerId);
-      setState((current) => ({
-        ...current,
-        tokenSaved: true,
-        tokenValidated: true,
-      }));
-      setTokenMessage(`Stored provider token found. ${validateResult}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const needsResave = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
-
-      if (needsResave) {
-        setStoredProviderTokenRef(null);
-        setState((current) => ({
-          ...current,
-          tokenSaved: false,
-          tokenValidated: false,
-        }));
-        setTokenMessage((current) => (
-          current === "No token action yet." || current.startsWith("Stored provider token")
-            ? "Stored provider token reference is stale or missing. Click Save Token to retry secure registration."
-            : current
-        ));
-        return;
-      }
-
-      if (validateStoredToken) {
-        setState((current) => ({
-          ...current,
-          tokenSaved: true,
-          tokenValidated: false,
-        }));
-        setTokenMessage(message);
-      }
-    }
-  }
-
-  async function loadLivePricing() {
-    setPricingBusy(true);
-    setPricingError(null);
-    try {
-      const catalog = await loadProviderPricingCatalog(state.providerId);
-      setAvailableRegions(catalog.regions);
-      setPricingByRegion(catalog.pricingByRegion);
-      if (catalog.regions.length === 0) {
-        setState((current) => ({ ...current, region: "", plan: "" }));
-        setPricingError("No available regions were returned by the provider API.");
-        return;
-      }
-
-      // State stays keyed by slug; the region records only supply display names.
-      const selectedRegion = catalog.regions.some((entry) => entry.slug === state.region)
-        ? state.region
-        : catalog.regions[0].slug;
-      const responsePlans = catalog.pricingByRegion[selectedRegion] ?? [];
-      const hasSelectedPlan = responsePlans.some((entry) => entry.plan_key === state.plan);
-      const nextPlan = hasSelectedPlan ? state.plan : (responsePlans[0]?.plan_key ?? "");
-      setState((current) => ({
-        ...current,
-        region: selectedRegion,
-        plan: nextPlan,
-      }));
-      if (responsePlans.length === 0) {
-        setPricingError("No supported plan pricing is currently available for the selected region.");
-      }
-    } catch (error) {
-      setAvailableRegions([]);
-      setPricingByRegion({});
-      const message = error instanceof Error ? error.message : String(error);
-      const isTokenRecoveryNeeded = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
-      if (isTokenRecoveryNeeded) {
-        setStoredProviderTokenRef(null);
-        setState((current) => ({
-          ...current,
-          tokenSaved: false,
-          tokenValidated: false,
-        }));
-        setTokenMessage("Provider token is no longer valid in secure storage. Save Token, then Validate Token to continue.");
-        setStep(2);
-      }
-      setPricingError(
-        isTokenRecoveryNeeded
-          ? `Provider token is not currently registered. Return to Step 2, save your ${currentProviderName} token again, then validate it.`
-          : message,
-      );
-    } finally {
-      setPricingBusy(false);
-    }
-  }
-
-  async function checkWireGuard() {
-    setWireGuardBusy(true);
-    try {
-      const readiness = await checkWireGuardReadiness();
-      setWireGuardReadiness(readiness);
-      setState((current) => ({ ...current, lastWireGuardPassed: readiness.installed && readiness.executable_found && readiness.service_available }));
-    } finally {
-      setWireGuardBusy(false);
-    }
-  }
-
-  async function onInstallWireGuardFromApp() {
-    setWireGuardInstallMessage("");
-    setWireGuardInstallBusy(true);
-    try {
-      const result: WireGuardInstallResult = await installWireGuardWithPrerequisites();
-      setWireGuardInstallMessage(`${result.message} ${result.next_action}`);
-      await checkWireGuard();
-    } catch (error) {
-      setWireGuardInstallMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setWireGuardInstallBusy(false);
-    }
-  }
-
-  /**
-   * Fallback when the in-app installer cannot run.
-   *
-   * The elevated install is one UAC prompt away from failing — declined, or blocked by policy —
-   * and onboarding cannot continue without WireGuard. Without this the user is simply stuck on
-   * step 1 with an error and nowhere to go.
-   */
-  async function onOpenWireGuardDownload() {
-    try {
-      await openWireGuardInstallPage();
-    } catch (error) {
-      setWireGuardInstallMessage(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function onSaveToken() {
-    if (!allCredentialFieldsFilled) {
-      setTokenMessage(`Fill in every ${currentProviderName} credential field to continue.`);
-      return;
-    }
-
-    setTokenBusy(true);
-    try {
-      const saveResult = await registerProviderCredential(
-        state.providerId,
-        state.providerName,
-        Object.fromEntries(
-          credentialFields.map((field) => [field.key, (credentialValues[field.key] ?? "").trim()]),
-        ),
-      );
-      setState((current) => ({ ...current, tokenSaved: true, tokenValidated: false }));
-
-      // Validate immediately after save so Step 2 has a single clear outcome.
-      const validateResult = await validateProviderToken(state.providerId);
-      await syncStoredProviderTokenState();
-      setTokenMessage(`${saveResult} ${validateResult}`);
-      setState((current) => ({ ...current, tokenSaved: true, tokenValidated: true }));
-      setCredentialValues({});
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const needsResave = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
-      if (needsResave) {
-        setStoredProviderTokenRef(null);
-        setState((current) => ({
-          ...current,
-          tokenSaved: false,
-          tokenValidated: false,
-        }));
-        setTokenMessage("Stored provider token reference is stale or missing. Click Save Token to retry secure registration.");
-      } else {
-        setState((current) => ({
-          ...current,
-          tokenValidated: false,
-        }));
-        setTokenMessage(message);
-      }
-    } finally {
-      setTokenBusy(false);
-    }
-  }
-
-  async function onValidateToken() {
-    if (hasUnsavedTokenInput) {
-      setTokenMessage("Click Save + Validate Token to replace the stored token.");
-      return;
-    }
-
-    if (!state.tokenSaved && !hasStoredProviderToken) {
-      setTokenMessage(`Save your ${currentProviderName} token first, then validate it.`);
-      return;
-    }
-
-    setTokenBusy(true);
-    try {
-      const result = await validateProviderToken(state.providerId);
-      await syncStoredProviderTokenState();
-      setTokenMessage(result);
-      setState((current) => ({ ...current, tokenValidated: true, tokenSaved: true }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const needsResave = /no stored secret|missing token_ref|has no token_ref|initialized with a token|stale/i.test(message);
-      if (needsResave) {
-        setStoredProviderTokenRef(null);
-        setState((current) => ({
-          ...current,
-          tokenSaved: false,
-          tokenValidated: false,
-        }));
-        setTokenMessage("Stored provider token reference is stale or missing. Click Save Token, then Validate Token.");
-      } else {
-        setTokenMessage(message);
-      }
-    } finally {
-      setTokenBusy(false);
-    }
-  }
-
-  async function startProvision() {
-    setProvisionBusy(true);
-    setProvisionStartedAt(Date.now());
-    setProvisionBootstrappingSince(null);
-    setProvisionPhase("provisioning");
-    setProvisionMessage("Provisioning server resources...");
-
-    let pollStopped = false;
-    const intervalId = window.setInterval(async () => {
-      if (pollStopped) return;
-      try {
-        const nodes = await listVpnNodes();
-        const created = nodes.find((node) => node.id === state.nodeId);
-        if (!created) return;
-
-        setProvisionNode(created);
-
-        const status = created.lifecycle_status.toLowerCase();
-        if (status === "provisioning") {
-          setProvisionPhase("provisioning");
-          setProvisionMessage("Provisioning in progress...");
-        } else if (status === "bootstrapping") {
-          setProvisionPhase("bootstrapping");
-          setProvisionBootstrappingSince((current) => current ?? Date.now());
-          setProvisionMessage("Bootstrapping WireGuard server configuration...");
-        } else if (status === "ready" || status === "connected") {
-          setProvisionPhase("ready");
-          setProvisionMessage("Server is ready.");
-        } else if (status === "error") {
-          setProvisionPhase("error");
-          setProvisionMessage(created.error_reason ?? "Provisioning failed.");
+    if (!providerId) return;
+    let active = true;
+    void listProviderCredentialFields(providerId)
+      .then((loaded) => {
+        if (active) {
+          setFields(loaded);
+          setValues({});
         }
-      } catch {
-        // Keep polling resiliently; error details are handled by create flow below.
-      }
-    }, 1800);
-
-    try {
-      const result = await createVpnNode({
-        nodeId: state.nodeId,
-        providerId: state.providerId,
-        nodeName: state.nodeName,
-        region: state.region,
-        planKey: state.plan,
+      })
+      .catch(() => {
+        if (active) setFields([]);
       });
-
-      setProvisionMessage(result);
-
-      const nodes = await listVpnNodes();
-      const created = nodes.find((node) => node.id === state.nodeId) ?? null;
-      setProvisionNode(created);
-      const isReady = created ? (created.lifecycle_status === "ready" || created.lifecycle_status === "connected") : false;
-      setProvisionPhase(isReady ? "ready" : "error");
-
-      setState((current) => ({
-        ...current,
-        nodeReady: isReady,
-        lastNodePublicIp: created?.public_ipv4 ?? null,
-      }));
-    } catch (error) {
-      setProvisionPhase("error");
-      setProvisionMessage(error instanceof Error ? error.message : String(error));
-      setState((current) => ({ ...current, nodeReady: false }));
-    } finally {
-      pollStopped = true;
-      window.clearInterval(intervalId);
-      setProvisionBusy(false);
-    }
-  }
-
-  async function finalWireGuardCheck() {
-    setFinalCheckBusy(true);
-    try {
-      const readiness = await checkWireGuardReadiness();
-      setWireGuardReadiness(readiness);
-      const passed = readiness.installed && readiness.executable_found && readiness.service_available;
-      setState((current) => ({ ...current, lastWireGuardPassed: passed }));
-      return passed;
-    } finally {
-      setFinalCheckBusy(false);
-    }
-  }
-
-  const canGoNext = useMemo(() => {
-    if (step === 1) {
-      return !!wireGuardReadiness && wireGuardReadiness.installed && wireGuardReadiness.executable_found && wireGuardReadiness.service_available;
-    }
-    if (step === 2) {
-      return state.tokenValidated;
-    }
-    if (step === 3) {
-      return !!state.region && !!state.plan && !!selectedPlanPricing;
-    }
-    if (step === 4) {
-      return state.nodeReady && provisionPhase === "ready";
-    }
-    return true;
-  }, [step, wireGuardReadiness, state, provisionPhase, selectedPlanPricing]);
-
-  function goBack() {
-    setStep((current) => Math.max(1, current - 1));
-  }
-
-  function goNext() {
-    if (!canGoNext) return;
-    setStep((current) => Math.min(5, current + 1));
-  }
-
-  function onCancel() {
-    saveOnboardingState({ ...state, status: "in_progress", currentStep: step });
-    router.push("/");
-  }
-
-  async function onFinish() {
-    const passed = await finalWireGuardCheck();
-    if (!passed) return;
-
-    const completedState: OnboardingState = {
-      ...state,
-      status: "completed",
-      currentStep: 5,
-      lastWireGuardPassed: true,
+    return () => {
+      active = false;
     };
-    saveOnboardingState(completedState);
-    router.push("/");
+  }, [providerId]);
+
+  // A verified key earns a suggestion: nearest continent, cheapest size, no network beyond the provider.
+  useEffect(() => {
+    if (status.kind !== "verified" || !provider) return;
+    let active = true;
+    void loadProviderPricingCatalog(provider.id)
+      .then((catalog) => {
+        if (!active) return;
+        const regions = buildMapRegions({
+          providers: [{ id: provider.id, name: provider.name, verified: true }],
+          regionsByProvider: { [provider.id]: catalog.regions },
+          pricingByProvider: { [provider.id]: catalog.pricingByRegion },
+        });
+        setSuggestion(suggestRegion(regions, localTimeZone()));
+        setSuggestionError(null);
+      })
+      .catch((error) => {
+        if (active) setSuggestionError(`${toCommandError(error).message} ${toCommandError(error).nextAction}`);
+      });
+    return () => {
+      active = false;
+    };
+  }, [provider, status.kind]);
+
+  const tokenField = fields.find((field) => field.token_page_url) ?? fields[0] ?? null;
+  const allFilled = fields.length > 0 && fields.every((field) => (values[field.key] ?? "").trim().length > 0);
+
+  const saveAndValidate = useCallback(async (nextValues: Record<string, string>) => {
+    if (!provider || fields.length === 0) return;
+    if (!fields.every((field) => (nextValues[field.key] ?? "").trim().length > 0)) return;
+    setStatus({ kind: "checking" });
+    try {
+      await registerProviderCredential(
+        provider.id,
+        provider.name,
+        Object.fromEntries(fields.map((field) => [field.key, (nextValues[field.key] ?? "").trim()])),
+      );
+      await validateProviderToken(provider.id);
+      setValues({});
+      setStatus({ kind: "verified" });
+      setProviders((current) => current.map((candidate) => (
+        candidate.id === provider.id ? { ...candidate, token_ref: candidate.token_ref ?? "stored", last_validation_status: "ok" } : candidate
+      )));
+    } catch (error) {
+      // Displayed, never parsed: the kind decides nothing here but the words the user reads.
+      const commandError = toCommandError(error);
+      setStatus({ kind: "failed", message: `${commandError.message} ${commandError.nextAction}` });
+    }
+  }, [fields, provider]);
+
+  async function pasteInto(field: CredentialField) {
+    try {
+      const text = (await navigator.clipboard.readText()).trim();
+      if (!text) return;
+      const next = { ...values, [field.key]: text };
+      setValues(next);
+      await saveAndValidate(next);
+    } catch {
+      setStatus({ kind: "failed", message: "Blink could not read the clipboard. Click the box and press Ctrl+V instead." });
+    }
   }
+
+  function chooseProvider(id: string) {
+    setProviderId(id);
+    setSuggestion(null);
+    const chosen = providers.find((candidate) => candidate.id === id);
+    setStatus(chosen && hasUsableKey(chosen) ? { kind: "verified" } : { kind: "idle" });
+  }
+
+  const step: 1 | 2 | 3 = !isReady(readiness) ? 1 : status.kind === "verified" ? 3 : 2;
 
   return (
-    <main className="mx-auto min-h-screen w-full max-w-5xl px-4 py-6 lg:px-6">
-      <section className="rounded-[24px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(28,32,39,0.96),rgba(16,19,27,0.96))] p-6 shadow-[var(--shadow-elevated)] lg:p-8">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-8 px-[clamp(20px,6vw,120px)] py-10">
+      <header className="flex flex-wrap items-center justify-between gap-6">
+        <div className="flex items-center gap-5">
+          <GoatMark className="h-16 w-14 text-lime" />
           <div>
-            <div className="text-xs uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Step {step} of 5</div>
-            <h1 className="mt-2 text-2xl font-semibold tracking-tight text-[var(--on-surface)]">{stepTitle(step)}</h1>
+            <div className="font-display text-[22px] uppercase text-bone">Blink VPN</div>
+            <p className="text-[15px] text-stone">Your server. Your key. Gone when you&apos;re done.</p>
           </div>
-          <button
-            type="button"
-            onClick={onCancel}
-            className="inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 text-sm text-[var(--on-surface)] hover:bg-[color:rgba(255,255,255,0.08)]"
-          >
-            Cancel
-          </button>
         </div>
+        <StepIndicator step={step} />
+      </header>
 
-        <div className="mt-6 rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-5">
-          {step === 1 ? (
-            <div className="space-y-4">
-              <p className="text-sm text-[var(--on-surface-variant)]">Check local WireGuard requirements used by this app before continuing.</p>
-              {wireGuardReadiness ? (
-                <div className={`rounded-xl border px-4 py-3 text-sm ${wireGuardReadiness.installed && wireGuardReadiness.executable_found && wireGuardReadiness.service_available ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.08)] text-[var(--secondary)]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>
-                  <div>{wireGuardReadiness.message}</div>
-                  <div className="mt-1 text-xs opacity-90">{wireGuardReadiness.action_guidance}</div>
+      {readinessChecked && !isReady(readiness) ? (
+        <Panel tint="busy" bodyClassName="flex flex-col gap-5 p-8">
+          <Tag state="busy">Step 1 · WireGuard for Windows</Tag>
+          <h1 className="font-display text-[clamp(32px,4vw,52px)] uppercase leading-none text-bone">Install WireGuard first</h1>
+          <p className="max-w-[720px] text-[16px] text-stone">
+            Blink runs your tunnel through the official WireGuard service. {readiness?.message ?? ""} {readiness?.action_guidance ?? ""}
+          </p>
+          {installMessage ? <p className="text-[14px] text-bone">{installMessage}</p> : null}
+          <div className="flex flex-wrap gap-3">
+            <Button
+              disabled={installing}
+              onClick={async () => {
+                setInstalling(true);
+                setInstallMessage(null);
+                try {
+                  const result = await installWireGuardWithPrerequisites();
+                  setInstallMessage(`${result.message} ${result.next_action}`);
+                } catch (error) {
+                  setInstallMessage(`${toCommandError(error).message} ${toCommandError(error).nextAction}`);
+                } finally {
+                  setInstalling(false);
+                  await refreshReadiness();
+                }
+              }}
+            >
+              {installing ? "Installing" : "Install WireGuard"}
+            </Button>
+            <Button tone="ghost" onClick={() => void openWireGuardInstallPage().catch(() => undefined)}>Download page</Button>
+            <Button tone="quiet" onClick={() => void refreshReadiness()}>Check again</Button>
+          </div>
+        </Panel>
+      ) : null}
+
+      <div className="grid grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] gap-8 max-[1100px]:grid-cols-1">
+        <section className="flex flex-col gap-6">
+          <div>
+            <Tag state="secure">Step 2 · One key from a cloud you already pay</Tag>
+            <h1 className="mt-3 font-display text-[clamp(36px,4.5vw,56px)] uppercase leading-none text-bone">Add a cloud key</h1>
+          </div>
+
+          <div className="grid grid-cols-3 gap-4 max-[700px]:grid-cols-2">
+            {providers.map((candidate) => (
+              <Tile
+                key={candidate.id}
+                code={providerCode(candidate.name)}
+                name={candidate.name}
+                meta={hasUsableKey(candidate) ? "key saved" : candidate.id === providerId ? "selected" : "add a key"}
+                selected={candidate.id === providerId}
+                onClick={() => chooseProvider(candidate.id)}
+              />
+            ))}
+            <Tile
+              dashed
+              code="?"
+              name="No cloud yet"
+              meta="Open an account with any of these first. DigitalOcean takes about 2 minutes."
+              disabled
+            />
+          </div>
+
+          {provider && status.kind !== "verified" ? (
+            <Panel bodyClassName="flex flex-col gap-5 p-7">
+              <div className="flex flex-wrap items-start gap-5">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center border-2 border-lime font-mono text-lime">1</span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[17px] text-bone">
+                    Open {provider.name}&apos;s key page and create a new key.
+                    {tokenField?.scope_hint ? <> Give it: <span className="font-semibold">{tokenField.scope_hint}</span></> : null}
+                  </p>
+                  {tokenField?.help ? <p className="mt-1 text-[13.5px] text-stone">{tokenField.help}</p> : null}
                 </div>
-              ) : null}
-              <div className="grid gap-2 text-sm text-[var(--on-surface-variant)] md:grid-cols-2">
-                <div>Installed: <span className="text-[var(--on-surface)]">{wireGuardReadiness?.installed ? "Yes" : "No"}</span></div>
-                <div>Executables found: <span className="text-[var(--on-surface)]">{wireGuardReadiness?.executable_found ? "Yes" : "No"}</span></div>
-                <div>Service available: <span className="text-[var(--on-surface)]">{wireGuardReadiness?.service_available ? "Yes" : "No"}</span></div>
-                <div>Version: <span className="text-[var(--on-surface)]">{wireGuardReadiness?.version ?? "Unknown"}</span></div>
+                {tokenField?.token_page_url ? (
+                  <Button tone="ghost" onClick={() => void openProviderTokenPage(provider.id).catch(() => undefined)}>
+                    Open key page <PixelIcon name="arrow-right" className="h-3 w-3 -rotate-45" />
+                  </Button>
+                ) : null}
               </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <button type="button" onClick={() => void checkWireGuard()} disabled={wireGuardBusy} className="inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 text-sm text-[var(--on-surface)] hover:bg-[color:rgba(255,255,255,0.08)] disabled:opacity-50">
-                  {wireGuardBusy ? "Checking..." : wireGuardReadiness ? "Re-check" : "Check WireGuard"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void onInstallWireGuardFromApp()}
-                  disabled={wireGuardInstallBusy || wireGuardBusy}
-                  className="inline-flex items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[#10131b] disabled:opacity-50"
-                >
-                  {wireGuardInstallBusy ? "Installing WireGuard..." : "Install WireGuard from App (Admin)"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void onOpenWireGuardDownload()}
-                  className="inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 text-sm text-[var(--on-surface-variant)] hover:text-[var(--on-surface)]"
-                >
-                  Download manually
-                </button>
+              <div className="flex items-start gap-5">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center border-2 border-lime font-mono text-lime">2</span>
+                <p className="pt-2 text-[17px] text-bone">Copy it, come back, paste.</p>
               </div>
-              {wireGuardInstallMessage ? (
-                <div className="text-xs text-[var(--on-surface-variant)]">{wireGuardInstallMessage}</div>
-              ) : null}
-            </div>
-          ) : null}
-
-          {step === 2 ? (
-            <div className="space-y-4">
-              <p className="text-sm text-[var(--on-surface-variant)]">Add your {currentProviderName} credentials to provision and manage the VPN node.</p>
-              {credentialFields.map((field) => (
-                <label key={field.key} className="block space-y-2 text-sm text-[var(--on-surface-variant)]">
-                  <span>{field.label}</span>
+              {fields.map((field) => (
+                <div key={field.key} className="flex gap-3">
                   <input
                     type={field.secret ? "password" : "text"}
-                    value={credentialValues[field.key] ?? ""}
-                    onChange={(event) => {
-                      const nextValue = event.target.value;
-                      setCredentialValues((current) => ({ ...current, [field.key]: nextValue }));
-                      if (nextValue) {
-                        setState((current) => ({
-                          ...current,
-                          tokenSaved: false,
-                          tokenValidated: false,
-                        }));
-                      }
-                    }}
-                    className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none"
+                    aria-label={field.label}
                     placeholder={field.placeholder}
+                    value={values[field.key] ?? ""}
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={status.kind === "checking"}
+                    onChange={(event) => setValues((current) => ({ ...current, [field.key]: event.target.value }))}
+                    onBlur={() => {
+                      if (allFilled) void saveAndValidate(values);
+                    }}
+                    className={`${INPUT_CLASS} h-14`}
                   />
-                  {field.help ? <span className="block text-xs">{field.help}</span> : null}
-                </label>
+                  <Button tone="ghost" className="h-14" disabled={status.kind === "checking"} onClick={() => void pasteInto(field)}>
+                    Paste
+                  </Button>
+                </div>
               ))}
-              <div className="flex flex-wrap gap-3">
-                <button type="button" onClick={() => void onSaveToken()} disabled={tokenBusy} className="inline-flex items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[#10131b] disabled:opacity-50">Save + Validate Token</button>
-                <button type="button" onClick={() => void onValidateToken()} disabled={tokenBusy || hasUnsavedTokenInput || (!state.tokenSaved && !hasStoredProviderToken)} className="inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 text-sm text-[var(--on-surface)] disabled:opacity-50">Validate Token</button>
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <p className="text-[13px] text-stone">
+                  Saved to Windows Credential Manager. Never in Blink&apos;s database, logs, or bug reports. One read-only call checks it works.
+                </p>
+                {fields.length > 1 ? (
+                  <Button disabled={!allFilled || status.kind === "checking"} onClick={() => void saveAndValidate(values)}>
+                    Save &amp; check
+                  </Button>
+                ) : null}
               </div>
-              <div className="text-xs text-[var(--on-surface-variant)]">
-                Step 3 unlocks only after a successful Validate Token action.
-              </div>
-              <div className="rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3 text-sm text-[var(--on-surface-variant)]">{tokenMessage}</div>
-            </div>
+              {status.kind === "checking" ? <p className="text-[14px] text-ember">Checking the key with {provider.name}…</p> : null}
+              {status.kind === "failed" ? <p role="alert" className="text-[14px] text-alert">{status.message}</p> : null}
+            </Panel>
+          ) : provider ? (
+            <Panel bodyClassName="flex flex-wrap items-center justify-between gap-4 px-7 py-5">
+              <span className="flex items-center gap-3 text-[16px] text-lime">
+                <PixelIcon name="check" className="h-5 w-5" /> {provider.name} key saved and working.
+              </span>
+              <Button tone="quiet" size="sm" onClick={() => setStatus({ kind: "idle" })}>Replace key</Button>
+            </Panel>
           ) : null}
+        </section>
 
-          {step === 3 ? (
-            <div className="space-y-5">
-              <p className="text-sm text-[var(--on-surface-variant)]">Choose where to host your VPN node and how much capacity you need.</p>
-              <div>
-                <h2 className="text-sm font-medium text-[var(--on-surface)]">Region</h2>
-                <div className="mt-3 grid gap-3 md:grid-cols-3">
-                  {availableRegions.map((regionOption) => {
-                    const location = describeLocation(regionOption, regionOption.slug);
-                    // Several datacentres can share a city, so the slug distinguishes them.
-                    const sharesCity = availableRegions.some(
-                      (other) => other.slug !== regionOption.slug && other.city === regionOption.city && other.city !== null,
-                    );
-                    return (
-                      <button
-                        key={regionOption.slug}
-                        type="button"
-                        onClick={() => setState((current) => ({ ...current, region: regionOption.slug, plan: "" }))}
-                        className={`rounded-xl border px-4 py-3 text-left ${state.region === regionOption.slug ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}
-                      >
-                        <div className="flex items-center gap-2">
-                          {location.countryCode ? <span className="font-mono text-[11.5px] text-stone">{location.countryCode}</span> : null}
-                          <span className="font-medium text-[var(--on-surface)]">{location.primary}</span>
-                        </div>
-                        <div className="mt-1 text-xs text-[var(--on-surface-variant)]">
-                          {location.secondary ? (sharesCity ? `${location.secondary} · ${regionOption.slug}` : location.secondary) : regionOption.slug}
-                        </div>
-                      </button>
-                    );
-                  })}
-                  {availableRegions.length === 0 ? <div className="rounded-xl border border-dashed border-[color:var(--outline-variant)] px-4 py-3 text-xs text-[var(--on-surface-variant)]">No regions available yet.</div> : null}
-                </div>
+        <Panel tint={step === 3 ? "secure" : "none"} className={step === 3 ? "" : "opacity-50"} bodyClassName="flex flex-col gap-5 p-8">
+          <Tag state={step === 3 ? "secure" : undefined}>Step 3 · Your first server (suggested)</Tag>
+          {step !== 3 ? (
+            <p className="text-[16px] text-stone">Add a working key and Blink picks a city near you.</p>
+          ) : suggestion ? (
+            <>
+              <div className="font-display text-[clamp(44px,5vw,64px)] uppercase leading-none text-lime">{regionCode(suggestion.slug)}</div>
+              <div className="text-[clamp(20px,2vw,28px)] font-semibold text-bone">{suggestion.city ? `${suggestion.city}${suggestion.countryCode ? `, ${suggestion.countryCode}` : ""}` : suggestion.slug}</div>
+              <p className="text-[15px] text-stone">Nearest to your time zone. Cheapest size — plenty for a VPN. You can move anywhere later in one click.</p>
+              <div className="flex flex-wrap items-baseline justify-between gap-3 border-y-2 border-line py-4">
+                <span className="font-mono text-[15px] text-stone">
+                  <span className="text-[28px] font-bold text-bone">{suggestion.cheapest?.monthly_usd != null ? `$${suggestion.cheapest.monthly_usd.toFixed(2)}` : "—"}</span>/mo
+                  {suggestion.cheapest ? ` · ${formatHourly(suggestion.cheapest.hourly_usd) ?? ""}` : ""}
+                </span>
+                <span className="font-display text-[12px] uppercase text-stone">Ready in ~2 min</span>
               </div>
-              <div>
-                <h2 className="text-sm font-medium text-[var(--on-surface)]">Plan</h2>
-                <div className="mt-3 grid gap-3 md:grid-cols-3">
-                  {selectedRegionPricing.map((plan) => (
-                    <button
-                      key={plan.plan_key}
-                      type="button"
-                      onClick={() => setState((current) => ({ ...current, plan: plan.plan_key }))}
-                      className={`rounded-xl border px-4 py-3 text-left ${state.plan === plan.plan_key ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}
-                    >
-                      <div className="font-medium text-[var(--on-surface)]">{plan.plan_label}</div>
-                      <div className="mt-1 font-mono text-xs text-[var(--on-surface-variant)]">{plan.size_slug}</div>
-                      <div className="mt-2 text-xs text-[var(--on-surface-variant)]">{plan.vcpus} vCPU · {plan.memory_mb} MB · {plan.disk_gb} GB disk</div>
-                      <div className="mt-2 text-xs text-[var(--secondary)]">{plan.monthly_usd === null ? "Price set by your cloud operator" : `$${plan.monthly_usd.toFixed(2)}/mo`}</div>
-                    </button>
-                  ))}
-                  {selectedRegionPricing.length === 0 ? <div className="rounded-xl border border-dashed border-[color:var(--outline-variant)] px-4 py-3 text-xs text-[var(--on-surface-variant)]">No plans available for this region.</div> : null}
-                </div>
+              <Button
+                className="h-16 text-[16px]"
+                disabled={!suggestion.cheapest}
+                onClick={() => {
+                  if (!suggestion.cheapest) return;
+                  router.push(buildHandoffUrl({
+                    providerId: suggestion.providerId,
+                    region: suggestion.slug,
+                    planKey: suggestion.cheapest.plan_key,
+                    place: suggestion.city ?? suggestion.slug,
+                  }));
+                }}
+              >
+                Build it &amp; connect <PixelIcon name="arrow-right" className="h-4 w-4" />
+              </Button>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <button type="button" onClick={() => router.push("/dashboard/map")} className="border-b-2 border-lime text-[15px] text-lime">
+                  Pick another city
+                </button>
+                <span className="text-[13.5px] text-stone">Connects automatically when ready</span>
               </div>
-              <div className="rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3 text-sm text-[var(--on-surface-variant)]">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-medium text-[var(--on-surface)]">Live pricing</span>
-                  <button
-                    type="button"
-                    onClick={() => void loadLivePricing()}
-                    disabled={pricingBusy || tokenBusy}
-                    className="rounded-lg border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-2.5 py-1 text-xs text-[var(--on-surface)] disabled:opacity-50"
-                  >
-                    {pricingBusy ? "Refreshing..." : "Refresh"}
-                  </button>
-                </div>
-                {pricingError ? (
-                  <div className="mt-2 text-xs text-[#ffd5d5]">{pricingError}</div>
-                ) : selectedPlanPricing ? (
-                  <div className="mt-2 grid gap-1 text-xs md:grid-cols-2">
-                    <div>Size: <span className="text-[var(--on-surface)]">{selectedPlanPricing.size_slug}</span></div>
-                    <div>Region: <span className="text-[var(--on-surface)]">{selectedPlanPricing.region}</span></div>
-                    <div>Monthly: <span className="text-[var(--on-surface)]">{selectedPlanPricing.monthly_usd === null ? "n/a" : `$${selectedPlanPricing.monthly_usd.toFixed(2)}`}</span></div>
-                    <div>Hourly: <span className="text-[var(--on-surface)]">{selectedPlanPricing.hourly_usd === null ? "n/a" : `$${selectedPlanPricing.hourly_usd.toFixed(5)}`}</span></div>
-                    <div className="md:col-span-2">Source timestamp: <span className="text-[var(--on-surface)]">{selectedPlanPricing.source_timestamp}</span></div>
-                  </div>
-                ) : (
-                  <div className="mt-2 text-xs">Select a plan to view live pricing.</div>
-                )}
-              </div>
-              <div className="rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3 text-xs text-[var(--on-surface-variant)]">
-                Cost vs latency: nearby regions usually improve latency; larger plans improve throughput and concurrent load.
-              </div>
-            </div>
-          ) : null}
-
-          {step === 4 ? (
-            <div className="space-y-4">
-              <p className="text-sm text-[var(--on-surface-variant)]">Create and bootstrap your server. This can take a few minutes.</p>
-              <div className="grid gap-2 rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3 text-sm text-[var(--on-surface-variant)] md:grid-cols-2">
-                <div>Node ID: <span className="text-[var(--on-surface)]">{state.nodeId}</span></div>
-                <div>Node Name: <span className="text-[var(--on-surface)]">{state.nodeName}</span></div>
-                <div>Region: <span className="text-[var(--on-surface)]">{state.region}</span></div>
-                <div>Plan: <span className="text-[var(--on-surface)]">{state.plan}</span></div>
-                <div>Size: <span className="text-[var(--on-surface)]">{selectedPlanPricing?.size_slug ?? "n/a"}</span></div>
-                <div>Monthly est: <span className="text-[var(--on-surface)]">{selectedPlanPricing?.monthly_usd != null ? `$${selectedPlanPricing.monthly_usd.toFixed(2)}` : "n/a"}</span></div>
-                <div>Hourly est: <span className="text-[var(--on-surface)]">{selectedPlanPricing?.hourly_usd != null ? `$${selectedPlanPricing.hourly_usd.toFixed(5)}` : "n/a"}</span></div>
-              </div>
-              <div className={`rounded-xl border px-4 py-3 text-sm ${provisionPhase === "ready" ? "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.08)] text-[var(--secondary)]" : provisionPhase === "error" ? "border-[color:rgba(255,107,107,0.25)] bg-[color:rgba(255,107,107,0.08)] text-[#ffd5d5]" : "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]"}`}>
-                <div className="font-medium">{provisionPhase === "idle" ? "Not started" : provisionPhase === "provisioning" ? "Provisioning" : provisionPhase === "bootstrapping" ? "Bootstrapping" : provisionPhase === "ready" ? "Ready" : "Error"}</div>
-                {provisionBusy && provisionStartedAt !== null ? (
-                  <div className="mt-3">
-                    <BlockProgress
-                      {...describeProvisionProgress({
-                        status: provisionPhase === "bootstrapping" ? "bootstrapping" : provisionPhase === "ready" ? "ready" : "provisioning",
-                        startedAt: provisionStartedAt,
-                        bootstrappingSince: provisionBootstrappingSince,
-                        now: provisionNow,
-                        providerName: currentProviderName,
-                      })}
-                      tone="ember"
-                    />
-                  </div>
-                ) : (
-                  <div className="mt-1 text-xs opacity-90">{provisionMessage}</div>
-                )}
-              </div>
-              <button type="button" onClick={() => void startProvision()} disabled={provisionBusy || provisionPhase === "ready" || !selectedPlanPricing || !!pricingError} className="inline-flex items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[#10131b] disabled:opacity-50">
-                {provisionBusy ? "Provisioning..." : provisionPhase === "ready" ? "Provisioned" : "Start Provisioning"}
-              </button>
-            </div>
-          ) : null}
-
-          {step === 5 ? (
-            <div className="space-y-4">
-              <p className="text-sm text-[var(--on-surface-variant)]">Setup is complete. We will run one final WireGuard readiness check before returning you to Dashboard.</p>
-              <div className="grid gap-2 rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3 text-sm text-[var(--on-surface-variant)] md:grid-cols-2">
-                <div>Node: <span className="text-[var(--on-surface)]">{provisionNode?.name ?? state.nodeName}</span></div>
-                <div>Region: <span className="text-[var(--on-surface)]">{provisionNode?.region ?? state.region}</span></div>
-                <div>Public IP: <span className="text-[var(--on-surface)]">{provisionNode?.public_ipv4 ?? state.lastNodePublicIp ?? "n/a"}</span></div>
-                <div>Status: <span className="text-[var(--on-surface)]">{provisionNode?.lifecycle_status ?? (state.nodeReady ? "ready" : "unknown")}</span></div>
-              </div>
-              <div className="rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3 text-sm text-[var(--on-surface-variant)]">
-                WireGuard check: <span className="text-[var(--on-surface)]">{state.lastWireGuardPassed ? "Passed" : "Required"}</span>
-              </div>
-              <button type="button" onClick={() => void onFinish()} disabled={finalCheckBusy} className="inline-flex items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] px-5 py-2.5 text-sm font-medium text-[#10131b] disabled:opacity-50">
-                {finalCheckBusy ? "Checking..." : "Go to Dashboard"}
-              </button>
-              {!state.lastWireGuardPassed && wireGuardReadiness ? (
-                <div className="rounded-xl border border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] px-4 py-3 text-xs text-[var(--tertiary)]">
-                  {wireGuardReadiness.message} {wireGuardReadiness.action_guidance}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="mt-6 flex items-center justify-between">
-          <button
-            type="button"
-            onClick={goBack}
-            disabled={step === 1 || provisionBusy || finalCheckBusy}
-            className="inline-flex items-center justify-center rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-4 py-2 text-sm text-[var(--on-surface)] disabled:opacity-40"
-          >
-            Back
-          </button>
-
-          {step < 5 ? (
-            <button
-              type="button"
-              onClick={goNext}
-              disabled={!canGoNext || provisionBusy || tokenBusy || wireGuardBusy}
-              className="inline-flex items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[#10131b] disabled:opacity-40"
-            >
-              Next
-            </button>
-          ) : <div />}
-        </div>
-      </section>
-    </main>
+            </>
+          ) : suggestionError ? (
+            <p role="alert" className="text-[14px] text-alert">{suggestionError}</p>
+          ) : (
+            <p className="text-[15px] text-stone">Reading {provider?.name ?? "the provider"}&apos;s regions and prices…</p>
+          )}
+        </Panel>
+      </div>
+    </div>
   );
 }

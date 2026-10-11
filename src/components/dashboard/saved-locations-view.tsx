@@ -12,11 +12,11 @@ import type { SavedLocationRecord } from "@/lib/tauri";
 import { Button, Panel, type DashboardBusyAction } from "./shared";
 
 const STATE_COLOR: Record<LocationState, string> = {
-  off: "var(--on-surface-variant)",
-  starting: "var(--primary)",
-  on: "var(--secondary)",
-  stopping: "var(--tertiary)",
-  error: "var(--tertiary)",
+  off: "var(--stone-2)",
+  starting: "var(--ember)",
+  on: "var(--lime)",
+  stopping: "var(--ember)",
+  error: "var(--alert)",
 };
 
 /**
@@ -73,7 +73,7 @@ function SavedLocationList({
   const busy = busyAction !== null;
 
   return (
-    <ul className="divide-y divide-[color:var(--outline-variant)]">
+    <ul className="divide-y divide-line">
       {locations.map((location) => {
         const state = deriveLocationState(location.node_status);
         const place = describeLocation(location.region_geo, location.region);
@@ -89,13 +89,13 @@ function SavedLocationList({
             <div className="flex min-w-0 flex-1 items-center gap-3">
               {place.countryCode ? <span className="shrink-0 border-2 border-line-3 px-1.5 font-mono text-[11.5px] text-stone">{place.countryCode}</span> : null}
               <div className="min-w-0">
-                <div className="truncate font-medium text-[var(--on-surface)]">
+                <div className="truncate font-medium text-bone">
                   {location.name}
-                  <span className="ml-2 text-xs font-normal text-[var(--on-surface-variant)]">
+                  <span className="ml-2 text-xs font-normal text-stone">
                     {place.unresolved ? place.primary : [place.primary, place.secondary].filter(Boolean).join(", ")}
                   </span>
                 </div>
-                <div className="mt-0.5 truncate text-xs text-[var(--on-surface-variant)]">
+                <div className="mt-0.5 truncate text-xs text-stone">
                   {location.provider_name ?? location.provider_id} · <span className="font-mono">{location.plan_key}</span>
                   {price ? ` · ${price}` : null}
                 </div>
@@ -103,7 +103,7 @@ function SavedLocationList({
             </div>
 
             <span className="flex items-center gap-2 text-xs" style={{ color: STATE_COLOR[state] }}>
-              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: STATE_COLOR[state] }} />
+              <span className="h-2 w-2 " style={{ backgroundColor: STATE_COLOR[state] }} />
               {LOCATION_STATE_LABEL[state]}
             </span>
 

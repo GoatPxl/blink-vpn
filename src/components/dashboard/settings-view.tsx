@@ -6,7 +6,7 @@ import {
   Panel,
   Field,
   Modal,
-  PageChrome,
+  PageHeader,
   Toggle,
   useNow,
   type DashboardBusyAction,
@@ -31,11 +31,11 @@ import {
 import { listProviderCredentialFields, type AppPreferences, type CredentialField, type TunnelSettings, type WireGuardReadiness } from "@/lib/tauri";
 
 const STATUS_CLASSES: Record<ProviderKeyStatus, string> = {
-  verified: "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]",
-  unverified: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.04)] text-[var(--on-surface-variant)]",
-  missing: "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]",
-  suspended: "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]",
-  invalid: "border-[color:rgba(255,155,155,0.35)] bg-[color:rgba(255,155,155,0.08)] text-[#ff9b9b]",
+  verified: "border-lime bg-panel-2 text-lime",
+  unverified: "border-line bg-panel-2 text-stone",
+  missing: "border-ember bg-ember-ink text-ember",
+  suspended: "border-ember bg-ember-ink text-ember",
+  invalid: "border-alert bg-alert-ink text-alert",
 };
 
 export function SettingsView({
@@ -91,7 +91,8 @@ export function SettingsView({
   const modalProvider = providers.find((provider) => provider.id === keyModalProviderId) ?? null;
 
   return (
-    <PageChrome>
+    <>
+      <PageHeader title="Setup" subtitle="Cloud keys, tunnel options, phones, and how the window behaves." />
       <Panel
         title="Providers"
         description="Cloud accounts this app can provision servers on. Keys stay on this device."
@@ -106,7 +107,7 @@ export function SettingsView({
       >
         <div className="overflow-visible">
           <table className="min-w-full text-left text-sm">
-            <thead className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">
+            <thead className="text-[11px] uppercase tracking-[0.24em] text-stone">
               <tr>
                 <th className="px-4 py-3">Provider</th>
                 <th className="px-4 py-3">Status</th>
@@ -124,22 +125,22 @@ export function SettingsView({
                 const actions = buildRowActions({ provider, hasKey, attachedNodeCount, busy });
 
                 return (
-                  <tr key={provider.id} className="border-t border-[color:var(--outline-variant)]">
+                  <tr key={provider.id} className="border-t-2 border-line">
                     <td className="px-4 py-4 align-middle">
-                      <div className="font-medium text-[var(--on-surface)]">{provider.name}</div>
+                      <div className="font-medium text-bone">{provider.name}</div>
                       {/* Says a key exists, and when it was last checked, without printing a
                           masked reference that looks like part of the secret but is only an
                           opaque handle. */}
-                      <div className="mt-0.5 text-xs text-[var(--on-surface-variant)]">
+                      <div className="mt-0.5 text-xs text-stone">
                         <KeyState provider={provider} />
                       </div>
                     </td>
                     <td className="px-4 py-4 align-middle">
-                      <span className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${STATUS_CLASSES[status]}`}>
+                      <span className={`inline-flex  border-2 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${STATUS_CLASSES[status]}`}>
                         {PROVIDER_KEY_STATUS_LABEL[status]}
                       </span>
                     </td>
-                    <td className="px-4 py-4 align-middle text-[var(--on-surface)]">{attachedNodeCount}</td>
+                    <td className="px-4 py-4 align-middle text-bone">{attachedNodeCount}</td>
                     <td className="px-4 py-4 align-middle">
                       <div className="flex items-center justify-end gap-2">
                         <Button
@@ -229,8 +230,8 @@ export function SettingsView({
       <Panel title="Window" description="How Blink behaves when you close its window.">
         <div className="flex items-start justify-between gap-6">
           <div>
-            <div className="text-sm font-medium text-[var(--on-surface)]">Close to system tray</div>
-            <p className="mt-1 text-sm text-[var(--on-surface-variant)]">
+            <div className="text-sm font-medium text-bone">Close to system tray</div>
+            <p className="mt-1 text-sm text-stone">
               Closing the window keeps Blink running in the notification area. Open it again from the
               tray icon; choose Quit there to exit. A connected tunnel stays up either way.
             </p>
@@ -250,18 +251,18 @@ export function SettingsView({
 
       <Panel title="About" description="Versions of the app and the WireGuard runtime it drives.">
         <dl className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3">
-            <dt className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Blink VPN</dt>
-            <dd className="mt-1 font-mono text-sm text-[var(--on-surface)]">{readiness?.app_version ?? "unknown"}</dd>
+          <div className="border-2 border-line bg-ink-2 px-4 py-3">
+            <dt className="text-[11px] uppercase tracking-[0.24em] text-stone">Blink VPN</dt>
+            <dd className="mt-1 font-mono text-sm text-bone">{readiness?.app_version ?? "unknown"}</dd>
           </div>
-          <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3">
-            <dt className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">WireGuard</dt>
-            <dd className="mt-1 font-mono text-sm text-[var(--on-surface)]">{readiness?.version ?? "not detected"}</dd>
+          <div className="border-2 border-line bg-ink-2 px-4 py-3">
+            <dt className="text-[11px] uppercase tracking-[0.24em] text-stone">WireGuard</dt>
+            <dd className="mt-1 font-mono text-sm text-bone">{readiness?.version ?? "not detected"}</dd>
           </div>
         </dl>
         {/* Names where the credential actually lives, which is the fact that lets someone go and
             revoke it. "Encrypted at rest" was true only by delegation and only on Windows. */}
-        <p className="mt-4 text-xs leading-5 text-[var(--on-surface-variant)]">
+        <p className="mt-4 text-xs leading-5 text-stone">
           API keys are held in Windows Credential Manager under <span className="font-mono">app.blink.vpn</span>,
           never in this app&apos;s database. They are used only for calls to your provider from this
           device, and are stripped from diagnostics exports.
@@ -281,7 +282,7 @@ export function SettingsView({
           busyAction={busyAction}
         />
       ) : null}
-    </PageChrome>
+    </>
   );
 }
 
@@ -361,12 +362,12 @@ function RowMenu({
         aria-expanded={open}
         aria-haspopup="menu"
         onClick={onToggle}
-        className="rounded-lg px-2 py-2 text-[var(--on-surface-variant)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)] hover:text-[var(--on-surface)]"
+        className="px-2 py-2 text-stone transition-colors hover:bg-panel-2 hover:text-bone"
       >
         <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true"><path d="M6 12h.01M12 12h.01M18 12h.01" className="fill-none stroke-current stroke-[2.5]" strokeLinecap="round" /></svg>
       </button>
       {open ? (
-        <div role="menu" className="absolute right-0 top-full z-20 mt-1 w-[260px] overflow-hidden rounded-xl border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(26,30,38,0.99),rgba(16,19,27,0.99))] py-1 shadow-[0_20px_60px_rgba(0,0,0,0.45)]">
+        <div role="menu" className="absolute right-0 top-full z-20 mt-1 w-[260px] overflow-hidden border-2 border-line bg-panel py-1 shadow-hard">
           {actions.map((action) => (
             <button
               key={action.id}
@@ -376,7 +377,7 @@ function RowMenu({
               // The reason lives here rather than as a permanent line of prose in every row.
               title={action.disabledReason ?? undefined}
               onClick={() => onSelect(action.id)}
-              className={`block w-full px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${action.danger ? "text-[#ff9b9b] hover:bg-[color:rgba(255,155,155,0.08)]" : "text-[var(--on-surface)] hover:bg-[color:rgba(255,255,255,0.06)]"}`}
+              className={`block w-full px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${action.danger ? "text-alert hover:bg-alert-ink" : "text-bone hover:bg-panel-2"}`}
             >
               {action.label}
             </button>
@@ -427,9 +428,9 @@ function WireGuardSettingsCard({
             onChange={(event) => { setDns(event.target.value); setDirty(true); setSaved(false); }}
             placeholder="1.1.1.1"
             spellCheck={false}
-            className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 font-mono text-[var(--on-surface)] outline-none"
+            className="w-full border-2 border-line bg-ink px-3 py-2.5 font-mono text-bone outline-none"
           />
-          <p className={`mt-1 text-xs ${dnsValidation.valid ? "text-[var(--on-surface-variant)]" : "text-[#ff9b9b]"}`}>
+          <p className={`mt-1 text-xs ${dnsValidation.valid ? "text-stone" : "text-alert"}`}>
             {dnsValidation.valid
               ? (dns.trim() === "" ? "Empty uses your system DNS, which can leak lookups outside the tunnel." : "Resolver used while connected.")
               : dnsValidation.message}
@@ -442,9 +443,9 @@ function WireGuardSettingsCard({
             onChange={(event) => { setKeepalive(event.target.value); setDirty(true); setSaved(false); }}
             inputMode="numeric"
             placeholder="25"
-            className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 font-mono text-[var(--on-surface)] outline-none"
+            className="w-full border-2 border-line bg-ink px-3 py-2.5 font-mono text-bone outline-none"
           />
-          <p className={`mt-1 text-xs ${keepaliveValidation.valid ? "text-[var(--on-surface-variant)]" : "text-[#ff9b9b]"}`}>
+          <p className={`mt-1 text-xs ${keepaliveValidation.valid ? "text-stone" : "text-alert"}`}>
             {keepaliveValidation.valid ? describeKeepalive(Number(keepalive || 0)) : keepaliveValidation.message}
           </p>
         </Field>
@@ -453,7 +454,7 @@ function WireGuardSettingsCard({
       <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
         {saved && tunnelConnected && onReconnect ? (
           <>
-            <span className="mr-auto text-xs text-[var(--tertiary)]">Reconnect for these to take effect.</span>
+            <span className="mr-auto text-xs text-ember">Reconnect for these to take effect.</span>
             <Button
               tone="ghost"
               onClick={() => void onReconnect()}
@@ -522,7 +523,7 @@ function MobileDevicesSettingsCard({
       description="New servers come with these devices already set up, with QR codes ready on the dashboard. Servers you already have keep their current devices."
     >
       {names.length === 0 ? (
-        <p className="text-sm text-[var(--on-surface-variant)]">
+        <p className="text-sm text-stone">
           No devices saved. Add the phones and tablets you use with the WireGuard app.
         </p>
       ) : (
@@ -535,7 +536,7 @@ function MobileDevicesSettingsCard({
                 placeholder="Pixel 9"
                 aria-label={`Device ${index + 1} name`}
                 onChange={(event) => update(names.map((current, at) => (at === index ? event.target.value : current)))}
-                className="w-full max-w-sm rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2 text-sm text-[var(--on-surface)] outline-none"
+                className="w-full max-w-sm border-2 border-line bg-ink px-3 py-2 text-sm text-bone outline-none"
               />
               <Button
                 tone="ghost"
@@ -550,12 +551,12 @@ function MobileDevicesSettingsCard({
       )}
 
       {!validation.valid ? (
-        <p className="mt-2 text-xs text-[#ff9b9b]">{validation.message}</p>
+        <p className="mt-2 text-xs text-alert">{validation.message}</p>
       ) : null}
 
       <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
         {saved ? (
-          <span className="mr-auto text-xs text-[var(--on-surface-variant)]">
+          <span className="mr-auto text-xs text-stone">
             Saved. Your next server will include these devices.
           </span>
         ) : null}
@@ -634,10 +635,10 @@ function KeyModal({
   return (
     <Modal onClose={onClose} labelledBy="credential-modal-title">
       <>
-        <h2 id="credential-modal-title" className="text-xl font-semibold tracking-tight text-[var(--on-surface)]">
+        <h2 id="credential-modal-title" className="text-xl font-semibold tracking-tight text-bone">
           {provider.token_ref ? `Replace ${provider.name} key` : `Add ${provider.name} key`}
         </h2>
-        <p className="mt-1 text-sm text-[var(--on-surface-variant)]">
+        <p className="mt-1 text-sm text-stone">
           Saved to Windows Credential Manager and checked against the provider straight away.
         </p>
 
@@ -650,7 +651,7 @@ function KeyModal({
                 value={provider.id}
                 onChange={(event) => onChangeProvider(event.target.value)}
                 disabled={busy}
-                className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none"
+                className="w-full border-2 border-line bg-ink px-3 py-2.5 text-bone outline-none"
               >
                 {providers.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
               </select>
@@ -658,9 +659,9 @@ function KeyModal({
           ) : null}
 
           {fieldsError ? (
-            <p className="text-sm text-[var(--error)]">{fieldsError}</p>
+            <p className="text-sm text-alert">{fieldsError}</p>
           ) : fields === null ? (
-            <p className="text-sm text-[var(--on-surface-variant)]">Loading credential fields…</p>
+            <p className="text-sm text-stone">Loading credential fields…</p>
           ) : (
             fields.map((field) => {
               const reveal = revealed[field.key] ?? false;
@@ -679,7 +680,7 @@ function KeyModal({
                       autoComplete="off"
                       spellCheck={false}
                       disabled={busy}
-                      className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 font-mono text-[var(--on-surface)] outline-none"
+                      className="w-full border-2 border-line bg-ink px-3 py-2.5 font-mono text-bone outline-none"
                     />
                     {field.secret ? (
                       <Button
@@ -692,7 +693,7 @@ function KeyModal({
                     ) : null}
                   </div>
                   {field.help ? (
-                    <p className="mt-1 text-xs text-[var(--on-surface-variant)]">{field.help}</p>
+                    <p className="mt-1 text-xs text-stone">{field.help}</p>
                   ) : null}
                 </Field>
               );

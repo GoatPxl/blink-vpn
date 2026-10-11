@@ -30,7 +30,7 @@ npm run backend:test:docker:real
 Manual verification:
 
 - Save and validate provider token.
-- Create node and wait for ready state.
+- Build a server from the Map and wait for it to connect by itself.
 - Create, connect, and disconnect tunnel.
 - Destroy node and verify cleanup behavior.
 - Export diagnostics and confirm redaction.

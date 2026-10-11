@@ -1555,21 +1555,68 @@ pub async fn reveal_app_location(key: String, app: AppHandle) -> Result<(), Comm
 #[tauri::command]
 pub async fn open_wireguard_install_page() -> Result<(), CommandError> {
   run_blocking(move || {
-  if !cfg!(target_os = "windows") {
-    return Err(CommandError::dependency(
-      "WireGuard install shortcut is supported on Windows only.",
+    open_in_browser(
+      "https://www.wireguard.com/install/",
       "Install WireGuard manually from wireguard.com/install.",
-    ));
+    )
+  })
+  .await
+}
+
+/// Opens the page where a provider issues the credential Blink needs.
+///
+/// Takes a provider id, never a URL: the address comes from the adapter's own declaration, so the
+/// webview cannot use this to open anything else.
+#[tauri::command]
+pub async fn open_provider_token_page(
+  provider_id: String,
+  backend: State<'_, Backend>,
+) -> Result<(), CommandError> {
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+    let fields = backend
+      .provider
+      .credential_fields_for_provider(&backend.db, &provider_id)
+      .map_err(CommandError::from)?;
+    let url = fields
+      .iter()
+      .find_map(|field| field.token_page_url.clone())
+      .ok_or_else(|| {
+        CommandError::invalid_input(
+          "This provider has no single page that issues keys.",
+          "Create the credential in your cloud's console, then paste it here.",
+        )
+      })?;
+    open_in_browser(&url, "Open your provider's console in a browser and create the key there.")
+  })
+  .await
+}
+
+/// Plain https with none of the characters `cmd` treats specially.
+fn is_safe_browser_url(url: &str) -> bool {
+  url.starts_with("https://")
+    && url.len() > "https://".len()
+    && !url.chars().any(|c| c.is_whitespace() || matches!(c, '&' | '|' | '^' | '<' | '>' | '"' | '%' | '(' | ')'))
+}
+
+/// Opens an https URL in the default browser.
+///
+/// `cmd /C start` is a shell, so the URL is refused unless it is plain https with no characters
+/// cmd treats specially. Every caller passes a constant from this codebase; the check is so that
+/// stays the only way it can be used.
+fn open_in_browser(url: &str, fallback: &str) -> Result<(), CommandError> {
+  if !cfg!(target_os = "windows") {
+    return Err(CommandError::dependency("Opening a browser is supported on Windows only.", fallback));
+  }
+  if !is_safe_browser_url(url) {
+    return Err(CommandError::invalid_input("That address cannot be opened safely.", fallback));
   }
 
   no_window_command("cmd")
-    .args(["/C", "start", "", "https://www.wireguard.com/install/"])
+    .args(["/C", "start", "", url])
     .spawn()
-    .map_err(|error| format!("Could not open WireGuard install page: {error}"))?;
-
+    .map_err(|error| CommandError::dependency(format!("Could not open the browser: {error}"), fallback))?;
   Ok(())
-  })
-  .await
 }
 
 #[tauri::command]
@@ -1680,6 +1727,25 @@ if (-not $service) {
 
 #[cfg(test)]
 mod tests {
+
+  #[test]
+  fn browser_urls_must_be_plain_https() {
+    use super::is_safe_browser_url;
+    assert!(is_safe_browser_url("https://cloud.linode.com/profile/tokens"));
+    assert!(is_safe_browser_url("https://console.aws.amazon.com/iam/home#/security_credentials"));
+    for refused in [
+      "http://example.com",
+      "https://",
+      "file:///C:/Windows",
+      "https://example.com/&calc",
+      "https://example.com/|calc",
+      "https://example.com/ x",
+      "https://example.com/%PATH%",
+    ] {
+      assert!(!is_safe_browser_url(refused), "{refused} must be refused");
+    }
+  }
+
   use super::{
     clear_provider_credential, ensure_builtin_providers, resolve_app_location, CommandErrorKind,
     APP_LOCATION_KEYS,

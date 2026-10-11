@@ -683,6 +683,8 @@ impl super::ProviderAdapter for DockerProviderAdapter {
       placeholder: "dkr_v1_...".to_string(),
       secret: true,
       help: Some("Local-only placeholder for the Docker development provider.".to_string()),
+      token_page_url: None,
+      scope_hint: None,
     }]
   }
 

@@ -11,12 +11,12 @@
 
 ### Provision
 
-1. Register token in Setup.
-2. Validate token.
-3. Select provider, region, and plan.
-4. Create node. A progress card in the corner follows it to `ready`; the percentage is an estimate
-   from typical durations, and the line beneath it names the real stage. On success the app returns
-   to the server list.
+1. Add a key — in onboarding on first run, or in Setup. Saving it also validates it.
+2. Pick a city on the Map (or take onboarding's suggestion), choose a size in the sheet, and Build.
+3. Home shows the build: a clock against ~2:00 and a block bar. The percentage is an estimate from
+   typical durations; the line beneath it names the real stage. With "Connect when a new server is
+   ready" on (the default) it connects by itself — one UAC prompt — and HOLD ON follows the
+   handshake.
 
 ### Connect
 

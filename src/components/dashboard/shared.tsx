@@ -654,9 +654,6 @@ export function PageHeader({ title, subtitle, action }: { title: string; subtitl
   );
 }
 
-export function PageChrome({ children }: { children: ReactNode }) {
-  return <div className="space-y-6">{children}</div>;
-}
 
 export function getNodePricingDisplay(node: VpnNodeRecord, pricingByRegion: Record<string, ProviderPlanPricing[]>) {
   const regionPlans = pricingByRegion[node.region] ?? [];

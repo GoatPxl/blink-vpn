@@ -285,6 +285,19 @@ noted.
 No frontend change is required. The credential form, provider picker, region list and pricing table
 are all driven by what the adapter reports.
 
+## Onboarding
+
+First run is three steps: key, build, connect. WireGuard readiness is checked on arrival and becomes
+a screen only when it fails. The key form renders the adapter's declared fields; "Open key page"
+asks the backend to open the adapter's `token_page_url` (`open_provider_token_page` — the webview
+never supplies the address), and "Paste" reads the clipboard only when clicked. Saving validates.
+A verified key earns a suggested first region (`suggest-region.ts`, from the time zone).
+
+"Build it & connect" does not provision from the wizard. It navigates to Home with the request in
+the URL, and `BuildHandoff` in the dashboard layout starts the same build the Map's sheet starts, so
+there is one build path and one build screen. The wizard keeps no state of its own: whether a key
+exists is the backend's answer, so nothing is mirrored into browser storage.
+
 ## Map and Move
 
 The Map draws a 72×36 dot world (`src/lib/map/land-mask.ts`, rasterised once from Natural Earth

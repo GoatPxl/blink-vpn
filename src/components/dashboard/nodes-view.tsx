@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 
-import { Button, Panel, Field, Modal, PageChrome, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type TunnelRecord, type VpnNodeRecord, type PlanDisplayModel, type HealthPanelData } from "./shared";
+import { Button, Panel, Field, Modal, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type TunnelRecord, type VpnNodeRecord, type PlanDisplayModel, type HealthPanelData } from "./shared";
 import { formatCreatedTime, formatCurrency, formatMemory, getNodePricingDisplay } from "./shared";
 import { DeviceSlots } from "./device-slots";
 import type { NodePeerRecord, PeerConfigPayload } from "@/lib/tauri";
@@ -16,20 +16,20 @@ import {
 
 /** One treatment per state, so a powered-on server no longer looks identical to a connected one. */
 const NODE_STATUS_CLASSES: Record<NodeStatus, string> = {
-  connected: "border-[color:rgba(78,222,163,0.35)] bg-[color:rgba(78,222,163,0.12)] text-[var(--secondary)]",
+  connected: "border-lime bg-panel-2 text-lime",
   // Amber, and deliberately not the green used for `connected`: during this state the user has no
   // internet, so it must not be mistaken at a glance for a working tunnel.
-  connecting: "border-[color:rgba(255,185,95,0.35)] bg-[color:rgba(255,185,95,0.12)] text-[var(--tertiary)]",
-  current: "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)] text-[var(--primary)]",
-  ready: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.04)] text-[var(--on-surface-variant)]",
-  provisioning: "border-[color:rgba(171,199,255,0.25)] bg-[color:rgba(171,199,255,0.07)] text-[var(--on-surface-variant)]",
-  unavailable: "border-[color:rgba(255,185,95,0.3)] bg-[color:rgba(255,185,95,0.1)] text-[var(--tertiary)]",
-  error: "border-[color:rgba(255,155,155,0.35)] bg-[color:rgba(255,155,155,0.1)] text-[#ff9b9b]",
+  connecting: "border-ember bg-ember-ink text-ember",
+  current: "border-lime bg-panel-2 text-lime",
+  ready: "border-line bg-panel-2 text-stone",
+  provisioning: "border-lime bg-panel-2 text-stone",
+  unavailable: "border-ember bg-ember-ink text-ember",
+  error: "border-alert bg-alert-ink text-alert",
 };
 
 function StatusPill({ status }: { status: NodeStatus }) {
   return (
-    <span className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${NODE_STATUS_CLASSES[status]}`}>
+    <span className={`inline-flex  border-2 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${NODE_STATUS_CLASSES[status]}`}>
       {NODE_STATUS_LABEL[status]}
     </span>
   );
@@ -124,7 +124,7 @@ export function NodesView({
   );
 
   return (
-    <PageChrome>
+    <div className="flex flex-col gap-5">
       <div className="space-y-4">
         {/* The page header above already names this screen; a second identical title was the
             "Node Management" repeated twice in the original layout. */}
@@ -133,21 +133,21 @@ export function NodesView({
           description="Existing node records stay visible even if the provider key becomes invalid."
           action={<Button tone="ghost" onClick={onNavigateToCreate} disabled={busyAction !== null}>Pick a city</Button>}
         >
-          <div className="flex flex-col gap-3 border-b border-[color:var(--outline-variant)] pb-4 md:flex-row md:items-end">
+          <div className="flex flex-col gap-3 border-b-2 border-line pb-4 md:flex-row md:items-end">
             <Field label="Status">
-              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as NodeStatus | "all")} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 md:min-w-[170px]">
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as NodeStatus | "all")} className="w-full border-2 border-line bg-ink px-3 py-2.5 text-bone outline-none ring-0 md:min-w-[170px]">
                 <option value="all">All statuses</option>
                 {statusOptions.map((status) => <option key={status} value={status}>{NODE_STATUS_LABEL[status]}</option>)}
               </select>
             </Field>
             <Field label="Location">
-              <select value={regionFilter} onChange={(event) => setRegionFilter(event.target.value)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 md:min-w-[200px]">
+              <select value={regionFilter} onChange={(event) => setRegionFilter(event.target.value)} className="w-full border-2 border-line bg-ink px-3 py-2.5 text-bone outline-none ring-0 md:min-w-[200px]">
                 <option value="all">All locations</option>
                 {regionOptions.map((region) => <option key={region.slug} value={region.slug}>{region.label}</option>)}
               </select>
             </Field>
             <Field label="Sort">
-              <select value={sort} onChange={(event) => setSort(event.target.value as NodeSortOrder)} className="w-full rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2.5 text-[var(--on-surface)] outline-none ring-0 md:min-w-[170px]">
+              <select value={sort} onChange={(event) => setSort(event.target.value as NodeSortOrder)} className="w-full border-2 border-line bg-ink px-3 py-2.5 text-bone outline-none ring-0 md:min-w-[170px]">
                 <option value="location">Location A–Z</option>
                 <option value="newest">Newest first</option>
                 <option value="oldest">Oldest first</option>
@@ -156,19 +156,19 @@ export function NodesView({
           </div>
 
           {nodes.length === 0 ? (
-            <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-6 text-sm text-[var(--on-surface-variant)]">
+            <div className="border-2 border-dashed border-line bg-ink-2 p-6 text-sm text-stone">
               {providerAccessState === "ready"
                 ? "No servers yet. Pick a city on the map to build your first one."
                 : "No nodes yet. Save and validate the selected provider token in Setup before creating your first node."}
             </div>
           ) : rows.length === 0 ? (
-            <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-6 text-sm text-[var(--on-surface-variant)]">
+            <div className="border-2 border-dashed border-line bg-ink-2 p-6 text-sm text-stone">
               No servers match these filters.
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full text-left text-sm">
-                <thead className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">
+                <thead className="text-[11px] uppercase tracking-[0.24em] text-stone">
                   <tr>
                     <th className="px-4 py-3">Location</th>
                     <th className="px-4 py-3">Status</th>
@@ -198,22 +198,22 @@ export function NodesView({
                         // name, so text matching is not a reliable way to find a specific server.
                         data-node-id={node.id}
                         onClick={() => onOpenNodeDetails(node.id)}
-                        className={`cursor-pointer border-t border-[color:var(--outline-variant)] transition-colors hover:bg-[color:rgba(255,255,255,0.03)] ${selectedNodeId === node.id && isDetailsModalOpen ? "bg-[color:rgba(171,199,255,0.08)]" : "bg-transparent"}`}
+                        className={`cursor-pointer border-t-2 border-line transition-colors hover:bg-panel-2 ${selectedNodeId === node.id && isDetailsModalOpen ? "bg-panel-2" : "bg-transparent"}`}
                       >
                         <td className="px-4 py-4 align-middle">
                           <div className="flex items-center gap-3">
                             {location.countryCode ? <span className="shrink-0 border-2 border-line-3 px-1.5 font-mono text-[11.5px] text-stone">{location.countryCode}</span> : null}
                             <div>
-                              <div className={`font-medium ${location.unresolved ? "font-mono text-[13px] text-[var(--on-surface-variant)]" : "text-[var(--on-surface)]"}`}>{location.primary}</div>
-                              {location.secondary ? <div className="mt-0.5 text-xs text-[var(--on-surface-variant)]">{location.secondary}</div> : null}
+                              <div className={`font-medium ${location.unresolved ? "font-mono text-[13px] text-stone" : "text-bone"}`}>{location.primary}</div>
+                              {location.secondary ? <div className="mt-0.5 text-xs text-stone">{location.secondary}</div> : null}
                               {/* Location leads the row, so same-city servers would otherwise be indistinguishable. */}
-                              {duplicatedRegionSlugs.has(node.region) ? <div className="mt-0.5 text-xs text-[var(--on-surface-variant)]">{node.name}</div> : null}
+                              {duplicatedRegionSlugs.has(node.region) ? <div className="mt-0.5 text-xs text-stone">{node.name}</div> : null}
                             </div>
                           </div>
                         </td>
                         <td className="px-4 py-4 align-middle"><StatusPill status={status} /></td>
-                        <td className="px-4 py-4 align-middle text-[var(--on-surface)]">
-                          {monthly === null || monthly === undefined ? "n/a" : <>{formatCurrency(monthly)}<span className="text-[var(--on-surface-variant)]">/mo</span></>}
+                        <td className="px-4 py-4 align-middle text-bone">
+                          {monthly === null || monthly === undefined ? "n/a" : <>{formatCurrency(monthly)}<span className="text-stone">/mo</span></>}
                         </td>
                         <td className="px-4 py-4 align-middle" onClick={(event) => event.stopPropagation()}>
                           <div className="flex items-center justify-end gap-2">
@@ -252,7 +252,7 @@ export function NodesView({
                               onClick={() => onOpenNodeDetails(node.id)}
                               aria-label={`Details for ${node.name}`}
                               title="Details"
-                              className="rounded-lg px-2 py-2 text-[var(--on-surface-variant)] transition-colors hover:bg-[color:rgba(255,255,255,0.06)] hover:text-[var(--on-surface)]"
+                              className="px-2 py-2 text-stone transition-colors hover:bg-panel-2 hover:text-bone"
                             >
                               <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true"><path d="M6 12h.01M12 12h.01M18 12h.01" className="fill-none stroke-current stroke-[2.5]" strokeLinecap="round" /></svg>
                             </button>
@@ -289,15 +289,15 @@ export function NodesView({
           onForceCleanup={onForceCleanupSelectedNode}
         />
       ) : null}
-    </PageChrome>
+    </div>
   );
 }
 
 function DetailRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-3">
-      <dt className="text-[var(--on-surface-variant)]">{label}</dt>
-      <dd className={`max-w-[220px] truncate text-right text-[var(--on-surface)] ${mono ? "font-mono text-[12px]" : ""}`} title={value}>{value}</dd>
+      <dt className="text-stone">{label}</dt>
+      <dd className={`max-w-[220px] truncate text-right text-bone ${mono ? "font-mono text-[12px]" : ""}`} title={value}>{value}</dd>
     </div>
   );
 }
@@ -354,8 +354,8 @@ function NodeDetailsDrawer({
       <>
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-xs uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Server</p>
-            <h2 id="node-details-title" className="mt-2 text-2xl font-semibold tracking-tight text-[var(--on-surface)]">{node.name}</h2>
+            <p className="text-xs uppercase tracking-[0.24em] text-stone">Server</p>
+            <h2 id="node-details-title" className="mt-2 text-2xl font-semibold tracking-tight text-bone">{node.name}</h2>
           </div>
           <Button tone="ghost" onClick={onClose} className="px-3 py-2 text-xs">Close</Button>
         </div>
@@ -367,14 +367,14 @@ function NodeDetailsDrawer({
             </Button>
           </div>
         ) : (
-          <p className="mt-5 rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[color:rgba(171,199,255,0.08)] px-3 py-2 text-xs text-[var(--primary)]">
+          <p className="mt-5 border-2 border-lime bg-panel-2 px-3 py-2 text-xs text-lime">
             This is your current server.
           </p>
         )}
 
         <div className="mt-6 space-y-4">
-          <section className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-            <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Connection</div>
+          <section className="border-2 border-line bg-ink-2 p-4">
+            <div className="text-[11px] uppercase tracking-[0.24em] text-stone">Connection</div>
             <dl className="mt-3 space-y-2 text-sm">
               <DetailRow label="Status" value={health?.tunnel_status ?? node.lifecycle_status} />
               <DetailRow label="Public IP" value={node.public_ipv4 ?? "pending"} mono />
@@ -383,8 +383,8 @@ function NodeDetailsDrawer({
             </dl>
           </section>
 
-          <section className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-            <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Server</div>
+          <section className="border-2 border-line bg-ink-2 p-4">
+            <div className="text-[11px] uppercase tracking-[0.24em] text-stone">Server</div>
             <dl className="mt-3 space-y-2 text-sm">
               <DetailRow label="Provider" value={providerName} />
               <DetailRow label="Region" value={node.region} mono />
@@ -401,8 +401,8 @@ function NodeDetailsDrawer({
             </dl>
           </section>
 
-          <section className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4">
-            <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Cost</div>
+          <section className="border-2 border-line bg-ink-2 p-4">
+            <div className="text-[11px] uppercase tracking-[0.24em] text-stone">Cost</div>
             <dl className="mt-3 space-y-2 text-sm">
               <DetailRow label="Monthly" value={formatCurrency(node.price_monthly_usd ?? pricing?.monthlyUsd)} />
               <DetailRow label="Hourly" value={formatCurrency(node.price_hourly_usd ?? pricing?.hourlyUsd, 5)} />
@@ -411,8 +411,8 @@ function NodeDetailsDrawer({
             </dl>
           </section>
 
-          <section className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm text-[var(--on-surface-variant)]">
-            <div className="font-medium text-[var(--on-surface)]">Next step</div>
+          <section className="border-2 border-line bg-ink-2 p-4 text-sm text-stone">
+            <div className="font-medium text-bone">Next step</div>
             <div className="mt-1">{actionMessage}</div>
           </section>
 
@@ -428,9 +428,9 @@ function NodeDetailsDrawer({
 
           {/* Separated because both actions delete a paid server. "Uninstall Host" used to sit in
               every row, coloured red, one click from destroying a server the user is billed for. */}
-          <section className="rounded-[18px] border border-[color:rgba(255,155,155,0.25)] bg-[color:rgba(255,155,155,0.05)] p-4">
-            <div className="text-[11px] uppercase tracking-[0.24em] text-[#ff9b9b]">Danger zone</div>
-            <p className="mt-2 text-xs text-[var(--on-surface-variant)]">
+          <section className="border-2 border-alert bg-alert-ink p-4">
+            <div className="text-[11px] uppercase tracking-[0.24em] text-alert">Danger zone</div>
+            <p className="mt-2 text-xs text-stone">
               Turning off deletes the server at {providerName} and stops its billing. Its location stays
               saved, so you can turn it back on from Saved locations; phones will need to scan their new
               codes.

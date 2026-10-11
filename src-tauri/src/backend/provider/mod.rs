@@ -210,6 +210,12 @@ pub struct CredentialField {
   /// the secret access key is.
   pub secret: bool,
   pub help: Option<String>,
+  /// Where the provider's console issues this credential, so onboarding can open it in one click.
+  /// Set on a provider's first field only. Opened by the backend, never handed to the webview to
+  /// open, so the page can never be pointed anywhere else.
+  pub token_page_url: Option<String>,
+  /// What to tick on that page, in one line: "Linodes: Read/Write."
+  pub scope_hint: Option<String>,
 }
 
 /// Where a region physically is, in provider-neutral terms.
@@ -411,6 +417,8 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
       placeholder: "dop_v1_...".to_string(),
       secret: true,
       help: Some("Needs read and write access to Droplets.".to_string()),
+      token_page_url: Some("https://cloud.digitalocean.com/account/api/tokens".to_string()),
+      scope_hint: Some("Full Access, or a custom token that can create, read and delete Droplets and tags.".to_string()),
     }]
   }
 
@@ -820,6 +828,8 @@ impl ProviderAdapter for LinodeProviderAdapter {
       placeholder: "linode_...".to_string(),
       secret: true,
       help: Some("Needs read/write access to Linodes.".to_string()),
+      token_page_url: Some("https://cloud.linode.com/profile/tokens".to_string()),
+      scope_hint: Some("Linodes: Read/Write.".to_string()),
     }]
   }
 
@@ -1329,6 +1339,8 @@ impl ProviderAdapter for OpenStackProviderAdapter {
         // Names which cloud is in use — a diagnostic, not a secret.
         secret: false,
         help: Some("The identity endpoint for your cloud, ending in /v3.".to_string()),
+        token_page_url: None,
+        scope_hint: None,
       },
       CredentialField {
         key: OPENSTACK_CREDENTIAL_ID_KEY.to_string(),
@@ -1339,6 +1351,8 @@ impl ProviderAdapter for OpenStackProviderAdapter {
           "Create an application credential in your cloud's dashboard rather than using your own password — it is scoped and can be revoked on its own."
             .to_string(),
         ),
+        token_page_url: None,
+        scope_hint: None,
       },
       CredentialField {
         key: OPENSTACK_CREDENTIAL_SECRET_KEY.to_string(),
@@ -1346,6 +1360,8 @@ impl ProviderAdapter for OpenStackProviderAdapter {
         placeholder: String::new(),
         secret: true,
         help: Some("Shown once when the credential is created.".to_string()),
+        token_page_url: None,
+        scope_hint: None,
       },
     ]
   }
@@ -2032,6 +2048,8 @@ impl ProviderAdapter for GceProviderAdapter {
         "Paste the whole JSON key file for a service account with the Compute Admin role. The project is read from the file. The project needs billing enabled and the Compute Engine API turned on."
           .to_string(),
       ),
+      token_page_url: Some("https://console.cloud.google.com/iam-admin/serviceaccounts".to_string()),
+      scope_hint: Some("A JSON key for a service account with the Compute Admin role.".to_string()),
     }]
   }
 
@@ -2664,6 +2682,8 @@ impl ProviderAdapter for Ec2ProviderAdapter {
           "An IAM user key with EC2 instance, security group, SSM parameter and STS identity permissions."
             .to_string(),
         ),
+        token_page_url: Some("https://console.aws.amazon.com/iam/home#/security_credentials".to_string()),
+        scope_hint: Some("An access key for an IAM user that can manage EC2 instances, security groups and Elastic IPs.".to_string()),
       },
       CredentialField {
         key: "secret_access_key".to_string(),
@@ -2671,6 +2691,8 @@ impl ProviderAdapter for Ec2ProviderAdapter {
         placeholder: "wJalrXUtnFEMI/...".to_string(),
         secret: true,
         help: Some("Shown only once by AWS when the key is created.".to_string()),
+        token_page_url: None,
+        scope_hint: None,
       },
     ]
   }
@@ -3809,6 +3831,37 @@ impl ProviderRegistry {
 
 #[cfg(test)]
 mod tests {
+
+  #[test]
+  fn token_pages_are_https_and_set_once_per_provider() {
+    use super::{
+      CredentialField, DigitalOceanProviderAdapter, Ec2ProviderAdapter, GceProviderAdapter, LinodeProviderAdapter,
+      OpenStackProviderAdapter, ProviderAdapter,
+    };
+    let adapters: Vec<(&str, Vec<CredentialField>, bool)> = vec![
+      (
+        "digitalocean",
+        DigitalOceanProviderAdapter::new().expect("adapter builds").credential_fields(),
+        true,
+      ),
+      ("linode", LinodeProviderAdapter::new().credential_fields(), true),
+      ("ec2", Ec2ProviderAdapter::new().credential_fields(), true),
+      ("gce", GceProviderAdapter::new().credential_fields(), true),
+      // Every OpenStack cloud has its own console; there is no one page to send anyone to.
+      ("openstack", OpenStackProviderAdapter::new().credential_fields(), false),
+    ];
+    for (name, fields, expects_page) in adapters {
+      let pages: Vec<&String> = fields.iter().filter_map(|field| field.token_page_url.as_ref()).collect();
+      assert_eq!(pages.len(), usize::from(expects_page), "{name}: token page count");
+      for page in pages {
+        assert!(page.starts_with("https://"), "{name}: {page}");
+      }
+      if expects_page {
+        assert!(fields[0].token_page_url.is_some() && fields[0].scope_hint.is_some(), "{name}: on the first field");
+      }
+    }
+  }
+
   use std::path::PathBuf;
   use std::sync::Arc;
   use std::time::{SystemTime, UNIX_EPOCH};
@@ -5828,6 +5881,8 @@ mod tests {
         placeholder: "test_...".to_string(),
         secret: true,
         help: None,
+        token_page_url: None,
+        scope_hint: None,
       }]
     }
 

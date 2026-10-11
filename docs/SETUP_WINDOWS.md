@@ -25,7 +25,7 @@ npm run tauri:dev
 ```
 
 3. Open Settings and register provider credentials.
-5. Validate token, create node, and connect tunnel.
+5. Add a key, build a server from the Map, and let it connect.
 
 ## Docker Adapter Setup
 
@@ -47,7 +47,7 @@ In app:
 1. Select Docker provider.
 2. Save token with `dkr_v1_` or `docker_` prefix.
 3. Run readiness check.
-4. Create node and run tunnel lifecycle actions.
+4. Build a server from the Map and run tunnel lifecycle actions.
 
 ## E2E Validation Setup
 

@@ -121,6 +121,10 @@ export interface CredentialField {
   /** Whether the input should be masked. An AWS access key id is not a secret; its pair is. */
   secret: boolean;
   help: string | null;
+  /** Where the provider issues this credential. Set on a provider's first field only. */
+  token_page_url: string | null;
+  /** What to tick on that page, in one line. */
+  scope_hint: string | null;
 }
 
 /**
@@ -473,6 +477,14 @@ export async function registerProviderCredential(
  */
 export async function listProviderCredentialFields(providerId: string): Promise<CredentialField[]> {
   return invokeCommand<CredentialField[]>("list_provider_credential_fields", { providerId });
+}
+
+/**
+ * Opens the provider's key page in the browser. Takes the provider, not a URL: the backend opens
+ * only the address the adapter declared.
+ */
+export async function openProviderTokenPage(providerId: string): Promise<void> {
+  await invokeCommand<void>("open_provider_token_page", { providerId });
 }
 
 export async function validateProviderToken(providerId: string): Promise<string> {

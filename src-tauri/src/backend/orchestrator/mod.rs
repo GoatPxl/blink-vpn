@@ -3727,6 +3727,8 @@ mod tests {
         placeholder: "token".to_string(),
         secret: true,
         help: None,
+        token_page_url: None,
+        scope_hint: None,
       }]
     }
 

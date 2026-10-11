@@ -117,6 +117,7 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       commands::system::open_wireguard_install_page,
+      commands::system::open_provider_token_page,
       commands::system::install_wireguard_with_prerequisites,
       commands::system::check_wireguard_readiness,
       commands::system::check_docker_readiness,

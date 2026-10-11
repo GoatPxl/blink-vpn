@@ -72,25 +72,6 @@
   --rail-w: 96px;
   --titlebar-h: 36px;
 
-  /*
-   * Transitional aliases: the previous palette's names, pointed at the new one, so views not yet
-   * rewritten for the redesign stay legible. Each is deleted once its last reference is gone; the
-   * branch is not finished while any remain.
-   */
-  --surface-container-lowest: var(--ink);
-  --surface: var(--panel);
-  --surface-container: var(--panel);
-  --surface-container-high: var(--panel-2);
-  --surface-container-highest: var(--panel-2);
-  --outline: var(--stone-2);
-  --outline-variant: var(--line);
-  --on-surface: var(--bone);
-  --on-surface-variant: var(--stone);
-  --primary: var(--lime);
-  --secondary: var(--lime);
-  --tertiary: var(--ember);
-  --danger: var(--alert);
-  --shadow-elevated: none;
 
   color-scheme: dark;
 }

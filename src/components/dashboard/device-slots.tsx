@@ -58,10 +58,10 @@ export function DeviceSlots({
 
   return (
     <section className="mt-6">
-      <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">
+      <div className="text-[11px] uppercase tracking-[0.24em] text-stone">
         Devices
       </div>
-      <p className="mt-2 text-sm text-[var(--on-surface-variant)]">
+      <p className="mt-2 text-sm text-stone">
         Scan a device&apos;s code with the official WireGuard app on a phone or tablet.{" "}
         {free.length} of {deviceSlots.length} slots free.
       </p>
@@ -70,11 +70,11 @@ export function DeviceSlots({
         {claimed.map((peer) => (
           <li
             key={peer.id}
-            className="flex items-center justify-between gap-3 rounded-[14px] border border-[color:var(--outline-variant)] bg-[color:var(--surface-container)] px-3 py-2"
+            className="flex items-center justify-between gap-3 border-2 border-line bg-panel px-3 py-2"
           >
             <div className="min-w-0">
-              <div className="truncate text-sm text-[var(--on-surface)]">{peer.label}</div>
-              <div className="font-mono text-[11px] text-[var(--on-surface-variant)]">
+              <div className="truncate text-sm text-bone">{peer.label}</div>
+              <div className="font-mono text-[11px] text-stone">
                 {peer.client_address_cidr}
               </div>
             </div>
@@ -87,7 +87,7 @@ export function DeviceSlots({
 
       {free.length > 0 ? (
         claimingPeerId ? (
-          <div className="mt-3 rounded-[14px] border border-[color:var(--outline-variant)] bg-[color:var(--surface-container)] p-3">
+          <div className="mt-3 border-2 border-line bg-panel p-3">
             <Field label="Device name">
               <input
                 autoFocus
@@ -95,7 +95,7 @@ export function DeviceSlots({
                 maxLength={40}
                 placeholder="Pixel 9"
                 onChange={(event) => setDraftLabel(event.target.value)}
-                className="w-full rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:var(--surface)] px-3 py-2 text-sm text-[var(--on-surface)]"
+                className="w-full border-2 border-line bg-panel px-3 py-2 text-sm text-bone"
               />
             </Field>
             <div className="mt-3 flex items-center justify-end gap-2">
@@ -133,7 +133,7 @@ export function DeviceSlots({
           </Button>
         )
       ) : (
-        <p className="mt-3 text-xs text-[var(--on-surface-variant)]">
+        <p className="mt-3 text-xs text-stone">
           Every slot on this server is in use. Slots are fixed when a server is created, so another
           device needs a new server.
         </p>
@@ -197,17 +197,17 @@ export function DeviceQrModal({
       <>
         <h2
           id="device-qr-title"
-          className="text-xl font-semibold tracking-tight text-[var(--on-surface)]"
+          className="text-xl font-semibold tracking-tight text-bone"
         >
           {peer.label}
         </h2>
-        <p className="mt-1 text-sm text-[var(--on-surface-variant)]">
+        <p className="mt-1 text-sm text-stone">
           In the official WireGuard app, choose Add tunnel, then Scan from QR code.
         </p>
 
         <div className="mt-5 flex justify-center">
           {loading ? (
-            <div className="flex h-[260px] w-[260px] items-center justify-center rounded-[16px] border border-dashed border-[color:var(--outline-variant)] text-sm text-[var(--on-surface-variant)]">
+            <div className="flex h-[260px] w-[260px] items-center justify-center border-2 border-dashed border-line text-sm text-stone">
               Building code
             </div>
           ) : payload && buildQrPath(payload.qr_modules, payload.qr_size) !== "" ? (
@@ -217,13 +217,13 @@ export function DeviceQrModal({
               className="h-[260px] w-[260px]"
             />
           ) : (
-            <div className="flex h-[260px] w-[260px] items-center justify-center rounded-[16px] border border-dashed border-[color:rgba(255,107,107,0.4)] px-4 text-center text-sm text-[var(--danger)]">
+            <div className="flex h-[260px] w-[260px] items-center justify-center border-2 border-dashed border-alert px-4 text-center text-sm text-alert">
               The code could not be built. Copy or save the configuration instead.
             </div>
           )}
         </div>
 
-        <p className="mt-4 text-xs text-[var(--on-surface-variant)]">
+        <p className="mt-4 text-xs text-stone">
           This code contains the device&apos;s private key, so anyone who scans it can use this
           server. The server is destroyed with the node.
         </p>
@@ -279,7 +279,7 @@ export function QrCode({
       viewBox={`-2 -2 ${payload.qr_size + 4} ${payload.qr_size + 4}`}
       role="img"
       aria-label={label}
-      className={`${className} rounded-[16px] bg-white p-2`}
+      className={`${className}  bg-white p-2`}
       shapeRendering="crispEdges"
     >
       <path d={path} fill="#000000" />
