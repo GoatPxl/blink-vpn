@@ -6,7 +6,6 @@ import {
   describeLocation,
   deriveNodeStatus,
   duplicatedRegions,
-  flagEmoji,
   isConnectable,
   selectNodeRows,
   type NodeRow,
@@ -43,6 +42,8 @@ const SFO: ProviderRegion = {
   country: "United States",
   country_code: "US",
   continent: "North America",
+  latitude: 37.77,
+  longitude: -122.42,
 };
 
 describe("deriveNodeStatus", () => {
@@ -150,7 +151,7 @@ describe("describeLocation", () => {
     const location = describeLocation(SFO, "sfo3");
     assert.equal(location.primary, "San Francisco, California");
     assert.equal(location.secondary, "United States");
-    assert.equal(location.flag, "🇺🇸");
+    assert.equal(location.countryCode, "US");
     assert.equal(location.unresolved, false);
   });
 
@@ -165,7 +166,7 @@ describe("describeLocation", () => {
     const location = describeLocation({ ...SFO, slug: "mars1", city: null, area: null, country: null, country_code: null }, "mars1");
     assert.equal(location.primary, "mars1");
     assert.equal(location.secondary, null);
-    assert.equal(location.flag, null);
+    assert.equal(location.countryCode, null);
     assert.equal(location.unresolved, true);
   });
 
@@ -175,19 +176,6 @@ describe("describeLocation", () => {
   });
 });
 
-describe("flagEmoji", () => {
-  it("maps ISO codes to regional-indicator pairs", () => {
-    assert.equal(flagEmoji("US"), "🇺🇸");
-    assert.equal(flagEmoji("de"), "🇩🇪");
-  });
-
-  it("rejects anything that is not a two-letter code", () => {
-    assert.equal(flagEmoji(null), null);
-    assert.equal(flagEmoji("USA"), null);
-    assert.equal(flagEmoji("1"), null);
-    assert.equal(flagEmoji("12"), null);
-  });
-});
 
 describe("selectNodeRows", () => {
   function row(overrides: Partial<VpnNodeRecord>, status: NodeRow["status"]): NodeRow {
@@ -238,7 +226,7 @@ describe("selectNodeRows", () => {
 describe("buildRegionOptions", () => {
   const sfo2: ProviderRegion = { ...SFO, slug: "sfo2" };
   const fra1: ProviderRegion = {
-    slug: "fra1", city: "Frankfurt", area: null, country: "Germany", country_code: "DE", continent: "Europe",
+    slug: "fra1", city: "Frankfurt", area: null, country: "Germany", country_code: "DE", continent: "Europe", latitude: 50.11, longitude: 8.68,
   };
 
   // Providers run several datacentres in one metro, which collapse to an identical label and

@@ -71,9 +71,6 @@ export type RecoveryState = {
 
 export const DEFAULT_PROVIDER_ID = "provider-1";
 export const DEFAULT_PROVIDER_NAME = "DigitalOcean";
-/** The server form, until the Move sheet replaces it. */
-export const NODE_CREATE_ROUTE = "/dashboard/map/create";
-
 export const VIEW_ROUTE: Record<AppView, string> = {
   home: "/dashboard",
   map: "/dashboard/map",
@@ -215,21 +212,6 @@ export function planDisplayFromPricing(plan: ProviderPlanPricing): PlanDisplayMo
   };
 }
 
-export function providerAccessBadge(state: ProviderAccessState): { label: string; classes: string } {
-  if (state === "ready") {
-    return { label: "Ready", classes: "border-lime text-lime" };
-  }
-  if (state === "checking") {
-    return { label: "Checking", classes: "border-ember text-ember" };
-  }
-  if (state === "invalid") {
-    return { label: "Needs attention", classes: "border-alert text-alert" };
-  }
-  if (state === "missing") {
-    return { label: "Missing", classes: "border-line-3 text-stone" };
-  }
-  return { label: "Unknown", classes: "border-line-3 text-stone-2" };
-}
 
 /**
  * The one overlay in this app.

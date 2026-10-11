@@ -78,7 +78,7 @@ describe("formatAgo", () => {
 describe("cityLine", () => {
   it("prefers city and country code, falling back to the slug", () => {
     assert.equal(
-      cityLine({ slug: "sfo2", city: "San Francisco", area: "California", country: "United States", country_code: "US", continent: "North America" }, "sfo2"),
+      cityLine({ slug: "sfo2", city: "San Francisco", area: "California", country: "United States", country_code: "US", continent: "North America", latitude: 37.77, longitude: -122.42 }, "sfo2"),
       "San Francisco, US",
     );
     assert.equal(cityLine(undefined, "regionOne"), "regionOne");

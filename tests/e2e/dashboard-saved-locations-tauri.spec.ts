@@ -28,12 +28,11 @@ test.use({ mode: "cdp" });
 test.describe("Saved locations (real backend)", () => {
   test("a server is saved on ready, turns off, and turns back on", async ({ tauriPage }) => {
     const suffix = Date.now();
-    const nodeId = `node-e2e-loc-${suffix}`;
     const nodeName = `E2E Location ${suffix}`;
 
     await resetNodes(tauriPage);
     await saveDockerCredential(tauriPage);
-    await createDockerNode(tauriPage, nodeId, nodeName);
+    const nodeId = await createDockerNode(tauriPage, nodeName);
 
     const findMine = async () => {
       const locations = await invokeCommand<SavedLocation[]>(tauriPage, "list_saved_locations");

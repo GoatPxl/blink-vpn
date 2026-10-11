@@ -214,3 +214,16 @@ export function validateMobileDevices(names: readonly string[]): SettingsValidat
 
   return { valid: true };
 }
+
+/**
+ * Providers the interface offers. The Docker development provider is a local stand-in and appears
+ * only with the dev flag on; without it there is nothing to configure or build on.
+ */
+export function visibleProviders<T extends Pick<ProviderRecord, "slug">>(providers: readonly T[], dockerDevEnabled: boolean): T[] {
+  return providers.filter((provider) => provider.slug !== "docker" || dockerDevEnabled);
+}
+
+/** A stored, active key whose last check did not fail: Blink can build on this provider now. */
+export function hasUsableKey(provider: Pick<ProviderRecord, "status" | "token_ref" | "last_validation_status">): boolean {
+  return provider.status === "active" && !!provider.token_ref && provider.last_validation_status !== "failed";
+}

@@ -14,6 +14,7 @@ import {
   type VpnNodeRecord,
 } from "./shared";
 import {
+  visibleProviders as filterVisibleProviders,
   PROVIDER_KEY_STATUS_LABEL,
   buildRowActions,
   countAttachedNodes,
@@ -83,7 +84,7 @@ export function SettingsView({
   // Docker's credential is a local dev stand-in; without the flag there is nothing to configure,
   // and offering the row led to a Save button that silently did nothing.
   const visibleProviders = useMemo(
-    () => providers.filter((provider) => provider.slug !== "docker" || dockerDevEnabled),
+    () => filterVisibleProviders(providers, dockerDevEnabled),
     [dockerDevEnabled, providers],
   );
 

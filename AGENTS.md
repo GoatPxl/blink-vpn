@@ -21,7 +21,7 @@ connects to it. Rust backend + Tauri v2 + Next.js frontend + SQLite + Windows Cr
 | Protocol | WireGuard only |
 | Production providers | DigitalOcean, Amazon EC2, Linode, Google Compute Engine, OpenStack (experimental) |
 | Dev provider | Docker, behind feature flags, local emulation only |
-| Workflows | provision, connect, disconnect, destroy (turn off), turn on a saved location, forget, force-cleanup, add device |
+| Workflows | provision, connect, disconnect, destroy (turn off), turn on a saved location, move (build elsewhere, switch, power off the old), forget, force-cleanup, add device |
 
 Multi-provider *architecture* is in scope. Additional provider *implementations* are not, until
 asked for.

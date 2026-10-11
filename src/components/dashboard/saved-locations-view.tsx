@@ -57,7 +57,7 @@ export function SavedLocationsView({
 }
 
 /** The rows themselves, shown in the server list on the map. */
-export function SavedLocationList({
+function SavedLocationList({
   locations,
   busyAction,
   onTurnOn,
@@ -87,7 +87,7 @@ export function SavedLocationList({
             className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3"
           >
             <div className="flex min-w-0 flex-1 items-center gap-3">
-              {place.flag ? <span className="text-[20px] leading-none" aria-hidden="true">{place.flag}</span> : null}
+              {place.countryCode ? <span className="shrink-0 border-2 border-line-3 px-1.5 font-mono text-[11.5px] text-stone">{place.countryCode}</span> : null}
               <div className="min-w-0">
                 <div className="truncate font-medium text-[var(--on-surface)]">
                   {location.name}

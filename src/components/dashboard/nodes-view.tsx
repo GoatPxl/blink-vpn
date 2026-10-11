@@ -131,7 +131,7 @@ export function NodesView({
         <Panel
           title="Fleet"
           description="Existing node records stay visible even if the provider key becomes invalid."
-          action={<Button tone="primary" onClick={onNavigateToCreate} disabled={busyAction !== null}><span className="text-lg leading-none">+</span> Create Node</Button>}
+          action={<Button tone="ghost" onClick={onNavigateToCreate} disabled={busyAction !== null}>Pick a city</Button>}
         >
           <div className="flex flex-col gap-3 border-b border-[color:var(--outline-variant)] pb-4 md:flex-row md:items-end">
             <Field label="Status">
@@ -158,7 +158,7 @@ export function NodesView({
           {nodes.length === 0 ? (
             <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-6 text-sm text-[var(--on-surface-variant)]">
               {providerAccessState === "ready"
-                ? "No nodes have been provisioned yet. Use Create Node to launch your first WireGuard server."
+                ? "No servers yet. Pick a city on the map to build your first one."
                 : "No nodes yet. Save and validate the selected provider token in Setup before creating your first node."}
             </div>
           ) : rows.length === 0 ? (
@@ -202,7 +202,7 @@ export function NodesView({
                       >
                         <td className="px-4 py-4 align-middle">
                           <div className="flex items-center gap-3">
-                            {location.flag ? <span className="text-[20px] leading-none" aria-hidden="true">{location.flag}</span> : null}
+                            {location.countryCode ? <span className="shrink-0 border-2 border-line-3 px-1.5 font-mono text-[11.5px] text-stone">{location.countryCode}</span> : null}
                             <div>
                               <div className={`font-medium ${location.unresolved ? "font-mono text-[13px] text-[var(--on-surface-variant)]" : "text-[var(--on-surface)]"}`}>{location.primary}</div>
                               {location.secondary ? <div className="mt-0.5 text-xs text-[var(--on-surface-variant)]">{location.secondary}</div> : null}

@@ -1,219 +1,138 @@
 "use client";
 
-import { NodesView } from "@/components/dashboard/nodes-view";
-import { SavedLocationsView } from "@/components/dashboard/saved-locations-view";
-import { useDashboard } from "@/components/dashboard/dashboard-provider";
-import { getNodePricingDisplay, NODE_CREATE_ROUTE, PageChrome } from "@/components/dashboard/shared";
-import {
-  NODE_STATUS_ORDER,
-  buildRegionOptions,
-  describeLocation,
-  deriveNodeStatus,
-  duplicatedRegions,
-  selectNodeRows,
-  type NodeRow,
-  type NodeSortOrder,
-  type NodeStatus,
-} from "@/lib/node-display";
-import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
-import { type ProviderPlanPricing } from "@/lib/tauri";
-import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useMemo, useState } from "react";
 
-export default function DashboardNodesPage() {
+import { useDashboard } from "@/components/dashboard/dashboard-provider";
+import { MapView, type MapFilter } from "@/components/dashboard/map-view";
+import { MoveSheet } from "@/components/dashboard/move-sheet";
+import { ServerList } from "@/components/dashboard/server-list";
+import { Button, PageHeader, VIEW_ROUTE } from "@/components/dashboard/shared";
+import { locationKey } from "@/lib/home-display";
+import type { MapRegion } from "@/lib/map/map-regions";
+
+const FILTERS: Array<{ id: MapFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "cheapest", label: "Cheapest" },
+  { id: "visited", label: "Visited" },
+  { id: "favourites", label: "Favourites" },
+];
+
+function MapPage() {
   const router = useRouter();
+  const params = useSearchParams();
   const {
+    activeNode,
+    appPreferences,
     busyAction,
     connectAttempt,
-    currentNodeId,
-    diagnostics,
-    forceCleanupSelectedNode,
-    health,
+    dockerDevEnabled,
+    moveTo,
     nodes,
-    providerAccessState,
-    providerId,
+    operationAttempt,
     providers,
-    selectedNode,
-    selectedNodeId,
-    setSelectedNodeId,
-    setCurrentNode,
-    installHostForNode,
-    connectNode,
-    destroyNode,
-    connectTunnel,
-    disconnectTunnel,
-    forceDisconnectNodeService,
-    tunnelConnected,
-    tunnels,
-    nodePeers,
-    claimDevice,
-    loadDeviceConfig,
-    exportDeviceConfig,
-    copyText,
     savedLocations,
-    turnOnLocation,
-    turnOffLocation,
-    forgetLocation,
+    updateAppPreferences,
   } = useDashboard();
-  const [statusFilter, setStatusFilter] = useState<NodeStatus | "all">("all");
-  const [regionFilter, setRegionFilter] = useState<string>("all");
-  const [sort, setSort] = useState<NodeSortOrder>("location");
-  const [pricingByRegion, setPricingByRegion] = useState<Record<string, ProviderPlanPricing[]>>({});
-  const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
+  const [view, setView] = useState<"map" | "list">("map");
+  const [filter, setFilter] = useState<MapFilter>(params.get("filter") === "cheapest" ? "cheapest" : "all");
+  const [target, setTarget] = useState<MapRegion | null>(null);
 
-  // The live catalog only enriches: every node also carries the price snapshot taken when it was
-  // created, so a failed lookup costs specs detail in the drawer, not the price in the table.
-  // Nothing surfaces the failure, which is why it is not tracked as state.
-  useEffect(() => {
-    let active = true;
+  const favourites = useMemo(() => appPreferences?.favourites ?? [], [appPreferences?.favourites]);
+  const busy = busyAction !== null || connectAttempt !== null || operationAttempt !== null;
+  const from = nodes.find((node) => node.lifecycle_status === "connected") ?? activeNode ?? nodes[0] ?? null;
 
-    async function loadPricingCatalog() {
-      if (!providerId || providerAccessState !== "ready") {
-        if (active) {
-          setPricingByRegion({});
-        }
-        return;
-      }
+  const onFavourite = useCallback((key: string, favourite: boolean) => {
+    const next = favourite ? [...favourites, key] : favourites.filter((candidate) => candidate !== key);
+    void updateAppPreferences({ favourites: next });
+  }, [favourites, updateAppPreferences]);
 
-      try {
-        const catalog = await loadProviderPricingCatalog(providerId);
-        if (active) {
-          setPricingByRegion(catalog.pricingByRegion);
-        }
-      } catch {
-        if (active) {
-          setPricingByRegion({});
-        }
-      }
-    }
+  const lastPlanKey = target
+    ? savedLocations.find((location) => locationKey(location) === target.key)?.plan_key ?? null
+    : null;
 
-    void loadPricingCatalog();
-    return () => {
-      active = false;
-    };
-  }, [providerAccessState, providerId]);
-
-  // One derived status per node, feeding both the badge and the filter — they used to read
-  // different fields, so filtering "ready" returned rows that all rendered "ACTIVE".
-  const allRows = useMemo<NodeRow[]>(() => nodes.map((node) => ({
-    node,
-    status: deriveNodeStatus({
-      node,
-      isCurrent: node.id === currentNodeId,
-      // Only the node holding the live tunnel counts as connected.
-      isLiveConnected: tunnelConnected && node.lifecycle_status.toLowerCase() === "connected",
-      // Sourced from the one in-flight attempt rather than per-row local state. A row used to flip
-      // to "Disconnect" the instant it was clicked, which claimed a working tunnel during the very
-      // window where the user has no internet.
-      isConnecting: connectAttempt?.nodeId === node.id,
-    }),
-    location: describeLocation(node.region_geo, node.region),
-  })), [connectAttempt, currentNodeId, nodes, tunnelConnected]);
-
-  const rows = useMemo(
-    () => selectNodeRows({ rows: allRows, statusFilter, regionFilter, sort }),
-    [allRows, regionFilter, sort, statusFilter],
-  );
-
-  const statusOptions = useMemo(() => {
-    const present = new Set(allRows.map((row) => row.status));
-    return NODE_STATUS_ORDER.filter((status) => present.has(status));
-  }, [allRows]);
-
-  const regionOptions = useMemo(
-    () => buildRegionOptions(nodes.map((node) => ({ region: node.region_geo, slug: node.region }))),
-    [nodes],
-  );
-
-  const duplicatedRegionSlugs = useMemo(() => duplicatedRegions(nodes), [nodes]);
-  const selectedNodePricing = selectedNode ? getNodePricingDisplay(selectedNode, pricingByRegion) : null;
-  const selectedNodeTunnel = useMemo(() => {
-    const liveTunnel = selectedNodeId
-      ? (tunnels.find((tunnel) => tunnel.node_id === selectedNodeId) ?? null)
-      : null;
-
-    if (liveTunnel) {
-      return liveTunnel;
-    }
-
-    return (diagnostics?.tunnels ?? []).find((tunnel) => tunnel.node_id === selectedNodeId) ?? null;
-  }, [diagnostics?.tunnels, selectedNodeId, tunnels]);
-  const selectedNodeActionMessage = selectedNode
-    ? selectedNode.lifecycle_status === "error"
-      // A node in Error cannot transition back to Ready, and creating again with the same id is
-      // refused while the row exists — so cleanup is not optional advice, it is the only route.
-      ? `${selectedNode.error_reason ?? "Provisioning failed."} Force cleanup removes this record and any partial provider resources; the same node ID cannot be reused until it does.`
-      : selectedNode.lifecycle_status === "provisioning"
-        ? "Provisioning is in progress. Avoid submitting another create request until this record moves to Ready or Error."
-        : selectedNode.lifecycle_status === "bootstrapping"
-          ? "The server is booting and starting WireGuard. This record moves to Ready once it is up."
-          : "This server is provisioned and ready to connect."
-    : "Select a node to inspect health, pricing, and recovery options.";
-
-  function handleNavigateToCreate() {
-    router.push(NODE_CREATE_ROUTE);
-  }
-
-  function handleOpenNodeDetails(nodeId: string) {
-    setSelectedNodeId(nodeId);
-    setIsDetailsModalOpen(true);
-  }
-
-  function handleCloseNodeDetails() {
-    setIsDetailsModalOpen(false);
-  }
+  const counts: Partial<Record<MapFilter, number>> = {
+    visited: savedLocations.length,
+    favourites: favourites.length,
+  };
 
   return (
-    <PageChrome>
-      <SavedLocationsView
-        locations={savedLocations}
-        busyAction={busyAction}
-        onTurnOn={turnOnLocation}
-        onTurnOff={turnOffLocation}
-        onForget={forgetLocation}
+    <>
+      <PageHeader
+        title="Map"
+        subtitle="Every region from every cloud you have a key for. Click a dot to build there."
+        action={
+          <div className="flex flex-wrap gap-3">
+            {FILTERS.map((option) => (
+              <Button
+                key={option.id}
+                size="sm"
+                tone={view === "map" && filter === option.id ? "ghost" : "quiet"}
+                pressed={view === "map" && filter === option.id}
+                className={view === "map" && filter === option.id ? "!border-lime !text-lime" : ""}
+                onClick={() => {
+                  setView("map");
+                  setFilter(option.id);
+                }}
+              >
+                {option.label}{counts[option.id] !== undefined ? ` · ${counts[option.id]}` : ""}
+              </Button>
+            ))}
+            <Button
+              size="sm"
+              tone={view === "list" ? "ghost" : "quiet"}
+              pressed={view === "list"}
+              className={view === "list" ? "!border-lime !text-lime" : ""}
+              onClick={() => setView("list")}
+            >
+              List view
+            </Button>
+          </div>
+        }
       />
-      <NodesView
-        providerAccessState={providerAccessState}
-        providers={providers}
-        nodes={nodes}
-        rows={rows}
-        diagnostics={diagnostics}
-        pricingByRegion={pricingByRegion}
-        statusFilter={statusFilter}
-        setStatusFilter={setStatusFilter}
-        regionFilter={regionFilter}
-        setRegionFilter={setRegionFilter}
-        sort={sort}
-        setSort={setSort}
-        statusOptions={statusOptions}
-        regionOptions={regionOptions}
-        duplicatedRegionSlugs={duplicatedRegionSlugs}
-        currentNodeId={currentNodeId}
-        selectedNodeId={selectedNodeId}
-        selectedNode={selectedNode}
-        health={health}
-        selectedNodePricing={selectedNodePricing}
-        selectedNodeActionMessage={selectedNodeActionMessage}
-        selectedNodeTunnel={selectedNodeTunnel}
-        busyAction={busyAction}
-        onNavigateToCreate={handleNavigateToCreate}
-        onInstallHost={installHostForNode}
-        onDestroyNode={destroyNode}
-        onSetCurrentNode={setCurrentNode}
-        onConnectNode={connectNode}
-        onConnectTunnel={connectTunnel}
-        onDisconnectTunnel={disconnectTunnel}
-        onForceDisconnectNodeService={forceDisconnectNodeService}
-        nodePeers={nodePeers}
-        onClaimDevice={claimDevice}
-        onLoadDeviceConfig={loadDeviceConfig}
-        onExportDeviceConfig={exportDeviceConfig}
-        onCopyText={copyText}
-        onForceCleanupSelectedNode={forceCleanupSelectedNode}
-        isDetailsModalOpen={isDetailsModalOpen}
-        onOpenNodeDetails={handleOpenNodeDetails}
-        onCloseNodeDetails={handleCloseNodeDetails}
-      />
-    </PageChrome>
+
+      {view === "list" ? (
+        <ServerList onBuildNew={() => setView("map")} />
+      ) : (
+        <MapView
+          providers={providers}
+          nodes={nodes}
+          savedLocations={savedLocations}
+          favourites={favourites}
+          dockerDevEnabled={dockerDevEnabled}
+          busy={busy}
+          filter={filter}
+          moveHint={params.get("move") === "1" && from !== null}
+          onFavourite={onFavourite}
+          onChoose={setTarget}
+        />
+      )}
+
+      {target ? (
+        <MoveSheet
+          key={target.key}
+          target={target}
+          from={from}
+          lastPlanKey={lastPlanKey}
+          busy={busy}
+          onClose={() => setTarget(null)}
+          onConfirm={(input) => {
+            setTarget(null);
+            // The build has its own screen, with the game; Home is where it lives.
+            router.push(VIEW_ROUTE.home);
+            void moveTo(input);
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
+/** `useSearchParams` needs a Suspense boundary in a static export. */
+export default function MapRoute() {
+  return (
+    <Suspense fallback={null}>
+      <MapPage />
+    </Suspense>
   );
 }

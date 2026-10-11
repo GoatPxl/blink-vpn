@@ -21,12 +21,11 @@ test.describe("Docker provisioning (real backend)", () => {
     tauriPage,
   }) => {
     const suffix = Date.now();
-    const nodeId = `node-e2e-${suffix}`;
     const nodeName = `E2E Node ${suffix}`;
 
     await resetNodes(tauriPage);
     await saveDockerCredential(tauriPage);
-    await createDockerNode(tauriPage, nodeId, nodeName);
+    const nodeId = await createDockerNode(tauriPage, nodeName);
 
     const diagnostics = await readDiagnostics(tauriPage);
     const node = (diagnostics.nodes ?? []).find((candidate) => candidate.id === nodeId);
@@ -63,9 +62,11 @@ test.describe("Docker provisioning (real backend)", () => {
     // by name: the row leads with location and only shows the name to disambiguate same-region
     // servers, so a name match would pass or fail depending on what else is provisioned.
     await tauriPage.goto(`${APP_URL}/dashboard/map`);
-    await expect(tauriPage.getByRole("heading", { name: "Server Locations" }).first()).toBeVisible({
+    await expect(tauriPage.getByRole("heading", { name: "Map", exact: true }).first()).toBeVisible({
       timeout: 30_000,
     });
+    // Server rows live in the map's list view.
+    await tauriPage.getByRole("button", { name: "List view", exact: true }).click();
 
     const nodeRow = tauriPage.locator(`tr[data-node-id="${nodeId}"]`);
     await expect(nodeRow).toBeVisible({ timeout: 30_000 });

@@ -285,6 +285,31 @@ noted.
 No frontend change is required. The credential form, provider picker, region list and pricing table
 are all driven by what the adapter reports.
 
+## Map and Move
+
+The Map draws a 72×36 dot world (`src/lib/map/land-mask.ts`, rasterised once from Natural Earth
+110m land, public domain) and pins one dot per city. Pins come from `list_provider_regions` for each
+provider with a usable key, and from `list_known_provider_regions` — the adapter's curated table, no
+token — for providers without one, which show grey. Which provider a city's pin means is decided by
+provider-neutral rules (`src/lib/map/map-regions.ts`): buildable first, then cheapest. Regions with
+no coordinates (OpenStack, the Docker dev provider, unknown slugs) are listed beneath the map and
+build the same way. "Cheapest near me" maps the OS time zone to a continent (`suggest-region.ts`);
+there is no IP geolocation and no network call.
+
+A different city is a new server, so the UI says **Move**, and the Move is a frontend sequence of
+existing commands — no backend command:
+
+1. Build the new server (`create_vpn_node_to_ready`). The old tunnel keeps working meanwhile.
+2. Disconnect the old tunnel, if one is up, then connect the new one: two UAC prompts. The old
+   tunnel is stopped first because two full tunnels at once has never been verified to route
+   correctly; for those few seconds traffic uses the normal connection, and the sheet says so.
+3. Once `TunnelPhase` reports the new tunnel connected, destroy the old server, unless the user
+   ticked "keep it running".
+
+If anything fails before the new tunnel is secure — the build, the disconnect, the connect, the
+user declining the explainer, or Roll back — the new server is destroyed and the old one is left
+running. A failed move never costs the user their working location.
+
 ## Saved Locations
 
 Blink servers are meant to be short-lived: turned on when needed and destroyed afterwards so they

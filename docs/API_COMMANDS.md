@@ -40,7 +40,8 @@ Provider adapters currently included:
 | `register_provider_credential` | `provider_id`, `provider_name`, `credentials` (map of field key to value) | `string` | Stores the credential in secure storage and persists its reference. Provider-neutral: the adapter is resolved from the stored provider record, so there is no per-provider command. Every field the adapter declares must be present and non-empty. |
 | `list_provider_credential_fields` | `provider_id` | `CredentialField[]` | The credential inputs this provider needs — `key`, `label`, `placeholder`, `secret`, `help`. The UI renders whatever it returns rather than branching on a provider slug. |
 | `validate_provider_token` | `provider_id` | `string` | Checks the stored credential through the adapter and records the verdict on that provider row. Reads the *stored* credential, so it never validates something newly typed but unsaved. The returned string names the account the credential belongs to — display text only; nothing parses it |
-| `list_provider_regions` | `provider_id` | `ProviderRegion[]` | Region catalog with normalized geography — see below |
+| `list_provider_regions` | `provider_id` | `ProviderRegion[]` | Live region catalog with normalized geography — needs a key. See below |
+| `list_known_provider_regions` | `provider_id` | `ProviderRegion[]` | The adapter's curated region table: no key, no network call. Empty for an adapter without one (OpenStack, Docker). For showing where a provider runs before the user has a key; what can actually be built comes from `list_provider_regions` |
 | `list_provider_pricing` | `provider_id`, `region` | `ProviderPricingResponse` | Plan and pricing catalog |
 | `create_vpn_node_to_ready` | `node_id`, `provider_id`, `node_name`, `region`, `plan_key` | `string` | Provision and bootstrap workflow |
 | `create_and_activate_client_tunnel` | `tunnel_id`, `node_id`, `tunnel_name`, `dns_server?`, `allowed_ips` | `string` | Binds the tunnel to the node’s slot 0 peer and marks it ready. The address comes from that slot, never from the caller — the server only accepts that key at that address |
@@ -171,11 +172,18 @@ Create node complete: node_id=node-1, external_ref=us-east-1/i-0abc123def4567890
     "area": "California",
     "country": "United States",
     "country_code": "US",
-    "continent": "North America"
+    "continent": "North America",
+    "latitude": 37.77,
+    "longitude": -122.42
   },
-  { "slug": "mars1", "city": null, "area": null, "country": null, "country_code": null, "continent": null }
+  { "slug": "mars1", "city": null, "area": null, "country": null, "country_code": null, "continent": null, "latitude": null, "longitude": null }
 ]
 ```
+
+`latitude`/`longitude` come from one place table keyed by city and country
+(`backend/provider/place_coordinates.rs`), not by any provider's slug: a city is in the same place
+whichever cloud runs a datacentre there. A city the table does not list has no coordinates, and the
+map lists it without a pin.
 
 Only `slug` is guaranteed. Providers add regions faster than a curated table follows, so an
 unrecognised slug carries no geography rather than a guessed city — **render the slug in that case,

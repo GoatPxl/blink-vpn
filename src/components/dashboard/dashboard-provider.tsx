@@ -87,6 +87,34 @@ type CreateNodeInput = {
   planKey: string;
   /** What the build screen calls it, "BUILDING FRANKFURT". Defaults to the node name. */
   place?: string;
+  /** The provider to build on. Defaults to the provider selected in Setup. */
+  providerId?: string;
+};
+
+/** A new city for the tunnel: build there, switch the tunnel over, then power off the old server. */
+export type MoveInput = {
+  providerId: string;
+  region: string;
+  planKey: string;
+  place: string;
+  nodeName: string;
+  /** Leave the old server running after the move. It keeps billing. */
+  keepOld: boolean;
+};
+
+/**
+ * A move in progress, between "build started" and "new tunnel proven secure".
+ *
+ * Kept in a ref, not state: it changes nothing on screen by itself, and the steps that read it run
+ * in callbacks long after the render that started the move.
+ */
+type PendingMove = {
+  newNodeId: string;
+  place: string;
+  oldNode: VpnNodeRecord | null;
+  /** The old tunnel, when it was up at the start and must be stopped before the new one starts. */
+  oldTunnel: TunnelRecord | null;
+  keepOld: boolean;
 };
 
 /** The "one Windows prompt is coming" explainer, waiting on the user's answer. */
@@ -267,6 +295,11 @@ type DashboardContextValue = {
   validateDockerReadiness: (options?: { silent?: boolean }) => Promise<void>;
   /** Resolves true only when the server reached ready. */
   createNode: (input: CreateNodeInput) => Promise<boolean>;
+  /**
+   * Build somewhere new and move the tunnel there. With nothing running it is a plain build.
+   * Resolves once the build has finished (or failed); the switch-over continues afterwards.
+   */
+  moveTo: (input: MoveInput) => Promise<void>;
   installHostForNode: (node: VpnNodeRecord) => Promise<void>;
   connectPrimary: () => Promise<void>;
   connectTunnel: (tunnel: TunnelRecord) => Promise<void>;
@@ -283,6 +316,16 @@ type DashboardContextValue = {
 };
 
 const DashboardContext = createContext<DashboardContextValue | null>(null);
+
+/** Why a server is being deleted, for the toast that reports it. */
+type DestroyReason = "cancelled" | "moved" | "move-failed";
+
+const DESTROY_TOAST_TITLE: Record<DestroyReason | "default", string> = {
+  default: "Server turned off",
+  cancelled: "Build cancelled",
+  moved: "Old server powered off",
+  "move-failed": "New server removed",
+};
 
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const dockerDevEnabled = process.env.NEXT_PUBLIC_DEV_DOCKER === "1";
@@ -343,7 +386,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const cancelBuildRef = useRef<string | null>(null);
   // Declared further down; the build flow reaches them through these so it can be declared first.
   const connectNodeRef = useRef<(node: VpnNodeRecord) => Promise<void>>(async () => {});
-  const destroyNodeNowRef = useRef<(node: VpnNodeRecord, reason?: "cancelled") => Promise<void>>(async () => {});
+  const destroyNodeNowRef = useRef<(node: VpnNodeRecord, reason?: DestroyReason) => Promise<void>>(async () => {});
+  const pendingMoveRef = useRef<PendingMove | null>(null);
   const lastTrafficSampleRef = useRef<{
     timestamp: number;
     nodeId: string;
@@ -1018,15 +1062,70 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [dockerDevEnabled, dockerKeyStored, handleError, pushToast]);
 
   /**
+   * Ends a move once its new tunnel has either proven itself or failed.
+   *
+   * Success powers off the old server unless the user chose to keep it. Failure removes the new one
+   * and leaves the old one alone, so a failed move never costs the user their working location.
+   */
+  const settleMove = useCallback(async (nodeId: string, secure: boolean) => {
+    const move = pendingMoveRef.current;
+    if (!move || move.newNodeId !== nodeId) return;
+    pendingMoveRef.current = null;
+
+    if (secure) {
+      if (move.oldNode && !move.keepOld) {
+        await destroyNodeNowRef.current(move.oldNode, "moved");
+      }
+      return;
+    }
+
+    const newNode = (await listVpnNodes()).find((candidate) => candidate.id === nodeId) ?? null;
+    if (newNode) await destroyNodeNowRef.current(newNode, "move-failed");
+    pushToast(
+      "warning",
+      `Move to ${move.place} did not finish`,
+      move.oldNode
+        ? `${move.oldNode.region_geo?.city ?? move.oldNode.name} is still running. Connect to it from Home.`
+        : "Nothing was left running.",
+    );
+  }, [pushToast]);
+
+  const settleMoveRef = useRef(settleMove);
+  useEffect(() => {
+    settleMoveRef.current = settleMove;
+  }, [settleMove]);
+
+  /**
    * What happens when a build the user started reaches ready: delete it if they cancelled, else
    * connect to it (one UAC prompt, the same connect a click would start) unless auto-connect is off.
+   * A move always connects — that is what a move is — and first stops the old tunnel, since two
+   * full tunnels at once is not a state this app has ever been proven to handle.
    */
   const finishBuild = useCallback(async (nodeId: string, place: string) => {
     const node = (await listVpnNodes()).find((candidate) => candidate.id === nodeId) ?? null;
 
     if (cancelBuildRef.current === nodeId) {
       cancelBuildRef.current = null;
+      if (pendingMoveRef.current?.newNodeId === nodeId) pendingMoveRef.current = null;
       if (node) await destroyNodeNowRef.current(node, "cancelled");
+      return;
+    }
+
+    const move = pendingMoveRef.current?.newNodeId === nodeId ? pendingMoveRef.current : null;
+    if (move && node) {
+      if (move.oldTunnel) {
+        pushToast("info", `${place} is ready — switching over`, "Windows will ask twice: once to stop the old tunnel, once to start the new one.");
+        try {
+          await disconnectTunnelCommand(move.oldTunnel.node_id, move.oldTunnel.id);
+        } catch (error) {
+          handleError(error);
+          await settleMoveRef.current(nodeId, false);
+          return;
+        }
+      } else {
+        pushToast("success", `${place} is ready — connecting now`, "Windows will ask for permission in a second.");
+      }
+      void connectNodeRef.current(node);
       return;
     }
 
@@ -1037,7 +1136,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
     pushToast("success", `${place} is ready — connecting now`, "Windows will ask for permission in a second.");
     void connectNodeRef.current(node);
-  }, [pushToast]);
+  }, [handleError, pushToast]);
 
   const requestCancelBuild = useCallback(() => {
     setOperationAttempt((current) => {
@@ -1049,6 +1148,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const createNode = useCallback(async (input: CreateNodeInput) => {
     const place = input.place ?? input.nodeName;
+    const buildProviderId = input.providerId ?? providerId;
     cancelBuildRef.current = null;
     setBusyAction("create-node");
     setOperationAttempt({
@@ -1056,7 +1156,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       nodeId: input.nodeId,
       nodeName: input.nodeName,
       place,
-      providerName: providerNameFor(providerId),
+      providerName: providerNameFor(buildProviderId),
       startedAt: Date.now(),
       status: null,
       bootstrappingSince: null,
@@ -1066,7 +1166,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     try {
       await createVpnNode({
         nodeId: input.nodeId,
-        providerId,
+        providerId: buildProviderId,
         nodeName: input.nodeName,
         region: input.region,
         planKey: input.planKey,
@@ -1076,6 +1176,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       ready = true;
     } catch (error) {
       handleError(error);
+      // A move whose build failed has nothing to switch to; the old server was never touched.
+      if (pendingMoveRef.current?.newNodeId === input.nodeId) pendingMoveRef.current = null;
     } finally {
       setOperationAttempt(null);
       setBusyAction(null);
@@ -1083,6 +1185,29 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     if (ready) await finishBuild(input.nodeId, place);
     return ready;
   }, [finishBuild, handleError, loadDashboard, providerId, providerNameFor]);
+
+  const moveTo = useCallback(async (input: MoveInput) => {
+    // The server the tunnel is on now — or, with none connected, the one Home shows. A move from
+    // "nothing" is a plain build and records no old server.
+    const oldNode = nodes.find((node) => node.lifecycle_status.toLowerCase() === "connected") ?? activeNode ?? null;
+    const oldTunnel = oldNode
+      ? tunnels.find((tunnel) => tunnel.node_id === oldNode.id && tunnel.status.toLowerCase() === "connected") ?? null
+      : null;
+    const nodeId = `node-${crypto.randomUUID().slice(0, 8)}`;
+
+    pendingMoveRef.current = oldNode
+      ? { newNodeId: nodeId, place: input.place, oldNode, oldTunnel, keepOld: input.keepOld }
+      : null;
+
+    await createNode({
+      nodeId,
+      nodeName: input.nodeName,
+      region: input.region,
+      planKey: input.planKey,
+      place: input.place,
+      providerId: input.providerId,
+    });
+  }, [activeNode, createNode, nodes, tunnels]);
 
   const installHostForNode = useCallback(async (node: VpnNodeRecord) => {
     if (node.lifecycle_status !== "new") {
@@ -1133,7 +1258,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       pushToast("warning", "No node selected", "Select a node before connecting.");
       return;
     }
-    if (!(await ensureUacExplained(node.region_geo?.city ?? node.name))) return;
+    if (!(await ensureUacExplained(node.region_geo?.city ?? node.name))) {
+      void settleMoveRef.current(node.id, false);
+      return;
+    }
 
     const canonicalTunnelName = `${node.name
       .trim()
@@ -1233,6 +1361,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           } catch (recoveryError) {
             setConnectAttempt(null);
             handleError(recoveryError);
+            void settleMoveRef.current(node.id, false);
             return;
           }
         }
@@ -1240,6 +1369,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
       setConnectAttempt(null);
       handleError(error);
+      void settleMoveRef.current(node.id, false);
     }
     // No `finally` clearing the attempt: on success it stays live so the phase poll can watch the
     // handshake land. The poll owns clearing it.
@@ -1356,6 +1486,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       }
 
       setConnectAttempt(null);
+      void settleMoveRef.current(attempt.nodeId, false);
       pushToast(
         "info",
         "Connection cancelled",
@@ -1389,7 +1520,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [handleError, loadDashboard, pushToast, refreshHealthSnapshot]);
 
   /** Deletes a server at its provider, no questions asked. Callers decide whether to ask first. */
-  const destroyNodeNow = useCallback(async (node: VpnNodeRecord, reason?: "cancelled") => {
+  const destroyNodeNow = useCallback(async (node: VpnNodeRecord, reason?: DestroyReason) => {
     setBusyAction("destroy-node");
     setOperationAttempt({
       kind: "destroy",
@@ -1403,7 +1534,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setRecovery(null);
       pushToast(
         "success",
-        reason === "cancelled" ? "Build cancelled" : "Server turned off",
+        DESTROY_TOAST_TITLE[reason ?? "default"],
         `${node.name} was deleted at the provider and is no longer billing.`,
       );
       await loadDashboard();
@@ -1752,6 +1883,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           if (appPreferencesRef.current && !appPreferencesRef.current.first_connect_done) {
             void updateAppPreferences({ first_connect_done: true });
           }
+          void settleMoveRef.current(nodeId, true);
           // Forced refresh: this both updates the egress card immediately and generates the
           // traffic that keeps proving the tunnel works.
           void refreshHealthSnapshot(true);
@@ -1759,6 +1891,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           // The service was up and has gone away — the connect failed rather than completed, and
           // leaving the card up would show progress that is no longer happening.
           setConnectAttempt(null);
+          void settleMoveRef.current(nodeId, false);
           pushToast(
             "warning",
             "Connection did not start",
@@ -1973,6 +2106,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     saveAppPreferences,
     updateAppPreferences,
     requestCancelBuild,
+    moveTo,
     uacPrompt,
     answerUacPrompt,
     throughputSamples,

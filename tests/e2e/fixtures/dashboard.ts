@@ -192,46 +192,48 @@ export async function saveDockerCredential(page: Page): Promise<void> {
 }
 
 /**
- * Provision a node through the UI and wait for it to reach ready.
+ * Build a Docker node through the UI — Map, its region row, the build sheet — and wait for ready.
  *
- * Auto-connect is off unless a test asks for it. A connect needs elevation, and most specs run
- * without it — an automatic connect there would stop on a UAC prompt nobody can answer.
+ * Returns the node's id, which the app assigns. Auto-connect is off unless a test asks for it: a
+ * connect needs elevation, and most specs run without it — an automatic connect there would stop
+ * on a UAC prompt nobody can answer.
  */
 export async function createDockerNode(
   page: Page,
-  nodeId: string,
   nodeName: string,
   { autoConnect = false }: { autoConnect?: boolean } = {},
-): Promise<void> {
+): Promise<string> {
   await page.goto(`${APP_URL}/dashboard`);
   await setPreferences(page, { auto_connect_after_provision: autoConnect });
-  await page.goto(`${APP_URL}/dashboard/map/create`);
-  await expect(page.getByRole("heading", { name: "Create Node" }).first()).toBeVisible({
-    timeout: 30_000,
-  });
+  const before = new Set(((await readDiagnostics(page)).nodes ?? []).map((node) => node.id));
 
-  await page.locator("select").first().selectOption(DOCKER_PROVIDER_ID);
-  await page.getByLabel("Node ID").fill(nodeId);
-  await page.getByLabel("Node Name").fill(nodeName);
+  await page.goto(`${APP_URL}/dashboard/map`);
+  // The dev provider has no geography, so it is listed under the map rather than pinned on it.
+  const row = page.locator(`[data-region-key^="${DOCKER_PROVIDER_ID}:"]`).first();
+  await expect(row).toBeVisible({ timeout: 60_000 });
+  const regionKey = await row.getAttribute("data-region-key");
+  const place = regionKey?.slice(DOCKER_PROVIDER_ID.length + 1) ?? "";
+  await row.getByRole("button", { name: "Build here", exact: true }).click();
 
-  // Pricing loads asynchronously; a plan must be selected before create is allowed.
-  const planCards = page.locator("button").filter({ hasText: "/mo" });
-  await expect(planCards.first()).toBeVisible({ timeout: 60_000 });
-  await planCards.first().click();
+  const sheet = page.getByRole("dialog");
+  // Pricing loads asynchronously; a size must be chosen before the build is allowed.
+  await expect(sheet.getByRole("radio").first()).toBeVisible({ timeout: 60_000 });
+  await sheet.getByText("Advanced", { exact: true }).click();
+  await sheet.getByLabel("Server name").fill(nodeName);
 
   await settleToasts(page);
-  await page.getByRole("button", { name: "Create Node", exact: true }).click();
+  await sheet.getByRole("button", { name: `Build ${place}`, exact: true }).click();
 
-  // The progress card must name this provision while it runs.
+  // The build screen must name this server while it runs.
   const progress = page.getByTestId("operation-progress");
   await expect(progress).toHaveAttribute("data-kind", "provision", { timeout: 10_000 });
   await expect(progress).toContainText(nodeName);
 
-  // Provisioning pulls an image and runs apt inside the container on a cold cache. The toast names
-  // the node, so another build's message cannot satisfy this one.
-  await expectSuccess(page, autoConnect ? `${nodeName} is ready — connecting now` : `${nodeName} is ready`, 240_000);
-
-  // A finished provision returns to the server list, and the progress goes away with it.
-  await expect(page).toHaveURL(/\/dashboard\/map\/?$/, { timeout: 15_000 });
+  // Provisioning pulls an image and runs apt inside the container on a cold cache.
+  await expectSuccess(page, autoConnect ? `${place} is ready — connecting now` : `${place} is ready`, 240_000);
   await expect(progress).toHaveCount(0);
+
+  const created = ((await readDiagnostics(page)).nodes ?? []).filter((node) => !before.has(node.id));
+  expect(created, "exactly one new node should exist after the build").toHaveLength(1);
+  return created[0].id;
 }

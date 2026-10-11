@@ -26,19 +26,20 @@ test.use({ mode: "cdp" });
 test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
   test("connects a node and completes a WireGuard handshake", async ({ tauriPage }) => {
     const suffix = Date.now();
-    const nodeId = `node-connect-${suffix}`;
     const nodeName = `Connect Node ${suffix}`;
 
     await resetNodes(tauriPage);
     await saveDockerCredential(tauriPage);
-    await createDockerNode(tauriPage, nodeId, nodeName);
+    const nodeId = await createDockerNode(tauriPage, nodeName);
     // The explainer is on, as on a fresh install, so this connect must pass through it.
     await setPreferences(tauriPage, { explain_uac: true });
 
     await tauriPage.goto(`${APP_URL}/dashboard/map`);
-    await expect(tauriPage.getByRole("heading", { name: "Server Locations" }).first()).toBeVisible({
+    await expect(tauriPage.getByRole("heading", { name: "Map", exact: true }).first()).toBeVisible({
       timeout: 30_000,
     });
+    // Server rows live in the map's list view.
+    await tauriPage.getByRole("button", { name: "List view", exact: true }).click();
 
     // By id, not by name: the row leads with location and only shows the node name to
     // disambiguate servers sharing a region.
@@ -94,7 +95,6 @@ test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
 
   test("disconnects from the dashboard button after connecting a fresh node there", async ({ tauriPage }) => {
     const suffix = Date.now();
-    const nodeId = `node-dash-connect-${suffix}`;
     const nodeName = `Dash Connect Node ${suffix}`;
 
     await resetNodes(tauriPage);
@@ -102,7 +102,7 @@ test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
     // Fresh node with no tunnel row: the first connect creates it. That is the case that broke —
     // the dashboard never reloaded its tunnel list afterwards, so "Disconnect" had nothing to stop
     // and fell through to connecting again.
-    await createDockerNode(tauriPage, nodeId, nodeName);
+    const nodeId = await createDockerNode(tauriPage, nodeName);
     await setPreferences(tauriPage, { explain_uac: false });
 
     await tauriPage.goto(`${APP_URL}/dashboard`);
@@ -147,7 +147,6 @@ test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
 
   test("connects by itself when a server it built is ready", async ({ tauriPage }) => {
     const suffix = Date.now();
-    const nodeId = `node-auto-connect-${suffix}`;
     const nodeName = `Auto Connect Node ${suffix}`;
 
     await resetNodes(tauriPage);
@@ -156,7 +155,7 @@ test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
     await setPreferences(tauriPage, { explain_uac: false });
 
     // No Connect click anywhere in this test: the build alone must end in a working tunnel.
-    await createDockerNode(tauriPage, nodeId, nodeName, { autoConnect: true });
+    const nodeId = await createDockerNode(tauriPage, nodeName, { autoConnect: true });
     await expectSuccess(tauriPage, "Tunnel connected", 120_000);
 
     const connected = await readDiagnostics(tauriPage);

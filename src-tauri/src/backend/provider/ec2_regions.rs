@@ -11,6 +11,7 @@
 //! Unknown codes resolve to geography-free entries rather than a guess. AWS adds regions, and
 //! inventing a city for an unrecognised code would state something false the user might act on.
 
+use super::place_coordinates::place_coordinates;
 use super::ProviderRegion;
 
 /// `(code, city, area, country, ISO-3166 alpha-2, continent)`
@@ -53,6 +54,15 @@ const EC2_REGIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
   ("af-south-1", "Cape Town", "", "South Africa", "ZA", "Africa"),
 ];
 
+/// Every region in this table, without contacting the provider.
+///
+/// For the map's "needs a key" pins: with no credential there is no live catalog to ask, but the
+/// places this provider runs are still worth showing. Building anywhere still goes through the live
+/// list, which is what decides what can actually be provisioned.
+pub fn known_regions() -> Vec<ProviderRegion> {
+  EC2_REGIONS.iter().map(|(slug, ..)| describe_region(slug)).collect()
+}
+
 /// Geography for a region code, or a code-only entry when it is not recognised.
 pub fn describe_region(slug: &str) -> ProviderRegion {
   let normalized = slug.trim().to_ascii_lowercase();
@@ -60,13 +70,18 @@ pub fn describe_region(slug: &str) -> ProviderRegion {
   EC2_REGIONS
     .iter()
     .find(|(candidate, ..)| *candidate == normalized)
-    .map(|(slug, city, area, country, country_code, continent)| ProviderRegion {
-      slug: (*slug).to_string(),
-      city: Some((*city).to_string()),
-      area: optional(area),
-      country: Some((*country).to_string()),
-      country_code: Some((*country_code).to_string()),
-      continent: Some((*continent).to_string()),
+    .map(|(slug, city, area, country, country_code, continent)| {
+      let coordinates = place_coordinates(city, country_code);
+      ProviderRegion {
+        slug: (*slug).to_string(),
+        city: Some((*city).to_string()),
+        area: optional(area),
+        country: Some((*country).to_string()),
+        country_code: Some((*country_code).to_string()),
+        continent: Some((*continent).to_string()),
+        latitude: coordinates.map(|(latitude, _)| latitude),
+        longitude: coordinates.map(|(_, longitude)| longitude),
+      }
     })
     .unwrap_or_else(|| ProviderRegion::unknown(slug))
 }
@@ -82,6 +97,23 @@ fn optional(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn known_regions_cover_the_whole_table() {
+    let known = known_regions();
+    assert_eq!(known.len(), EC2_REGIONS.len());
+    assert!(known.iter().all(|region| region.city.is_some() && region.latitude.is_some()));
+  }
+
+  #[test]
+  fn every_listed_region_can_be_drawn_on_the_map() {
+    for (_, city, _, _, country_code, _) in EC2_REGIONS {
+      assert!(
+        place_coordinates(city, country_code).is_some(),
+        "{city}, {country_code} has no coordinates; add it to place_coordinates.rs"
+      );
+    }
+  }
 
   #[test]
   fn known_codes_resolve_to_a_city_and_country() {

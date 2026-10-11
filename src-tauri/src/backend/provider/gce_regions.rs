@@ -20,6 +20,7 @@
 //! entirely. What this table names is the datacentre, not necessarily what a geo-IP lookup will
 //! report — see the adapter's docs.
 
+use super::place_coordinates::place_coordinates;
 use super::ProviderRegion;
 
 /// `(region prefix, city, area, country, ISO-3166 alpha-2, continent)`
@@ -74,6 +75,15 @@ const GCE_REGIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
   ("africa-south1", "Johannesburg", "", "South Africa", "ZA", "Africa"),
 ];
 
+/// Every region in this table, without contacting the provider.
+///
+/// For the map's "needs a key" pins: with no credential there is no live catalog to ask, but the
+/// places this provider runs are still worth showing. Building anywhere still goes through the live
+/// list, which is what decides what can actually be provisioned.
+pub fn known_regions() -> Vec<ProviderRegion> {
+  GCE_REGIONS.iter().map(|(slug, ..)| describe_region(slug)).collect()
+}
+
 /// Geography for a zone name, or a code-only entry when it is not recognised.
 pub fn describe_region(slug: &str) -> ProviderRegion {
   let normalized = slug.trim().to_ascii_lowercase();
@@ -82,15 +92,20 @@ pub fn describe_region(slug: &str) -> ProviderRegion {
   GCE_REGIONS
     .iter()
     .find(|(candidate, ..)| *candidate == region)
-    .map(|(_, city, area, country, country_code, continent)| ProviderRegion {
-      // The zone the caller asked about, not the region it belongs to: the node row stores a zone
-      // and the fleet list must label the exact place the instance runs.
-      slug: normalized.clone(),
-      city: Some((*city).to_string()),
-      area: optional(area),
-      country: Some((*country).to_string()),
-      country_code: Some((*country_code).to_string()),
-      continent: Some((*continent).to_string()),
+    .map(|(_, city, area, country, country_code, continent)| {
+      let coordinates = place_coordinates(city, country_code);
+      ProviderRegion {
+        // The zone the caller asked about, not the region it belongs to: the node row stores a zone
+        // and the fleet list must label the exact place the instance runs.
+        slug: normalized.clone(),
+        city: Some((*city).to_string()),
+        area: optional(area),
+        country: Some((*country).to_string()),
+        country_code: Some((*country_code).to_string()),
+        continent: Some((*continent).to_string()),
+        latitude: coordinates.map(|(latitude, _)| latitude),
+        longitude: coordinates.map(|(_, longitude)| longitude),
+      }
     })
     .unwrap_or_else(|| ProviderRegion::unknown(slug))
 }
@@ -119,6 +134,23 @@ fn optional(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn known_regions_cover_the_whole_table() {
+    let known = known_regions();
+    assert_eq!(known.len(), GCE_REGIONS.len());
+    assert!(known.iter().all(|region| region.city.is_some() && region.latitude.is_some()));
+  }
+
+  #[test]
+  fn every_listed_region_can_be_drawn_on_the_map() {
+    for (_, city, _, _, country_code, _) in GCE_REGIONS {
+      assert!(
+        place_coordinates(city, country_code).is_some(),
+        "{city}, {country_code} has no coordinates; add it to place_coordinates.rs"
+      );
+    }
+  }
 
   #[test]
   fn known_zones_resolve_to_their_regions_geography() {

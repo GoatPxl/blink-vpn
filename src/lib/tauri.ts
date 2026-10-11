@@ -139,6 +139,9 @@ export interface ProviderRegion {
   /** ISO-3166 alpha-2, for rendering a flag. */
   country_code: string | null;
   continent: string | null;
+  /** Where the city is, for the map. Null when Blink's place table does not list it: list, don't pin. */
+  latitude: number | null;
+  longitude: number | null;
 }
 
 export interface VpnNodeRecord {
@@ -482,6 +485,14 @@ export async function listProviderPricing(providerId: string, region: string): P
 
 export async function listProviderRegions(providerId: string): Promise<ProviderRegion[]> {
   return invokeCommand<ProviderRegion[]>("list_provider_regions", { providerId });
+}
+
+/**
+ * Where a provider runs, from its adapter's curated table — no key and no network call needed.
+ * For the map's "needs a key" pins. What can actually be built comes from {@link listProviderRegions}.
+ */
+export async function listKnownProviderRegions(providerId: string): Promise<ProviderRegion[]> {
+  return invokeCommand<ProviderRegion[]>("list_known_provider_regions", { providerId });
 }
 
 /** The node the app connects to by default, or null when the user has not chosen between several. */

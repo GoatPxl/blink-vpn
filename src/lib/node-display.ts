@@ -100,8 +100,8 @@ export type LocationDisplay = {
   primary: string;
   /** Country, or null when unknown. Never a guess. */
   secondary: string | null;
-  /** Emoji flag derived from the ISO-3166 code, or null. */
-  flag: string | null;
+  /** ISO-3166 alpha-2 code, shown as a small badge, or null. Never an emoji: the design has none. */
+  countryCode: string | null;
   /** True when nothing but the slug is known, so callers can style it as unresolved. */
   unresolved: boolean;
 };
@@ -116,7 +116,7 @@ export function describeLocation(region: ProviderRegion | null | undefined, slug
   const city = region?.city ?? null;
 
   if (!city) {
-    return { primary: slug || "Unknown", secondary: null, flag: null, unresolved: true };
+    return { primary: slug || "Unknown", secondary: null, countryCode: null, unresolved: true };
   }
 
   const area = region?.area ?? null;
@@ -125,27 +125,11 @@ export function describeLocation(region: ProviderRegion | null | undefined, slug
   return {
     primary: area ? `${city}, ${area}` : city,
     secondary: country,
-    flag: flagEmoji(region?.country_code ?? null),
+    countryCode: region?.country_code?.toUpperCase() ?? null,
     unresolved: false,
   };
 }
 
-/**
- * ISO-3166 alpha-2 to its emoji flag, by offsetting each letter into the regional-indicator block.
- * Avoids shipping a second country table just for icons.
- */
-export function flagEmoji(countryCode: string | null): string | null {
-  if (!countryCode || countryCode.length !== 2) return null;
-
-  const code = countryCode.toUpperCase();
-  if (!/^[A-Z]{2}$/.test(code)) return null;
-
-  const REGIONAL_INDICATOR_A = 0x1f1e6;
-  const LETTER_A = "A".charCodeAt(0);
-  return String.fromCodePoint(
-    ...[...code].map((letter) => REGIONAL_INDICATOR_A + (letter.charCodeAt(0) - LETTER_A)),
-  );
-}
 
 export type RegionOption = { slug: string; label: string };
 

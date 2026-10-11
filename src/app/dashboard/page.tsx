@@ -7,6 +7,7 @@ import { useDashboard } from "@/components/dashboard/dashboard-provider";
 import { MobileDevicesCard } from "@/components/dashboard/mobile-devices-card";
 import { useConnectivityChecks } from "@/components/dashboard/use-connectivity-checks";
 import { DashboardEmptyState } from "@/components/dashboard-empty-state";
+import { hasUsableKey } from "@/lib/settings-display";
 
 export default function DashboardPage() {
   const {
@@ -46,9 +47,7 @@ export default function DashboardPage() {
   }
 
   if (!homeNode) {
-    const hasVerifiedKey = providers.some(
-      (provider) => provider.status === "active" && !!provider.token_ref && provider.last_validation_status !== "failed",
-    );
+    const hasVerifiedKey = providers.some(hasUsableKey);
     return (
       <DashboardEmptyState
         savedLocations={savedLocations}

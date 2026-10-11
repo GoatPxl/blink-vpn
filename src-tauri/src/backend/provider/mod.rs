@@ -9,6 +9,7 @@ pub mod linode;
 pub mod linode_regions;
 pub mod openstack;
 pub mod openstack_regions;
+mod place_coordinates;
 pub mod retry;
 
 use std::collections::HashMap;
@@ -65,6 +66,11 @@ pub trait ProviderAdapter: Send + Sync {
   /// key goes bad — so naming an existing node's location must not require a token or a network
   /// call.
   fn describe_region(&self, slug: &str) -> ProviderRegion;
+  /// The regions this adapter can name without a credential, for showing where a provider runs
+  /// before the user has a key for it. Empty for an adapter with no curated table.
+  fn known_regions(&self) -> Vec<ProviderRegion> {
+    Vec::new()
+  }
   fn list_plan_pricing(
     &self,
     token: &str,
@@ -212,7 +218,7 @@ pub struct CredentialField {
 /// faster than a curated table can follow, and rendering an invented city for an unrecognised
 /// slug would tell the user they are exiting somewhere they are not. Absent means "not known",
 /// and callers must display the slug rather than a guess.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProviderRegion {
   pub slug: String,
   pub city: Option<String>,
@@ -222,6 +228,10 @@ pub struct ProviderRegion {
   /// ISO-3166 alpha-2, so the UI can render a flag without its own country table.
   pub country_code: Option<String>,
   pub continent: Option<String>,
+  /// Where the city is, for the map. Absent for a city the shared table does not list, in which
+  /// case the region is listed but not pinned. See `place_coordinates.rs`.
+  pub latitude: Option<f64>,
+  pub longitude: Option<f64>,
 }
 
 impl ProviderRegion {
@@ -234,6 +244,8 @@ impl ProviderRegion {
       country: None,
       country_code: None,
       continent: None,
+      latitude: None,
+      longitude: None,
     }
   }
 }
@@ -492,6 +504,10 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
 
   fn describe_region(&self, slug: &str) -> ProviderRegion {
     digitalocean_regions::describe_region(slug)
+  }
+
+  fn known_regions(&self) -> Vec<ProviderRegion> {
+    digitalocean_regions::known_regions()
   }
 
   fn init_delivery(&self) -> InitDelivery {
@@ -842,6 +858,10 @@ impl ProviderAdapter for LinodeProviderAdapter {
 
   fn describe_region(&self, slug: &str) -> ProviderRegion {
     linode_regions::describe_region(slug)
+  }
+
+  fn known_regions(&self) -> Vec<ProviderRegion> {
+    linode_regions::known_regions()
   }
 
   fn list_plan_pricing(
@@ -2057,6 +2077,10 @@ impl ProviderAdapter for GceProviderAdapter {
     gce_regions::describe_region(slug)
   }
 
+  fn known_regions(&self) -> Vec<ProviderRegion> {
+    gce_regions::known_regions()
+  }
+
   fn list_plan_pricing(
     &self,
     token: &str,
@@ -2682,6 +2706,10 @@ impl ProviderAdapter for Ec2ProviderAdapter {
 
   fn describe_region(&self, slug: &str) -> ProviderRegion {
     ec2_regions::describe_region(slug)
+  }
+
+  fn known_regions(&self) -> Vec<ProviderRegion> {
+    ec2_regions::known_regions()
   }
 
   fn list_plan_pricing(
@@ -3637,6 +3665,16 @@ impl ProviderRegistry {
   ) -> Result<Vec<CredentialField>, ProviderFlowError> {
     let (_, adapter) = self.load_provider_and_adapter_allow_suspended(db, provider_id)?;
     Ok(adapter.credential_fields())
+  }
+
+  /// Where a provider runs, from its adapter's curated table. Offline: no token, no network call.
+  pub fn known_regions_for_provider(
+    &self,
+    db: &Database,
+    provider_id: &str,
+  ) -> Result<Vec<ProviderRegion>, ProviderFlowError> {
+    let (_, adapter) = self.load_provider_and_adapter_allow_suspended(db, provider_id)?;
+    Ok(adapter.known_regions())
   }
 
   /// How this provider takes delivery of the bootstrap script.

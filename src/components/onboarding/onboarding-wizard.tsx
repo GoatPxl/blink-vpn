@@ -626,7 +626,7 @@ export function OnboardingWizard() {
                         className={`rounded-xl border px-4 py-3 text-left ${state.region === regionOption.slug ? "border-[color:rgba(171,199,255,0.35)] bg-[color:rgba(171,199,255,0.12)]" : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]"}`}
                       >
                         <div className="flex items-center gap-2">
-                          {location.flag ? <span aria-hidden="true">{location.flag}</span> : null}
+                          {location.countryCode ? <span className="font-mono text-[11.5px] text-stone">{location.countryCode}</span> : null}
                           <span className="font-medium text-[var(--on-surface)]">{location.primary}</span>
                         </div>
                         <div className="mt-1 text-xs text-[var(--on-surface-variant)]">

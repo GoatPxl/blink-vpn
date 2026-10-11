@@ -123,6 +123,7 @@ pub fn run() {
       commands::system::register_provider_credential,
       commands::system::list_provider_credential_fields,
       commands::system::list_provider_regions,
+      commands::system::list_known_provider_regions,
       commands::system::list_provider_pricing,
       commands::system::list_providers,
       commands::system::suspend_provider,

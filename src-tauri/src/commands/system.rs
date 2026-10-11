@@ -381,6 +381,23 @@ pub async fn delete_provider_node(
   .await
 }
 
+/// Where a provider runs, from its adapter's curated table, with no credential and no network call.
+/// For showing a provider's regions on the map before the user has a key for it.
+#[tauri::command]
+pub async fn list_known_provider_regions(
+  provider_id: String,
+  backend: State<'_, Backend>,
+) -> Result<Vec<ProviderRegion>, CommandError> {
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+    backend
+      .provider
+      .known_regions_for_provider(&backend.db, &provider_id)
+      .map_err(CommandError::from)
+  })
+  .await
+}
+
 /// The credential inputs a provider needs, so the UI can render them without knowing the provider.
 #[tauri::command]
 pub async fn list_provider_credential_fields(
