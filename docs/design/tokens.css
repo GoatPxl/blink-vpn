@@ -1,0 +1,106 @@
+/*
+ * GoatPxl design tokens — direction C/D (pixel brand).
+ * Status: PROPOSED. Not imported anywhere yet. See DESIGN_HANDOFF.md §2 for the migration
+ * from the current Material-ish variables in src/app/globals.css.
+ *
+ * Usage once adopted: replace the `:root` block in src/app/globals.css with this file's
+ * `:root`, and the `@theme inline` block with the one below. Tailwind v4 then exposes
+ * `bg-ink`, `text-lime`, `font-display`, `shadow-hard` etc.
+ */
+
+:root {
+  /* Ground */
+  --ink: #0b0b0a;            /* window background */
+  --ink-2: #0e0e0c;          /* quieter panels (log, about) */
+  --panel: #121210;          /* default panel fill */
+  --panel-2: #1a1a17;        /* hover fill */
+  --line: #24241f;           /* panel border, 2px */
+  --line-2: #1c1c19;         /* dividers inside panels */
+  --line-3: #3a3a34;         /* ghost-button border */
+
+  /* Text */
+  --bone: #f2f0e6;           /* primary text, ghost-button text */
+  --stone: #a29f92;          /* secondary text, tags (4.6:1 on ink) */
+  --stone-2: #6e6b60;        /* tertiary / disabled (3.2:1 — large or non-essential only) */
+
+  /* Signal — one meaning each, never decorative */
+  --lime: #d4ff3a;           /* secure / primary action / your server */
+  --ember: #ff8a3d;          /* in progress: building, hold-on, favourite ★ */
+  --alert: #ff4d6d;          /* destructive: disconnect, power off, failed */
+
+  /* Tinted panel fills for the three big states */
+  --lime-ink: #16110c;       /* unused today; reserved */
+  --ember-ink: #16110c;      /* HOLD ON / BUILDING panel background */
+  --alert-ink: #170e11;      /* FAILED panel background */
+  --ember-dim: #7a4220;      /* progress block "current" */
+  --ember-track: #2a2218;    /* progress block "pending" */
+  --track: #1e1e1b;          /* neutral progress "pending" */
+
+  /* Type */
+  --font-display: "Silkscreen", monospace;              /* headlines ≥ 32px, tags, nav labels, button labels only */
+  --font-sans: "Space Grotesk", system-ui, sans-serif;  /* all body copy */
+  --font-mono: "JetBrains Mono", ui-monospace, monospace; /* numbers, ids, ips, log */
+
+  /* Shape — no radius anywhere */
+  --radius: 0;
+  --border: 2px;
+  --shadow-hard: 4px 4px 0 var(--bone);          /* primary button */
+  --shadow-hard-lg: 8px 8px 0 var(--lime);       /* dialogs */
+  --shadow-hard-alert: 6px 6px 0 var(--alert);   /* disconnect / power off */
+
+  /* Spacing (px) — 4-base, panels use 20/24/28 */
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px;
+  --s-6: 24px; --s-7: 28px; --s-8: 32px; --s-9: 36px; --s-10: 40px; --s-12: 48px;
+
+  /* Layout */
+  --rail-w: 96px;            /* left nav rail */
+  --titlebar-h: 36px;
+  --control-h: 48px;         /* buttons, inputs */
+  --control-h-sm: 40px;
+  --control-h-xs: 36px;
+}
+
+@theme inline {
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-line-3: var(--line-3);
+  --color-bone: var(--bone);
+  --color-stone: var(--stone);
+  --color-stone-2: var(--stone-2);
+  --color-lime: var(--lime);
+  --color-ember: var(--ember);
+  --color-alert: var(--alert);
+  --color-ember-ink: var(--ember-ink);
+  --color-alert-ink: var(--alert-ink);
+  --color-ember-dim: var(--ember-dim);
+  --color-ember-track: var(--ember-track);
+  --color-track: var(--track);
+
+  --font-display: var(--font-display);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --shadow-hard: var(--shadow-hard);
+  --shadow-hard-lg: var(--shadow-hard-lg);
+  --shadow-hard-alert: var(--shadow-hard-alert);
+
+  --radius-none: 0;
+}
+
+/* Type scale (reference; apply via utilities or classes)
+   display-xl  Silkscreen 140px / 0.9   SECURE · OFF · HOLD ON (home hero only)
+   display-l   Silkscreen 104px / 0.9   BUILDING · FAILED
+   display-m   Silkscreen 44px / 1.0    page titles (MAP, SHIELD, SETUP)
+   display-s   Silkscreen 16–18px       panel headings
+   tag         Silkscreen 12px, .06em tracking, uppercase, stone
+   nav         Silkscreen 10px uppercase
+   body-l      Space Grotesk 22–28px 600  the one sentence under a hero
+   body        Space Grotesk 15–16px
+   body-s      Space Grotesk 12.5–13.5px stone
+   num-xl      JetBrains Mono 36–72px 700 session timer, cost, countdown
+   num         JetBrains Mono 12–14px     ids, ips, prices in rows
+*/
