@@ -38,7 +38,7 @@ packages:
   - kmod
   - unattended-upgrades
 write_files:
-  - path: /etc/sysctl.d/99-goatstare-vpn.conf
+  - path: /etc/sysctl.d/99-blink-vpn.conf
     permissions: '0644'
     content: |
       net.ipv4.ip_forward=1
@@ -49,7 +49,7 @@ write_files:
     content: |
       APT::Periodic::Update-Package-Lists "1";
       APT::Periodic::Unattended-Upgrade "1";
-  - path: /etc/apt/apt.conf.d/52goatstare-unattended-upgrades
+  - path: /etc/apt/apt.conf.d/52blink-unattended-upgrades
     permissions: '0644'
     content: |
       Unattended-Upgrade::Allowed-Origins {{
@@ -73,14 +73,14 @@ write_files:
     owner: root:root
     content: |
       {server_public_key}
-  - path: /usr/local/bin/goatstare-bootstrap.sh
+  - path: /usr/local/bin/blink-bootstrap.sh
     permissions: '0700'
     owner: root:root
     content: |
 {escaped_script}
 runcmd:
-  - ["bash", "-lc", "/usr/local/bin/goatstare-bootstrap.sh"]
-final_message: "goatstare bootstrap completed"
+  - ["bash", "-lc", "/usr/local/bin/blink-bootstrap.sh"]
+final_message: "blink bootstrap completed"
 "#
   ))
 }

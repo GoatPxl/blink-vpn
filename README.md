@@ -1,6 +1,6 @@
-# GoatStare VPN
+# Blink VPN
 
-GoatStare VPN is a Windows desktop VPN control plane built with a Rust backend, Tauri, and a Next.js frontend.
+Blink VPN is a Windows desktop VPN control plane built with a Rust backend, Tauri, and a Next.js frontend.
 
 High-level goal:
 
@@ -44,7 +44,7 @@ provisioned, so no SSH or remote shell is required or supported.
 
 The Docker provider supports local development and repeatable integration testing.
 
-- Enabled by backend flag: `GOATSTARE_DEV_DOCKER=1`.
+- Enabled by backend flag: `BLINK_DEV_DOCKER=1`.
 - Exposed in frontend development UX when `NEXT_PUBLIC_DEV_DOCKER=1`.
 - Uses local Docker containers to emulate provider node provisioning behavior.
 - Returns deterministic synthetic provider plan and account data for local workflows.
@@ -112,7 +112,7 @@ Against real DigitalOcean infrastructure. **This creates billable droplets**, de
 exit path including panics:
 
 ```bash
-GOATSTARE_DO_TEST_TOKEN=<token> npm run backend:test:do:real
+BLINK_DO_TEST_TOKEN=<token> npm run backend:test:do:real
 ```
 
 It provisions a droplet, connects to it as a real WireGuard client, confirms a handshake, and
@@ -122,7 +122,7 @@ The equivalent Amazon EC2 lane. **This creates a billable instance and public IP
 destroyed on every exit path along with the security group created alongside them:
 
 ```bash
-GOATSTARE_AWS_TEST_ACCESS_KEY_ID=<key> GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY=<secret> npm run backend:test:ec2:real
+BLINK_AWS_TEST_ACCESS_KEY_ID=<key> BLINK_AWS_TEST_SECRET_ACCESS_KEY=<secret> npm run backend:test:ec2:real
 ```
 
 See [Testing](docs/TESTING.md).

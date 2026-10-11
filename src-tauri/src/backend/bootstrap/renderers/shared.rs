@@ -86,15 +86,15 @@ pub(super) fn peer_specs_shell_list(peers: &[BootstrapPeer]) -> String {
 /// (some container hosts) — same script everywhere, degraded by one rule where the module is
 /// absent rather than forked per provider (§3).
 pub(super) const FIREWALL_RULES_FRAGMENT: &str = r#"iptables -P FORWARD DROP
-iptables -N GOATSTARE-INPUT 2>/dev/null || true
-iptables -F GOATSTARE-INPUT
-iptables -A GOATSTARE-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A GOATSTARE-INPUT -i lo -j ACCEPT
-iptables -A GOATSTARE-INPUT -i ${WG_IFACE} -j ACCEPT
-iptables -A GOATSTARE-INPUT -p udp --dport ${WG_PORT} -j ACCEPT
-iptables -A GOATSTARE-INPUT -p icmp --icmp-type echo-request -m hashlimit --hashlimit-upto 5/second --hashlimit-burst 10 --hashlimit-mode srcip --hashlimit-name goatstare-icmp -j ACCEPT 2>/dev/null || iptables -A GOATSTARE-INPUT -p icmp --icmp-type echo-request -j ACCEPT
-iptables -A GOATSTARE-INPUT -j DROP
-iptables -C INPUT -j GOATSTARE-INPUT 2>/dev/null || iptables -I INPUT 1 -j GOATSTARE-INPUT"#;
+iptables -N BLINK-INPUT 2>/dev/null || true
+iptables -F BLINK-INPUT
+iptables -A BLINK-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A BLINK-INPUT -i lo -j ACCEPT
+iptables -A BLINK-INPUT -i ${WG_IFACE} -j ACCEPT
+iptables -A BLINK-INPUT -p udp --dport ${WG_PORT} -j ACCEPT
+iptables -A BLINK-INPUT -p icmp --icmp-type echo-request -m hashlimit --hashlimit-upto 5/second --hashlimit-burst 10 --hashlimit-mode srcip --hashlimit-name blink-icmp -j ACCEPT 2>/dev/null || iptables -A BLINK-INPUT -p icmp --icmp-type echo-request -j ACCEPT
+iptables -A BLINK-INPUT -j DROP
+iptables -C INPUT -j BLINK-INPUT 2>/dev/null || iptables -I INPUT 1 -j BLINK-INPUT"#;
 
 pub(super) fn indent_for_yaml_block(content: &str, spaces: usize) -> String {
   let prefix = " ".repeat(spaces);
@@ -129,7 +129,7 @@ fn render_cloud_bootstrap_body(params: &BootstrapParams) -> Result<String, Boots
 log_stage() {{
   local stage="$1"
   shift || true
-  echo "goatstare.bootstrap.stage=${{stage}} $*"
+  echo "blink.bootstrap.stage=${{stage}} $*"
 }}
 
 trap 'log_stage "failed" "line=${{LINENO}} exit_status=$?"' ERR
@@ -142,7 +142,7 @@ PEER_PUBLIC_KEYS="{peer_public_keys}"
 MARKER_PATH="{marker}"
 
 umask 077
-mkdir -p /etc/wireguard /var/lib/goatstare
+mkdir -p /etc/wireguard /var/lib/blink
 
 log_stage "start" "iface=${{WG_IFACE}} port=${{WG_PORT}} endpoint={endpoint}"
 log_stage "validate-tools" "checking WireGuard and firewall toolchain"

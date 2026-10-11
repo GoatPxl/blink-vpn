@@ -195,7 +195,7 @@ describe("describeTunnelConfig", () => {
         commands: [],
         last_import_tunnel_name: "wg-primary",
         last_import_config: CONFIG,
-        last_import_config_temp_path: "C:\\Users\\me\\AppData\\Local\\GoatStare\\tunnels\\wg-primary.conf",
+        last_import_config_temp_path: "C:\\Users\\me\\AppData\\Local\\Blink\\tunnels\\wg-primary.conf",
         ...overrides,
       },
     } as unknown as DiagnosticsBundle;

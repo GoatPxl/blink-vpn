@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Operating rules for AI agents working on GoatStare VPN.
+Operating rules for AI agents working on Blink VPN.
 
 This file encodes invariants that were learned expensively. Most rules below exist because the
 codebase already violated them once and the project stalled as a result. Where a rule has a
@@ -50,7 +50,7 @@ That is the entire contract. The app never talks to the server it provisioned.
 - Reading any file back off the server, including the readiness marker.
 
 **Why.** The original design had the server generate its own keys and the app read them back from
-`/var/lib/goatstare/bootstrap-ready.json`. Reading a file off a fresh droplet requires SSH, which
+`/var/lib/blink/bootstrap-ready.json`. Reading a file off a fresh droplet requires SSH, which
 the app does not have and should not gain. So the DigitalOcean adapter shipped a hardcoded
 `Unsupported` stub at exactly that step — meaning **every production provision created a billable
 droplet, failed, and rolled back**. Meanwhile the Docker adapter faked its way past the same step
@@ -96,7 +96,7 @@ had installed, started, and completed a handshake correctly.
 
 The tunnel config passed to `/installtunnelservice` must **outlive the import**. The path is
 recorded in the service's command line and read on every start; it is not copied. Configs live
-under `%LOCALAPPDATA%\GoatStare\tunnels\` and are removed when the tunnel is unregistered.
+under `%LOCALAPPDATA%\Blink\tunnels\` and are removed when the tunnel is unregistered.
 
 **Do not reintroduce the `defguard_wireguard_rs` runtime path or `wireguard-nt`.** They were tried
 and reverted. Three independent reasons, all still true:
@@ -219,7 +219,7 @@ configs, may be written to files, shown on screen, encoded into QR codes, copied
 and included in diagnostics. Do not add redaction for them, and do not treat their appearance in
 output as a defect.
 
-The reason is lifetime. A GoatStare server is provisioned on demand, lives for hours, and is
+The reason is lifetime. A Blink server is provisioned on demand, lives for hours, and is
 destroyed; its keys are worthless the moment it is gone, and they grant access to nothing except
 that one ephemeral box. Against that, redaction cost real things: it blanked the `PrivateKey` line
 in the config snapshot — the one line that says *which peer is actually loaded* — and a client
@@ -291,12 +291,12 @@ Run what your change touches. Report **real results**, including failures.
 | Google Compute Engine adapter or cloud-init | `npm run backend:test:gce:real` (**creates billable instances**) |
 | OpenStack adapter or cloud-init | `npm run backend:test:openstack:real` (**manual; billable on a commercial cloud**) |
 
-The Linode lane needs `GOATSTARE_LINODE_TEST_TOKEN`; the GCE lane needs
-`GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE`, a **path** to the JSON key file rather than its contents.
-The OpenStack lane needs `GOATSTARE_OPENSTACK_TEST_AUTH_URL`, `..._APPLICATION_CREDENTIAL_ID`,
+The Linode lane needs `BLINK_LINODE_TEST_TOKEN`; the GCE lane needs
+`BLINK_GCE_TEST_SERVICE_ACCOUNT_FILE`, a **path** to the JSON key file rather than its contents.
+The OpenStack lane needs `BLINK_OPENSTACK_TEST_AUTH_URL`, `..._APPLICATION_CREDENTIAL_ID`,
 `..._APPLICATION_CREDENTIAL_SECRET` and `..._FLAVOR`, and has no default cloud to point at.
-The DigitalOcean lane needs `GOATSTARE_DO_TEST_TOKEN`; the EC2 lane needs
-`GOATSTARE_AWS_TEST_ACCESS_KEY_ID` and `GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY`. Every one of these
+The DigitalOcean lane needs `BLINK_DO_TEST_TOKEN`; the EC2 lane needs
+`BLINK_AWS_TEST_ACCESS_KEY_ID` and `BLINK_AWS_TEST_SECRET_ACCESS_KEY`. Every one of these
 tests destroys what it created on every exit path, including panics, and asserts only after teardown
 so a failed assertion cannot strand a paid resource. Keep it that way.
 
@@ -341,7 +341,7 @@ nothing reached them. Do not reintroduce a second harness.
 **Docs must stay true.** When you change behavior, update the doc in the same commit; when you find
 a false claim, fix or delete it rather than working around it.
 
-Two such claims — a `GOATSTARE_WG_RUNTIME` env var with no code reference, and a required DLL at
+Two such claims — a `BLINK_WG_RUNTIME` env var with no code reference, and a required DLL at
 `resources-windows/binaries/wireguard-amd64.dll` — have since been removed from the docs. This
 paragraph kept naming them after the fact, which made *this* file the stale one.
 
@@ -351,7 +351,7 @@ paragraph kept naming them after the fact, which made *this* file the stale one.
 
 | Flag | Side | Effect |
 |---|---|---|
-| `GOATSTARE_DEV_DOCKER` | backend | Enables the Docker dev provider |
+| `BLINK_DEV_DOCKER` | backend | Enables the Docker dev provider |
 | `NEXT_PUBLIC_DEV_DOCKER` | frontend | Exposes Docker dev surface in the UI |
 
 The backend flag also auto-reads `.env.local`, `.env`, and `src-tauri/.env`, so it may be on without

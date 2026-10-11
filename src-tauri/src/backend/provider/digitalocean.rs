@@ -538,7 +538,7 @@ mod tests {
       region: DEFAULT_REGION.to_string(),
       size: DEFAULT_SIZE.to_string(),
       image: DEFAULT_IMAGE.to_string(),
-      tags: vec!["goatstare".to_string()],
+      tags: vec!["blink".to_string()],
       user_data: Some("#cloud-config\n".to_string()),
     };
 

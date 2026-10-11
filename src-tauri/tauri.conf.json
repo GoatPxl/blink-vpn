@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "GoatStare VPN",
+  "productName": "Blink",
   "version": "0.1.0",
-  "identifier": "com.goatstare.vpn",
+  "identifier": "app.blink.vpn",
   "build": {
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "GoatStare VPN",
+        "title": "Blink",
         "width": 1360,
         "height": 840,
         "resizable": true,

@@ -32,7 +32,7 @@ npm run tauri:dev
 Set backend and frontend flags in your terminal session:
 
 ```bash
-set GOATSTARE_DEV_DOCKER=1
+set BLINK_DEV_DOCKER=1
 set NEXT_PUBLIC_DEV_DOCKER=1
 ```
 

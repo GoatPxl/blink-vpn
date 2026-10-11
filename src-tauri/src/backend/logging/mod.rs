@@ -280,18 +280,18 @@ mod tests {
   /// so no part of it may reach a log or a diagnostics bundle.
   #[test]
   fn redacts_a_google_service_account_key_but_keeps_its_identity() {
-    let input = r#"{"service_account_json": "{\"project_id\": \"goatstare-test\"}", "client_email": "vpn@goatstare-test.iam.gserviceaccount.com", "project_id": "goatstare-test"}"#;
+    let input = r#"{"service_account_json": "{\"project_id\": \"blink-test\"}", "client_email": "vpn@blink-test.iam.gserviceaccount.com", "project_id": "blink-test"}"#;
     let output = redact_sensitive_text(input);
 
     assert!(!output.contains("\\\"project_id\\\""), "the key blob leaked: {output}");
     assert!(output.contains("[REDACTED]"));
     // Which credential is in use is a diagnostic, not a secret — the `access_key_id` precedent.
     assert!(
-      output.contains("vpn@goatstare-test.iam.gserviceaccount.com"),
+      output.contains("vpn@blink-test.iam.gserviceaccount.com"),
       "the service account identity should survive: {output}"
     );
     assert!(
-      output.contains("\"project_id\": \"goatstare-test\""),
+      output.contains("\"project_id\": \"blink-test\""),
       "the project id should survive: {output}"
     );
   }

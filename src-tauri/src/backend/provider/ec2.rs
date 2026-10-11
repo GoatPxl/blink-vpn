@@ -223,7 +223,7 @@ impl Ec2ApiClient {
       credentials.secret_access_key.clone(),
       credentials.session_token.clone(),
       None,
-      "goatstare-provider-credential",
+      "blink-provider-credential",
     )
     .into();
 
@@ -525,7 +525,7 @@ impl Ec2ApiClient {
         ("IpPermissions.1.IpRanges.1.CidrIp".to_string(), "0.0.0.0/0".to_string()),
         (
           "IpPermissions.1.IpRanges.1.Description".to_string(),
-          "GoatStare WireGuard".to_string(),
+          "Blink WireGuard".to_string(),
         ),
       ],
       "open the WireGuard port",
@@ -950,8 +950,8 @@ mod tests {
   #[test]
   fn form_encoding_uses_percent_twenty_for_spaces() {
     // `+` here would break the SigV4 signature rather than the request body.
-    let encoded = encode_form(&[("Description".to_string(), "GoatStare WireGuard".to_string())]);
-    assert_eq!(encoded, "Description=GoatStare%20WireGuard");
+    let encoded = encode_form(&[("Description".to_string(), "Blink WireGuard".to_string())]);
+    assert_eq!(encoded, "Description=Blink%20WireGuard");
   }
 
   #[test]
@@ -1070,7 +1070,7 @@ mod tests {
       "TagSpecification.1",
       &[
         ("Name".to_string(), "node".to_string()),
-        ("goatstare".to_string(), "true".to_string()),
+        ("blink".to_string(), "true".to_string()),
       ],
     );
 

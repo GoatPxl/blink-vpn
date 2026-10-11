@@ -162,7 +162,7 @@ mod tests {
       .duration_since(UNIX_EPOCH)
       .expect("clock must be after unix epoch")
       .as_nanos();
-    path.push(format!("goatstare_preferences_{label}_{nanos}.sqlite3"));
+    path.push(format!("blink_preferences_{label}_{nanos}.sqlite3"));
     let db = Database::new(path);
     db.run_migrations().expect("migrations should succeed");
     db

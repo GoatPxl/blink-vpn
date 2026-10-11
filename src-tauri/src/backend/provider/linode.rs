@@ -632,7 +632,7 @@ mod tests {
           image: DEFAULT_LINODE_IMAGE.to_string(),
           root_pass: "throwaway".to_string(),
           booted: true,
-          tags: vec!["goatstare".to_string()],
+          tags: vec!["blink".to_string()],
           metadata: LinodeMetadata {
             user_data: "I2Nsb3VkLWNvbmZpZwo=".to_string(),
           },

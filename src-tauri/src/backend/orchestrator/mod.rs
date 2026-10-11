@@ -4161,7 +4161,7 @@ mod tests {
       .duration_since(UNIX_EPOCH)
       .expect("clock must be after unix epoch")
       .as_nanos();
-    path.push(format!("goatstare_orchestrator_{test_name}_{nanos}.sqlite3"));
+    path.push(format!("blink_orchestrator_{test_name}_{nanos}.sqlite3"));
     path
   }
 
@@ -6004,21 +6004,21 @@ mod tests {
   ///
   /// **This creates a billable resource.** It is destroyed on every exit path, including panics,
   /// and the assertions run only after teardown so a failure cannot strand a droplet. Requires
-  /// `GOATSTARE_DO_TEST_TOKEN`.
+  /// `BLINK_DO_TEST_TOKEN`.
   ///
   /// Proves the production path end to end: keys generated locally, baked into cloud-init, and a
   /// droplet reaching ready with an endpoint the client can dial — with nothing ever read back
   /// off the server.
   #[test]
-  #[ignore = "Creates a real, billable DigitalOcean droplet; needs GOATSTARE_DO_TEST_TOKEN"]
+  #[ignore = "Creates a real, billable DigitalOcean droplet; needs BLINK_DO_TEST_TOKEN"]
   fn real_digitalocean_full_backend_path_produces_a_connect_config() {
     use crate::backend::provider::DigitalOceanProviderAdapter;
     use crate::backend::wireguard::{build_client_config, ClientConfigParams};
 
-    let token = match std::env::var("GOATSTARE_DO_TEST_TOKEN") {
+    let token = match std::env::var("BLINK_DO_TEST_TOKEN") {
       Ok(value) if !value.trim().is_empty() => value,
       _ => {
-        eprintln!("GOATSTARE_DO_TEST_TOKEN is not set; skipping.");
+        eprintln!("BLINK_DO_TEST_TOKEN is not set; skipping.");
         return;
       }
     };
@@ -6056,7 +6056,7 @@ mod tests {
       &CreateVpnNodeRequest {
         node_id: node_id.clone(),
         provider_id: DO_PROVIDER_ID.to_string(),
-        node_name: format!("goatstare-e2e-{suffix}"),
+        node_name: format!("blink-e2e-{suffix}"),
         region: "nyc1".to_string(),
         plan_key: "s-1vcpu-1gb".to_string(),
       },
@@ -6142,7 +6142,7 @@ mod tests {
       "full tunnel must survive for a public endpoint: {config}"
     );
 
-    let path = std::env::temp_dir().join(format!("goatstare-do-{suffix}.conf"));
+    let path = std::env::temp_dir().join(format!("blink-do-{suffix}.conf"));
     std::fs::write(&path, config.replace("\r\n", "\n")).expect("config should be writable");
     println!("\n=== DigitalOcean client config: {} ===", path.display());
     println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
@@ -6153,30 +6153,30 @@ mod tests {
   ///
   /// **Creates billable resources** — an instance *and* a public IPv4 address — destroyed on every
   /// exit path, with the assertions running only after teardown so a failure cannot strand them.
-  /// Needs `GOATSTARE_AWS_TEST_ACCESS_KEY_ID` and `GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY`.
+  /// Needs `BLINK_AWS_TEST_ACCESS_KEY_ID` and `BLINK_AWS_TEST_SECRET_ACCESS_KEY`.
   ///
   /// EC2 leaves *two* resources behind rather than one: the instance and the security group created
   /// with it. `force_cleanup_vpn_node` must report both gone, which is what the cleanup assertion
   /// below is actually checking — the adapter fails the delete rather than swallowing a group it
   /// could not remove.
   #[test]
-  #[ignore = "Creates a real, billable EC2 instance; needs GOATSTARE_AWS_TEST_ACCESS_KEY_ID and GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY"]
+  #[ignore = "Creates a real, billable EC2 instance; needs BLINK_AWS_TEST_ACCESS_KEY_ID and BLINK_AWS_TEST_SECRET_ACCESS_KEY"]
   fn real_ec2_full_backend_path_produces_a_connect_config() {
     use crate::backend::provider::{Ec2ProviderAdapter, ProviderCredential};
     use crate::backend::wireguard::{build_client_config, ClientConfigParams};
 
     let (access_key_id, secret_access_key) = match (
-      std::env::var("GOATSTARE_AWS_TEST_ACCESS_KEY_ID"),
-      std::env::var("GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY"),
+      std::env::var("BLINK_AWS_TEST_ACCESS_KEY_ID"),
+      std::env::var("BLINK_AWS_TEST_SECRET_ACCESS_KEY"),
     ) {
       (Ok(key), Ok(secret)) if !key.trim().is_empty() && !secret.trim().is_empty() => (key, secret),
       _ => {
-        eprintln!("GOATSTARE_AWS_TEST_ACCESS_KEY_ID / _SECRET_ACCESS_KEY are not set; skipping.");
+        eprintln!("BLINK_AWS_TEST_ACCESS_KEY_ID / _SECRET_ACCESS_KEY are not set; skipping.");
         return;
       }
     };
 
-    let region = std::env::var("GOATSTARE_AWS_TEST_REGION")
+    let region = std::env::var("BLINK_AWS_TEST_REGION")
       .ok()
       .filter(|value| !value.trim().is_empty())
       .unwrap_or_else(|| "us-east-1".to_string());
@@ -6216,7 +6216,7 @@ mod tests {
       &CreateVpnNodeRequest {
         node_id: node_id.clone(),
         provider_id: EC2_PROVIDER_ID.to_string(),
-        node_name: format!("goatstare-e2e-{suffix}"),
+        node_name: format!("blink-e2e-{suffix}"),
         region: region.clone(),
         plan_key: "t3.micro".to_string(),
       },
@@ -6307,7 +6307,7 @@ mod tests {
       "full tunnel must survive for a public endpoint: {config}"
     );
 
-    let path = std::env::temp_dir().join(format!("goatstare-ec2-{suffix}.conf"));
+    let path = std::env::temp_dir().join(format!("blink-ec2-{suffix}.conf"));
     std::fs::write(&path, config.replace("\r\n", "\n")).expect("config should be writable");
     println!("\n=== EC2 client config: {} ===", path.display());
     println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
@@ -6317,28 +6317,28 @@ mod tests {
   /// The full backend path against a real Linode instance.
   ///
   /// **Creates a billable resource** — destroyed on every exit path, with the assertions running
-  /// only after teardown so a failure cannot strand one. Needs `GOATSTARE_LINODE_TEST_TOKEN`;
-  /// `GOATSTARE_LINODE_TEST_REGION` overrides the default region.
+  /// only after teardown so a failure cannot strand one. Needs `BLINK_LINODE_TEST_TOKEN`;
+  /// `BLINK_LINODE_TEST_REGION` overrides the default region.
   ///
   /// The region matters more here than on other providers: `user_data` is accepted everywhere but
   /// only honoured where the Metadata service runs, so a region without it would provision an
   /// instance that boots healthily and never bootstraps. `list_regions` filters those out; this
   /// lane is what proves the filter is pointed at the right capability.
   #[test]
-  #[ignore = "Creates a real, billable Linode instance; needs GOATSTARE_LINODE_TEST_TOKEN"]
+  #[ignore = "Creates a real, billable Linode instance; needs BLINK_LINODE_TEST_TOKEN"]
   fn real_linode_full_backend_path_produces_a_connect_config() {
     use crate::backend::provider::{LinodeProviderAdapter, ProviderCredential};
     use crate::backend::wireguard::{build_client_config, ClientConfigParams};
 
-    let token = match std::env::var("GOATSTARE_LINODE_TEST_TOKEN") {
+    let token = match std::env::var("BLINK_LINODE_TEST_TOKEN") {
       Ok(token) if !token.trim().is_empty() => token,
       _ => {
-        eprintln!("GOATSTARE_LINODE_TEST_TOKEN is not set; skipping.");
+        eprintln!("BLINK_LINODE_TEST_TOKEN is not set; skipping.");
         return;
       }
     };
 
-    let region = std::env::var("GOATSTARE_LINODE_TEST_REGION")
+    let region = std::env::var("BLINK_LINODE_TEST_REGION")
       .ok()
       .filter(|value| !value.trim().is_empty())
       .unwrap_or_else(|| "us-ord".to_string());
@@ -6375,7 +6375,7 @@ mod tests {
       &CreateVpnNodeRequest {
         node_id: node_id.clone(),
         provider_id: LINODE_PROVIDER_ID.to_string(),
-        node_name: format!("goatstare-e2e-{suffix}"),
+        node_name: format!("blink-e2e-{suffix}"),
         region: region.clone(),
         plan_key: "g6-nanode-1".to_string(),
       },
@@ -6472,7 +6472,7 @@ mod tests {
       "the desktop peer's preshared key must reach the config: {config}"
     );
 
-    let path = std::env::temp_dir().join(format!("goatstare-linode-{suffix}.conf"));
+    let path = std::env::temp_dir().join(format!("blink-linode-{suffix}.conf"));
     std::fs::write(&path, config.replace("\r\n", "\n")).expect("config should be writable");
     println!("\n=== Linode client config: {} ===", path.display());
     println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
@@ -6483,24 +6483,24 @@ mod tests {
   ///
   /// **Creates billable resources** — an instance *and* its external IPv4, billed hourly since
   /// February 2024 — destroyed on every exit path, with the assertions running only after teardown
-  /// so a failure cannot strand them. Needs `GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE`, a **path**
+  /// so a failure cannot strand them. Needs `BLINK_GCE_TEST_SERVICE_ACCOUNT_FILE`, a **path**
   /// to the downloaded JSON key file rather than its contents: a multi-KB JSON blob in an
-  /// environment variable is hostile to quote on Windows. `GOATSTARE_GCE_TEST_ZONE` overrides the
+  /// environment variable is hostile to quote on Windows. `BLINK_GCE_TEST_ZONE` overrides the
   /// default zone.
   ///
   /// Like EC2, GCE leaves *two* resources behind rather than one: the instance and the firewall
   /// rule opened for it. The boot disk is `autoDelete`, so it goes with the instance — a disk left
   /// behind is the classic way a "deleted" GCE node keeps costing money.
   #[test]
-  #[ignore = "Creates a real, billable GCE instance; needs GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE"]
+  #[ignore = "Creates a real, billable GCE instance; needs BLINK_GCE_TEST_SERVICE_ACCOUNT_FILE"]
   fn real_gce_full_backend_path_produces_a_connect_config() {
     use crate::backend::provider::{GceProviderAdapter, ProviderCredential};
     use crate::backend::wireguard::{build_client_config, ClientConfigParams};
 
-    let key_path = match std::env::var("GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE") {
+    let key_path = match std::env::var("BLINK_GCE_TEST_SERVICE_ACCOUNT_FILE") {
       Ok(path) if !path.trim().is_empty() => path,
       _ => {
-        eprintln!("GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE is not set; skipping.");
+        eprintln!("BLINK_GCE_TEST_SERVICE_ACCOUNT_FILE is not set; skipping.");
         return;
       }
     };
@@ -6513,7 +6513,7 @@ mod tests {
       }
     };
 
-    let zone = std::env::var("GOATSTARE_GCE_TEST_ZONE")
+    let zone = std::env::var("BLINK_GCE_TEST_ZONE")
       .ok()
       .filter(|value| !value.trim().is_empty())
       .unwrap_or_else(|| "us-central1-a".to_string());
@@ -6553,7 +6553,7 @@ mod tests {
       &CreateVpnNodeRequest {
         node_id: node_id.clone(),
         provider_id: GCE_PROVIDER_ID.to_string(),
-        node_name: format!("goatstare-e2e-{suffix}"),
+        node_name: format!("blink-e2e-{suffix}"),
         region: zone.clone(),
         plan_key: "e2-micro".to_string(),
       },
@@ -6659,7 +6659,7 @@ mod tests {
       "the desktop peer's preshared key must reach the config: {config}"
     );
 
-    let path = std::env::temp_dir().join(format!("goatstare-gce-{suffix}.conf"));
+    let path = std::env::temp_dir().join(format!("blink-gce-{suffix}.conf"));
     std::fs::write(&path, config.replace("\r\n", "\n")).expect("config should be writable");
     println!("\n=== GCE client config: {} ===", path.display());
     println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
@@ -6677,12 +6677,12 @@ mod tests {
   /// **Creates billable resources on a commercial cloud** — a server, and on most clouds a
   /// floating IP — destroyed on every exit path, with assertions only after teardown.
   ///
-  /// Needs `GOATSTARE_OPENSTACK_TEST_AUTH_URL`, `..._APPLICATION_CREDENTIAL_ID`,
+  /// Needs `BLINK_OPENSTACK_TEST_AUTH_URL`, `..._APPLICATION_CREDENTIAL_ID`,
   /// `..._APPLICATION_CREDENTIAL_SECRET` and `..._FLAVOR`. The flavor has no default because
   /// flavor ids are operator-defined and no guess is right across clouds.
   /// `..._REGION` is optional for a single-region cloud and required for the rest.
   #[test]
-  #[ignore = "Creates real, billable resources on an OpenStack cloud; needs GOATSTARE_OPENSTACK_TEST_* variables"]
+  #[ignore = "Creates real, billable resources on an OpenStack cloud; needs BLINK_OPENSTACK_TEST_* variables"]
   fn real_openstack_full_backend_path_produces_a_connect_config() {
     use crate::backend::provider::{OpenStackProviderAdapter, ProviderCredential};
     use crate::backend::wireguard::{build_client_config, ClientConfigParams};
@@ -6694,21 +6694,21 @@ mod tests {
     };
 
     let (auth_url, credential_id, credential_secret, flavor) = match (
-      required("GOATSTARE_OPENSTACK_TEST_AUTH_URL"),
-      required("GOATSTARE_OPENSTACK_TEST_APPLICATION_CREDENTIAL_ID"),
-      required("GOATSTARE_OPENSTACK_TEST_APPLICATION_CREDENTIAL_SECRET"),
-      required("GOATSTARE_OPENSTACK_TEST_FLAVOR"),
+      required("BLINK_OPENSTACK_TEST_AUTH_URL"),
+      required("BLINK_OPENSTACK_TEST_APPLICATION_CREDENTIAL_ID"),
+      required("BLINK_OPENSTACK_TEST_APPLICATION_CREDENTIAL_SECRET"),
+      required("BLINK_OPENSTACK_TEST_FLAVOR"),
     ) {
       (Some(url), Some(id), Some(secret), Some(flavor)) => (url, id, secret, flavor),
       _ => {
         eprintln!(
-          "GOATSTARE_OPENSTACK_TEST_AUTH_URL / _APPLICATION_CREDENTIAL_ID / _APPLICATION_CREDENTIAL_SECRET / _FLAVOR are not all set; skipping."
+          "BLINK_OPENSTACK_TEST_AUTH_URL / _APPLICATION_CREDENTIAL_ID / _APPLICATION_CREDENTIAL_SECRET / _FLAVOR are not all set; skipping."
         );
         return;
       }
     };
 
-    let region = required("GOATSTARE_OPENSTACK_TEST_REGION").unwrap_or_default();
+    let region = required("BLINK_OPENSTACK_TEST_REGION").unwrap_or_default();
 
     let suffix = SystemTime::now()
       .duration_since(UNIX_EPOCH)
@@ -6746,7 +6746,7 @@ mod tests {
       &CreateVpnNodeRequest {
         node_id: node_id.clone(),
         provider_id: OPENSTACK_PROVIDER_ID.to_string(),
-        node_name: format!("goatstare-e2e-{suffix}"),
+        node_name: format!("blink-e2e-{suffix}"),
         region: region.clone(),
         plan_key: flavor,
       },
@@ -6844,7 +6844,7 @@ mod tests {
       "the desktop peer's preshared key must reach the config: {config}"
     );
 
-    let path = std::env::temp_dir().join(format!("goatstare-openstack-{suffix}.conf"));
+    let path = std::env::temp_dir().join(format!("blink-openstack-{suffix}.conf"));
     std::fs::write(&path, config.replace("\r\n", "\n")).expect("config should be writable");
     println!("\n=== OpenStack client config: {} ===", path.display());
     println!("=== endpoint {endpoint}:{DEFAULT_WIREGUARD_PORT} ===");
@@ -6854,7 +6854,7 @@ mod tests {
   /// The production path, proven by an actual handshake against a real droplet.
   ///
   /// **Creates a billable resource**, destroyed on every exit path. Needs
-  /// `GOATSTARE_DO_TEST_TOKEN` and a Docker daemon.
+  /// `BLINK_DO_TEST_TOKEN` and a Docker daemon.
   ///
   /// The previous test stops at "the provider says ready", which is all the app can observe — the
   /// droplet reports active well before cloud-init finishes. That leaves the important question
@@ -6865,16 +6865,16 @@ mod tests {
   /// *client*; nothing execs into the provisioned droplet, and no key material is read back from
   /// it — the config is built entirely from values generated locally.
   #[test]
-  #[ignore = "Creates a real, billable DigitalOcean droplet; needs GOATSTARE_DO_TEST_TOKEN and Docker"]
+  #[ignore = "Creates a real, billable DigitalOcean droplet; needs BLINK_DO_TEST_TOKEN and Docker"]
   fn real_digitalocean_server_completes_a_wireguard_handshake() {
     use crate::backend::provider::DigitalOceanProviderAdapter;
     use crate::backend::wireguard::{build_client_config, ClientConfigParams};
     use crate::backend::process::no_window_command;
 
-    let token = match std::env::var("GOATSTARE_DO_TEST_TOKEN") {
+    let token = match std::env::var("BLINK_DO_TEST_TOKEN") {
       Ok(value) if !value.trim().is_empty() => value,
       _ => {
-        eprintln!("GOATSTARE_DO_TEST_TOKEN is not set; skipping.");
+        eprintln!("BLINK_DO_TEST_TOKEN is not set; skipping.");
         return;
       }
     };
@@ -6883,7 +6883,7 @@ mod tests {
       .duration_since(UNIX_EPOCH)
       .map(|value| value.as_secs())
       .unwrap_or(0);
-    let client_container = format!("goatstare-do-client-{suffix}");
+    let client_container = format!("blink-do-client-{suffix}");
 
     let db = Database::new(test_db_path(&format!("real_do_hs_{suffix}")));
     db.run_migrations().expect("migrations should succeed");
@@ -6911,7 +6911,7 @@ mod tests {
       &CreateVpnNodeRequest {
         node_id: node_id.clone(),
         provider_id: DO_PROVIDER_ID.to_string(),
-        node_name: format!("goatstare-hs-{suffix}"),
+        node_name: format!("blink-hs-{suffix}"),
         region: "nyc1".to_string(),
         plan_key: "s-1vcpu-1gb".to_string(),
       },
@@ -7627,7 +7627,7 @@ impl OrchestratorError {
             || lowered_source.contains("administrator")
           {
             format!(
-              "Approve the Windows UAC prompt (or run GoatStare as Administrator), then retry Connect. {tunnel_repair_commands}"
+              "Approve the Windows UAC prompt (or run Blink as Administrator), then retry Connect. {tunnel_repair_commands}"
             )
           } else if lowered_detail.contains("did not reach running")
             || lowered_detail.contains("did not report running")

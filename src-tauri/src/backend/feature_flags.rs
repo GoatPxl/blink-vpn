@@ -6,7 +6,7 @@ pub struct FeatureFlags {
 impl FeatureFlags {
   pub fn from_env() -> Self {
     Self {
-      docker_dev: read_bool_flag("GOATSTARE_DEV_DOCKER"),
+      docker_dev: read_bool_flag("BLINK_DEV_DOCKER"),
     }
   }
 }

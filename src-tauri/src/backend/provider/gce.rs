@@ -361,7 +361,7 @@ impl GceApiClient {
       "sourceRanges": ["0.0.0.0/0"],
       "targetTags": [network_tag],
       "allowed": [{ "IPProtocol": "udp", "ports": [port.to_string()] }],
-      "description": "GoatStare WireGuard ingress",
+      "description": "Blink WireGuard ingress",
     });
 
     let response = self.send_with_retry(|| {
@@ -436,7 +436,7 @@ impl GceApiClient {
         "accessConfigs": [{ "type": "ONE_TO_ONE_NAT", "name": "External NAT" }],
       }],
       "tags": { "items": [network_tag] },
-      "labels": { "goatstare": "managed" },
+      "labels": { "blink": "managed" },
       "metadata": {
         // Ubuntu images run cloud-init, which reads this exact key. `startup-script` would also
         // execute but is not cloud-init, and the payload is a #cloud-config document.
@@ -838,10 +838,10 @@ pub(crate) mod tests {
   pub(crate) fn test_service_account_json() -> String {
     serde_json::json!({
       "type": "service_account",
-      "project_id": "goatstare-test",
+      "project_id": "blink-test",
       "private_key_id": "test-key-id",
       "private_key": TEST_RSA_PEM,
-      "client_email": "goatstare@goatstare-test.iam.gserviceaccount.com",
+      "client_email": "blink@blink-test.iam.gserviceaccount.com",
     })
     .to_string()
   }
@@ -850,8 +850,8 @@ pub(crate) mod tests {
   fn a_service_account_key_yields_its_project_and_identity() {
     let key = ServiceAccountKey::parse(&test_service_account_json()).expect("key should parse");
 
-    assert_eq!(key.project_id, "goatstare-test");
-    assert_eq!(key.client_email, "goatstare@goatstare-test.iam.gserviceaccount.com");
+    assert_eq!(key.project_id, "blink-test");
+    assert_eq!(key.client_email, "blink@blink-test.iam.gserviceaccount.com");
     assert!(key.private_key.contains("PRIVATE KEY"));
   }
 
@@ -860,7 +860,7 @@ pub(crate) mod tests {
   #[test]
   fn an_incomplete_service_account_key_is_reported_by_field() {
     let partial = serde_json::json!({
-      "project_id": "goatstare-test",
+      "project_id": "blink-test",
       "client_email": "",
       "private_key": TEST_RSA_PEM,
     })

@@ -362,7 +362,7 @@ impl OpenStackApiClient {
         "This cloud offers no active images, so there is nothing to provision from.".to_string()
       } else {
         format!(
-          "This cloud offers no Ubuntu 24.04 or 22.04 image. It does offer: {}. GoatStare needs a cloud-init Ubuntu image.",
+          "This cloud offers no Ubuntu 24.04 or 22.04 image. It does offer: {}. Blink needs a cloud-init Ubuntu image.",
           available.join(", ")
         )
       },
@@ -433,7 +433,7 @@ impl OpenStackApiClient {
     name: &str,
   ) -> Result<String, OpenStackError> {
     let body = serde_json::json!({
-      "security_group": { "name": name, "description": "GoatStare WireGuard ingress" },
+      "security_group": { "name": name, "description": "Blink WireGuard ingress" },
     });
     let response = self.post(
       credentials,
@@ -553,7 +553,7 @@ impl OpenStackApiClient {
         "networks": [{ "uuid": network_id }],
         "security_groups": [{ "name": security_group }],
         "user_data": user_data_base64,
-        "metadata": { "goatstare": "managed" },
+        "metadata": { "blink": "managed" },
       },
     });
 

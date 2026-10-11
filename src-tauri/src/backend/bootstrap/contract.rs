@@ -6,7 +6,7 @@ use thiserror::Error;
 pub const DEFAULT_WIREGUARD_PORT: u16 = 51820;
 pub const DEFAULT_SERVER_INTERFACE_CIDR: &str = "10.66.0.1/24";
 pub const DEFAULT_INTERFACE_NAME: &str = "wg0";
-pub const READINESS_MARKER_PATH: &str = "/var/lib/goatstare/bootstrap-ready.json";
+pub const READINESS_MARKER_PATH: &str = "/var/lib/blink/bootstrap-ready.json";
 
 /// How many peers every new server is provisioned with.
 ///

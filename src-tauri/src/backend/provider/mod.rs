@@ -301,7 +301,7 @@ fn sanitize_droplet_name(raw: &str) -> String {
   let bounded = bounded.trim_end_matches(|character| character == '-' || character == '.');
 
   if bounded.is_empty() {
-    "goatstare-node".to_string()
+    "blink-node".to_string()
   } else {
     bounded.to_string()
   }
@@ -519,7 +519,7 @@ impl ProviderAdapter for DigitalOceanProviderAdapter {
         size_slug.trim().to_string()
       },
       image: self.config.image.to_string(),
-      tags: vec!["goatstare".to_string()],
+      tags: vec!["blink".to_string()],
       user_data: Some(init_payload.to_string()),
     };
 
@@ -695,7 +695,7 @@ fn sanitize_linode_label(raw: &str) -> String {
 
   // Also covers the 3-character minimum: anything shorter would be rejected at create.
   if bounded.len() < 3 {
-    "goatstare-node".to_string()
+    "blink-node".to_string()
   } else {
     bounded.to_string()
   }
@@ -943,7 +943,7 @@ impl ProviderAdapter for LinodeProviderAdapter {
       image: self.config.image.to_string(),
       root_pass: throwaway_root_password(),
       booted: true,
-      tags: vec!["goatstare".to_string()],
+      tags: vec!["blink".to_string()],
       metadata: LinodeMetadata { user_data },
     };
 
@@ -1106,7 +1106,7 @@ fn sanitize_openstack_server_name(raw: &str) -> String {
     .collect();
 
   let cleaned = cleaned.trim();
-  let stem = if cleaned.is_empty() { "goatstare-node" } else { cleaned };
+  let stem = if cleaned.is_empty() { "blink-node" } else { cleaned };
   let suffix = uuid::Uuid::new_v4().simple().to_string();
 
   format!("{stem}-{}", &suffix[..8])
@@ -1116,7 +1116,7 @@ fn sanitize_openstack_server_name(raw: &str) -> String {
 /// two nodes sharing one would make teardown of either strand the other.
 fn openstack_security_group_name(server_name: &str) -> String {
   let bounded: String = server_name.chars().take(200).collect();
-  format!("goatstare-{bounded}")
+  format!("blink-{bounded}")
 }
 
 pub struct OpenStackProviderAdapter {
@@ -1735,7 +1735,7 @@ impl ProviderAdapter for OpenStackProviderAdapter {
           .security_groups
           .into_iter()
           .map(|group| group.name)
-          .filter(|name| name.starts_with("goatstare-"))
+          .filter(|name| name.starts_with("blink-"))
           .collect()
       })
       .unwrap_or_default();
@@ -1791,7 +1791,7 @@ impl ProviderAdapter for OpenStackProviderAdapter {
   }
 }
 
-/// Machine types offered for a GoatStare node on GCE, cheapest first.
+/// Machine types offered for a Blink node on GCE, cheapest first.
 ///
 /// Google's Cloud Billing Catalog API prices compute by SKU — a large catalogue that has to be
 /// reassembled into a per-machine-type figure, which is a heavyweight dependency for three rows.
@@ -1860,7 +1860,7 @@ fn sanitize_gce_instance_name(raw: &str) -> String {
   let trimmed = sanitized.trim_matches('-');
   // A name must start with a letter, so a leading digit gets a stem rather than being dropped.
   let stem = if trimmed.is_empty() || trimmed.starts_with(|c: char| c.is_ascii_digit()) {
-    format!("goatstare-{trimmed}")
+    format!("blink-{trimmed}")
   } else {
     trimmed.to_string()
   };
@@ -2371,7 +2371,7 @@ impl ProviderAdapter for GceProviderAdapter {
   }
 }
 
-/// Instance types offered for a GoatStare node, cheapest first.
+/// Instance types offered for a Blink node, cheapest first.
 ///
 /// AWS publishes prices through the Pricing API, which is a large region-limited catalogue and a
 /// heavyweight dependency for three rows. These are list prices for on-demand Linux in `us-east-1`
@@ -2427,7 +2427,7 @@ struct Ec2PlanSpec {
 }
 
 /// Tag key marking every resource this app creates, so an operator can find them in the console.
-const EC2_OWNER_TAG_KEY: &str = "goatstare";
+const EC2_OWNER_TAG_KEY: &str = "blink";
 const EC2_OWNER_TAG_VALUE: &str = "managed";
 
 /// Maps a user's node name onto an AWS tag value.
@@ -2446,7 +2446,7 @@ fn sanitize_ec2_tag_value(raw: &str) -> String {
 
   let trimmed = cleaned.trim();
   if trimmed.is_empty() {
-    "goatstare-node".to_string()
+    "blink-node".to_string()
   } else {
     trimmed.to_string()
   }
@@ -2470,11 +2470,11 @@ fn ec2_security_group_name(node_name: &str) -> String {
     .collect();
 
   let compact = base.trim_matches('-');
-  let stem = if compact.is_empty() { "goatstare-node" } else { compact };
+  let stem = if compact.is_empty() { "blink-node" } else { compact };
   let bounded: String = stem.chars().take(200).collect();
   let suffix = uuid::Uuid::new_v4().simple().to_string();
 
-  format!("goatstare-{}-{}", bounded.trim_matches('-'), &suffix[..8])
+  format!("blink-{}-{}", bounded.trim_matches('-'), &suffix[..8])
 }
 
 /// Base64 for EC2 `UserData`, which must be encoded before signing.
@@ -2801,7 +2801,7 @@ impl ProviderAdapter for Ec2ProviderAdapter {
         &credentials,
         &vpc_id,
         &ec2_security_group_name(node_name),
-        "GoatStare WireGuard node — inbound UDP 51820 only.",
+        "Blink WireGuard node — inbound UDP 51820 only.",
         &tags,
       )
       .map_err(|source| ProviderAdapterError::api("Could not create the security group.", source))?;
@@ -3801,7 +3801,7 @@ mod tests {
       .duration_since(UNIX_EPOCH)
       .expect("clock must be after unix epoch")
       .as_nanos();
-    path.push(format!("goatstare_provider_{test_name}_{nanos}.sqlite3"));
+    path.push(format!("blink_provider_{test_name}_{nanos}.sqlite3"));
     path
   }
 
@@ -3839,8 +3839,8 @@ mod tests {
     assert_eq!(long.len(), 63);
 
     // A name of nothing but punctuation still has to produce something DigitalOcean accepts.
-    assert_eq!(sanitize_droplet_name("!!!"), "goatstare-node");
-    assert_eq!(sanitize_droplet_name(""), "goatstare-node");
+    assert_eq!(sanitize_droplet_name("!!!"), "blink-node");
+    assert_eq!(sanitize_droplet_name(""), "blink-node");
 
     // Truncation must not leave a trailing separator, which is itself invalid.
     let truncated = sanitize_droplet_name(&format!("{}-tail", "b".repeat(62)));
@@ -4366,8 +4366,8 @@ mod tests {
     assert_eq!(sanitize_linode_label("Primary Node"), "Primary-Node");
     assert_eq!(sanitize_linode_label("  weird///name  "), "weird-name");
     // Under Linode's 3-character minimum, so it falls back rather than being rejected at create.
-    assert_eq!(sanitize_linode_label("a"), "goatstare-node");
-    assert_eq!(sanitize_linode_label("***"), "goatstare-node");
+    assert_eq!(sanitize_linode_label("a"), "blink-node");
+    assert_eq!(sanitize_linode_label("***"), "blink-node");
     assert!(sanitize_linode_label(&"x".repeat(120)).len() <= 64);
   }
 
@@ -4465,7 +4465,7 @@ mod tests {
       .create()
   }
 
-  const GCE_PROJECT_PATH: &str = "/compute/v1/projects/goatstare-test";
+  const GCE_PROJECT_PATH: &str = "/compute/v1/projects/blink-test";
 
   #[test]
   fn gce_create_node_opens_the_port_and_reports_its_endpoint() {
@@ -4632,7 +4632,7 @@ mod tests {
 
     let adapter = GceProviderAdapter::with_base_url(&server.url());
     adapter
-      .delete_node(&gce_credential(), "us-central1-a/goatstare-node-abc12345")
+      .delete_node(&gce_credential(), "us-central1-a/blink-node-abc12345")
       .expect("delete should succeed");
 
     instance_delete.assert();
@@ -4660,12 +4660,12 @@ mod tests {
 
     let adapter = GceProviderAdapter::with_base_url(&server.url());
     let error = adapter
-      .delete_node(&gce_credential(), "us-central1-a/goatstare-node-abc12345")
+      .delete_node(&gce_credential(), "us-central1-a/blink-node-abc12345")
       .expect_err("a failed rule delete must surface");
 
     let rendered = error.to_string();
     assert!(rendered.contains("could NOT be removed"), "was: {rendered}");
-    assert!(rendered.contains("goatstare-node-abc12345-wg"), "the rule must be named: {rendered}");
+    assert!(rendered.contains("blink-node-abc12345-wg"), "the rule must be named: {rendered}");
   }
 
   /// Minting a token per API call would triple every request, so it is cached until it nears
@@ -4680,7 +4680,7 @@ mod tests {
       .with_body(r#"{"access_token":"ya29.test-token","expires_in":3600}"#)
       .expect(1)
       .create();
-    let _project = mock_gce(&mut server, "GET", GCE_PROJECT_PATH, r#"{"name":"goatstare-test"}"#);
+    let _project = mock_gce(&mut server, "GET", GCE_PROJECT_PATH, r#"{"name":"blink-test"}"#);
 
     let adapter = GceProviderAdapter::with_base_url(&server.url());
     let credential = gce_credential();
@@ -4694,16 +4694,16 @@ mod tests {
   fn gce_validate_token_reports_the_project_and_service_account() {
     let mut server = mockito::Server::new();
     let _token = mock_gce_token(&mut server);
-    let _project = mock_gce(&mut server, "GET", GCE_PROJECT_PATH, r#"{"name":"goatstare-test"}"#);
+    let _project = mock_gce(&mut server, "GET", GCE_PROJECT_PATH, r#"{"name":"blink-test"}"#);
 
     let adapter = GceProviderAdapter::with_base_url(&server.url());
     let identity = adapter.validate_token(&gce_credential()).expect("validation should succeed");
 
     // The project is what Google bills and what the instance lives in, so it is the account id.
-    assert_eq!(identity.account_id, "goatstare-test");
+    assert_eq!(identity.account_id, "blink-test");
     assert_eq!(
       identity.label.as_deref(),
-      Some("goatstare@goatstare-test.iam.gserviceaccount.com")
+      Some("blink@blink-test.iam.gserviceaccount.com")
     );
     // Google reports no account standing, and inventing "active" would assert something unchecked.
     assert_eq!(identity.status, None);
@@ -4726,12 +4726,12 @@ mod tests {
     // Most providers: an account and something human-readable, but no standing to report.
     assert_eq!(
       ProviderIdentity {
-        account_id: "goatstare-test".to_string(),
-        label: Some("goatstare@goatstare-test.iam.gserviceaccount.com".to_string()),
+        account_id: "blink-test".to_string(),
+        label: Some("blink@blink-test.iam.gserviceaccount.com".to_string()),
         status: None,
       }
       .describe(),
-      "goatstare@goatstare-test.iam.gserviceaccount.com (goatstare-test)"
+      "blink@blink-test.iam.gserviceaccount.com (blink-test)"
     );
 
     // Docker: no account at all, so the id stands alone rather than being padded out.
@@ -4766,7 +4766,7 @@ mod tests {
   fn no_adapter_claims_an_account_status_its_provider_does_not_report() {
     let mut server = mockito::Server::new();
     let _token = mock_gce_token(&mut server);
-    let _project = mock_gce(&mut server, "GET", GCE_PROJECT_PATH, r#"{"name":"goatstare-test"}"#);
+    let _project = mock_gce(&mut server, "GET", GCE_PROJECT_PATH, r#"{"name":"blink-test"}"#);
 
     let identity = GceProviderAdapter::with_base_url(&server.url())
       .validate_token(&gce_credential())
@@ -4815,8 +4815,8 @@ mod tests {
     assert!(name.len() <= 63, "GCE caps instance names at 63 characters: {name}");
 
     // A name must start with a letter.
-    assert!(sanitize_gce_instance_name("2nd node").starts_with("goatstare-"));
-    assert!(sanitize_gce_instance_name("***").starts_with("goatstare-"));
+    assert!(sanitize_gce_instance_name("2nd node").starts_with("blink-"));
+    assert!(sanitize_gce_instance_name("***").starts_with("blink-"));
     assert!(sanitize_gce_instance_name(&"x".repeat(200)).len() <= 63);
 
     // The name is the instance's identity within a project and zone, so two nodes the user calls
@@ -5219,13 +5219,13 @@ mod tests {
       "GET",
       "/compute/servers/srv-1",
       r#"{"server":{"id":"srv-1","status":"ACTIVE",
-        "security_groups":[{"name":"goatstare-primary-node-abc12345"},{"name":"default"}]}}"#,
+        "security_groups":[{"name":"blink-primary-node-abc12345"},{"name":"default"}]}}"#,
     );
     let _groups = mock_os(
       &mut server,
       "GET",
       "/network/v2.0/security-groups",
-      r#"{"security_groups":[{"id":"sg-1","name":"goatstare-primary-node-abc12345"},
+      r#"{"security_groups":[{"id":"sg-1","name":"blink-primary-node-abc12345"},
         {"id":"sg-default","name":"default"}]}"#,
     );
     let server_delete = server
@@ -5695,8 +5695,8 @@ mod tests {
   fn ec2_tag_values_keep_spaces_and_reject_only_what_aws_does() {
     assert_eq!(sanitize_ec2_tag_value("  Primary Node  "), "Primary Node");
     assert_eq!(sanitize_ec2_tag_value("tab\there"), "tabhere");
-    assert_eq!(sanitize_ec2_tag_value("   "), "goatstare-node");
-    assert_eq!(sanitize_ec2_tag_value(""), "goatstare-node");
+    assert_eq!(sanitize_ec2_tag_value("   "), "blink-node");
+    assert_eq!(sanitize_ec2_tag_value(""), "blink-node");
   }
 
   /// Two nodes the user called the same thing must not collide on the security group name.
@@ -5706,7 +5706,7 @@ mod tests {
     let second = ec2_security_group_name("Primary Node");
 
     assert_ne!(first, second);
-    assert!(first.starts_with("goatstare-Primary-Node-"), "got {first}");
+    assert!(first.starts_with("blink-Primary-Node-"), "got {first}");
     assert!(
       first.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
       "got {first}"

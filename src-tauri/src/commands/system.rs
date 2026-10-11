@@ -1343,7 +1343,7 @@ pub async fn check_docker_readiness(
   if !backend.feature_flags.docker_dev {
     return Err(CommandError::dependency(
       "Docker development mode is disabled.",
-      "Set GOATSTARE_DEV_DOCKER=1 and restart the app.",
+      "Set BLINK_DEV_DOCKER=1 and restart the app.",
     ));
   }
 
@@ -1617,7 +1617,7 @@ fn build_wireguard_install_script() -> Result<PathBuf, std::io::Error> {
 $ErrorActionPreference = 'Stop'
 
 $downloadUrl = 'https://download.wireguard.com/windows-client/wireguard-installer.exe'
-$tempDir = Join-Path $env:TEMP 'goatstare-wireguard-installer'
+$tempDir = Join-Path $env:TEMP 'blink-wireguard-installer'
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
 $installerPath = Join-Path $tempDir 'wireguard-installer.exe'
@@ -1654,7 +1654,7 @@ if (-not $service) {
 "#;
 
   let mut path = std::env::temp_dir();
-  path.push(format!("goatstare-wireguard-install-{}.ps1", uuid::Uuid::new_v4()));
+  path.push(format!("blink-wireguard-install-{}.ps1", uuid::Uuid::new_v4()));
   fs::write(&path, script_content)?;
   Ok(path)
 }
@@ -1677,7 +1677,7 @@ mod tests {
       .expect("system time should be after unix epoch")
       .as_nanos();
 
-    std::env::temp_dir().join(format!("goatstare-system-{name}-{unique}.db"))
+    std::env::temp_dir().join(format!("blink-system-{name}-{unique}.db"))
   }
 
   fn create_test_db(name: &str) -> (Database, PathBuf) {

@@ -13,7 +13,7 @@ const jetBrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "GoatStare VPN Manager",
+  title: "Blink",
   description: "Desktop VPN manager scaffold (Windows + DigitalOcean + WireGuard)",
 };
 

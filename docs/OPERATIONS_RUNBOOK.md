@@ -40,7 +40,7 @@ Force cleanup on the node.
 
 ### Closing and quitting
 
-Closing the window hides GoatStare to the system tray by default; the tray icon restores it, and its
+Closing the window hides Blink to the system tray by default; the tray icon restores it, and its
 "Quit" item exits. Turn this off in Settings → Window. Quitting leaves a connected tunnel running.
 
 ## Recovery Workflow

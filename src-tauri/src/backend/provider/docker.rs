@@ -22,8 +22,8 @@ const DOCKER_IMAGE: &str = "ubuntu:24.04";
 /// mount only works when the CLI can translate Windows paths for the daemon — with
 /// `DOCKER_HOST=tcp://...` it cannot, and provisioning failed with `invalid volume specification`.
 /// An environment variable has no such coupling and works against any daemon connection.
-const DOCKER_INIT_PAYLOAD_ENV: &str = "GOATSTARE_INIT_PAYLOAD";
-const DOCKER_INIT_SCRIPT_PATH: &str = "/goatstare-init.sh";
+const DOCKER_INIT_PAYLOAD_ENV: &str = "BLINK_INIT_PAYLOAD";
+const DOCKER_INIT_SCRIPT_PATH: &str = "/blink-init.sh";
 
 /// Container-internal WireGuard port. The host-side port is allocated per node by Docker.
 const DOCKER_CONTAINER_WIREGUARD_PORT: u16 = 51820;
@@ -38,7 +38,7 @@ const DOCKER_CONTAINER_WIREGUARD_PORT: u16 = 51820;
 const DOCKER_WIREGUARD_PUBLISH: &str = "0.0.0.0::51820/udp";
 
 /// Explicit override for the address the client should dial to reach published containers.
-const DOCKER_ENDPOINT_HOST_ENV: &str = "GOATSTARE_DOCKER_ENDPOINT_HOST";
+const DOCKER_ENDPOINT_HOST_ENV: &str = "BLINK_DOCKER_ENDPOINT_HOST";
 
 /// Readiness is observed through Docker's own healthcheck, which Docker runs inside the container
 /// and reports as provider metadata via `docker inspect`. The app never execs anything itself.
@@ -199,7 +199,7 @@ impl DockerProviderAdapter {
 
     let compact = sanitized.trim_matches('-');
     let name = if compact.is_empty() {
-      "goatstare-node"
+      "blink-node"
     } else {
       compact
     };
@@ -215,7 +215,7 @@ impl DockerProviderAdapter {
   /// packet sent to it disappears.
   ///
   /// Resolved in order:
-  /// 1. `GOATSTARE_DOCKER_ENDPOINT_HOST`, for setups this cannot infer.
+  /// 1. `BLINK_DOCKER_ENDPOINT_HOST`, for setups this cannot infer.
   /// 2. A non-loopback host in `DOCKER_HOST`, which is the daemon's address by definition.
   /// 3. The WSL2 VM's address, when the daemon reports a WSL2 kernel. Published ports live on
   ///    that VM's interfaces, and Windows can reach them there but not via its own loopback.
@@ -317,7 +317,7 @@ impl DockerProviderAdapter {
       "--name".to_string(),
       container_name.to_string(),
       "--label".to_string(),
-      "goatstare.provider=docker".to_string(),
+      "blink.provider=docker".to_string(),
       "--cpus".to_string(),
       cpus.to_string(),
       "--memory".to_string(),
@@ -458,7 +458,7 @@ impl DockerProviderAdapter {
       .duration_since(UNIX_EPOCH)
       .map(|value| value.as_nanos())
       .unwrap_or(0);
-    host_path.push(format!("goatstare-docker-copy-{stamp}.tmp"));
+    host_path.push(format!("blink-docker-copy-{stamp}.tmp"));
 
     let source = format!("{container_id}:{container_path}");
     let destination = host_path.to_string_lossy().to_string();
@@ -784,7 +784,7 @@ impl super::ProviderAdapter for DockerProviderAdapter {
     let run_arg_refs = run_args.iter().map(String::as_str).collect::<Vec<_>>();
     Self::remove_container_by_exact_name(&container_name)?;
 
-    // No port-conflict recovery here any more. It used to force-remove *any* GoatStare container
+    // No port-conflict recovery here any more. It used to force-remove *any* Blink container
     // publishing 51820/udp, which silently destroyed a healthy running node whenever a second one
     // was provisioned. Docker now allocates a free host port per node, so nodes cannot contend.
     let container_id = Self::run_docker(&run_arg_refs, "create Docker compute container")?;
@@ -1202,7 +1202,7 @@ mod tests {
       contract.server_endpoint_ip, contract.listen_port
     )));
 
-    let path = std::env::temp_dir().join(format!("goatstare-verify-{suffix}.conf"));
+    let path = std::env::temp_dir().join(format!("blink-verify-{suffix}.conf"));
     std::fs::write(&path, config.replace("\r\n", "\n")).expect("client config should be writable");
 
     let container = provisioned.node_id.clone();
@@ -1214,14 +1214,14 @@ mod tests {
     );
     println!("=== import it into WireGuard for Windows to verify the handshake ===");
     println!("=== when done, clean up with:  docker rm -f {container} ===");
-    println!("=== or remove every GoatStare container:  npm run docker:cleanup ===\n");
+    println!("=== or remove every Blink container:  npm run docker:cleanup ===\n");
   }
 
   /// Two nodes must be able to exist at once.
   ///
   /// Direct regression test for a data-loss bug: the host port was a fixed
   /// `127.0.0.1:51820:51820/udp`, so a second node could not bind, and the recovery path
-  /// force-removed *any* GoatStare container publishing that port — silently destroying the first,
+  /// force-removed *any* Blink container publishing that port — silently destroying the first,
   /// healthy node while leaving its database row behind.
   #[test]
   #[ignore = "Requires local Docker daemon"]

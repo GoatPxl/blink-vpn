@@ -61,7 +61,7 @@ mod tests {
   /// assertion that proves this returns a real code rather than an empty or transposed grid.
   #[test]
   fn places_the_top_left_finder_pattern() {
-    let matrix = encode("goatstare").expect("short text should encode");
+    let matrix = encode("blink").expect("short text should encode");
 
     assert!(matrix.modules[0], "module (0,0) is part of the finder pattern");
     assert!(

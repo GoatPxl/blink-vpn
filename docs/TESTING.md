@@ -98,7 +98,7 @@ just a `connected` status.
 ### DigitalOcean
 
 ```bash
-GOATSTARE_DO_TEST_TOKEN=<token> npm run backend:test:do:real
+BLINK_DO_TEST_TOKEN=<token> npm run backend:test:do:real
 ```
 
 **Creates real, billable droplets.** Both tests destroy the droplet on every exit path, including
@@ -120,12 +120,12 @@ Two tests:
 ### Amazon EC2
 
 ```bash
-GOATSTARE_AWS_TEST_ACCESS_KEY_ID=<key> \
-GOATSTARE_AWS_TEST_SECRET_ACCESS_KEY=<secret> \
+BLINK_AWS_TEST_ACCESS_KEY_ID=<key> \
+BLINK_AWS_TEST_SECRET_ACCESS_KEY=<secret> \
 npm run backend:test:ec2:real
 ```
 
-`GOATSTARE_AWS_TEST_REGION` overrides the default `us-east-1`.
+`BLINK_AWS_TEST_REGION` overrides the default `us-east-1`.
 
 **Creates real, billable resources** — a `t3.micro` instance *and* a public IPv4 address, which AWS
 bills separately. The test destroys both on every exit path, including panics, and asserts only
@@ -140,11 +140,11 @@ Confirm nothing is left over if a run is interrupted:
 
 ```bash
 aws ec2 describe-instances --region us-east-1 \
-  --filters "Name=tag:goatstare,Values=managed" "Name=instance-state-name,Values=pending,running,stopping,stopped"
-aws ec2 describe-security-groups --region us-east-1 --filters "Name=tag:goatstare,Values=managed"
+  --filters "Name=tag:blink,Values=managed" "Name=instance-state-name,Values=pending,running,stopping,stopped"
+aws ec2 describe-security-groups --region us-east-1 --filters "Name=tag:blink,Values=managed"
 ```
 
-Every resource this app creates carries the `goatstare=managed` tag, which is what makes that sweep
+Every resource this app creates carries the `blink=managed` tag, which is what makes that sweep
 possible.
 
 The lane asserts an instance reaches ready with an endpoint and a locally-generated server key, that
@@ -160,10 +160,10 @@ into the provisioned droplet.
 ### Linode
 
 ```bash
-GOATSTARE_LINODE_TEST_TOKEN=<personal access token> npm run backend:test:linode:real
+BLINK_LINODE_TEST_TOKEN=<personal access token> npm run backend:test:linode:real
 ```
 
-`GOATSTARE_LINODE_TEST_REGION` overrides the default `us-ord`. The token needs read/write access to
+`BLINK_LINODE_TEST_REGION` overrides the default `us-ord`. The token needs read/write access to
 Linodes.
 
 **Creates a real, billable resource** — a `g6-nanode-1`, destroyed on every exit path including
@@ -182,19 +182,19 @@ and this lane is what proves the filter is pointed at the right thing.
 Confirm nothing is left over if a run is interrupted:
 
 ```bash
-curl -s -H "Authorization: Bearer $GOATSTARE_LINODE_TEST_TOKEN" \
-  https://api.linode.com/v4/linode/instances | grep goatstare
+curl -s -H "Authorization: Bearer $BLINK_LINODE_TEST_TOKEN" \
+  https://api.linode.com/v4/linode/instances | grep blink
 ```
 
-Every instance this app creates carries the `goatstare` tag.
+Every instance this app creates carries the `blink` tag.
 
 ### Google Compute Engine
 
 ```bash
-GOATSTARE_GCE_TEST_SERVICE_ACCOUNT_FILE=/path/to/key.json npm run backend:test:gce:real
+BLINK_GCE_TEST_SERVICE_ACCOUNT_FILE=/path/to/key.json npm run backend:test:gce:real
 ```
 
-`GOATSTARE_GCE_TEST_ZONE` overrides the default `us-central1-a`. The variable holds a **path**, not
+`BLINK_GCE_TEST_ZONE` overrides the default `us-central1-a`. The variable holds a **path**, not
 the key itself: a multi-KB JSON blob in an environment variable is hostile to quote on Windows.
 
 The service account needs the Compute Admin role, and the project needs billing enabled and the
@@ -220,7 +220,7 @@ tell from a slow network.
 Confirm nothing is left over if a run is interrupted:
 
 ```bash
-gcloud compute instances list --filter="labels.goatstare=managed"
+gcloud compute instances list --filter="labels.blink=managed"
 gcloud compute firewall-rules list --filter="name~'-wg$'"
 ```
 
@@ -231,14 +231,14 @@ provider, not a bug in the adapter.
 ### OpenStack — a manual lane
 
 ```bash
-GOATSTARE_OPENSTACK_TEST_AUTH_URL=https://identity.example.com/v3 \
-GOATSTARE_OPENSTACK_TEST_APPLICATION_CREDENTIAL_ID=<id> \
-GOATSTARE_OPENSTACK_TEST_APPLICATION_CREDENTIAL_SECRET=<secret> \
-GOATSTARE_OPENSTACK_TEST_FLAVOR=<flavor id> \
+BLINK_OPENSTACK_TEST_AUTH_URL=https://identity.example.com/v3 \
+BLINK_OPENSTACK_TEST_APPLICATION_CREDENTIAL_ID=<id> \
+BLINK_OPENSTACK_TEST_APPLICATION_CREDENTIAL_SECRET=<secret> \
+BLINK_OPENSTACK_TEST_FLAVOR=<flavor id> \
 npm run backend:test:openstack:real
 ```
 
-`GOATSTARE_OPENSTACK_TEST_REGION` is optional on a single-region cloud and required on the rest.
+`BLINK_OPENSTACK_TEST_REGION` is optional on a single-region cloud and required on the rest.
 There is no default flavor: flavor ids are operator-defined, so no guess is right across clouds —
 list them with `openstack flavor list` and pick the smallest that has ~1 GB of RAM.
 
@@ -257,18 +257,18 @@ Teardown order is forced by Neutron and is the part most worth watching: the sec
 be deleted while the server's port still references it, so the run deletes the server, waits for it
 to disappear, then releases the floating IP and removes the group. Ids for the floating IP and the
 group are **rediscovered** at teardown rather than remembered, so the run still does the right thing
-if an operator removed one by hand. Only groups named `goatstare-*` are candidates — a group the
+if an operator removed one by hand. Only groups named `blink-*` are candidates — a group the
 operator attached themselves is left alone.
 
 Confirm nothing is left over if a run is interrupted:
 
 ```bash
-openstack server list --long | grep goatstare
+openstack server list --long | grep blink
 openstack floating ip list --status DOWN
-openstack security group list | grep goatstare
+openstack security group list | grep blink
 ```
 
-Every server this app creates carries the `goatstare=managed` metadata key.
+Every server this app creates carries the `blink=managed` metadata key.
 
 ## Environment Notes
 
@@ -290,7 +290,7 @@ These are properties of the dev machine, not the app, and each one has produced 
 npm run docker:cleanup
 ```
 
-Removes containers labelled `goatstare.provider=docker`. Scoped to that label so nothing else on
+Removes containers labelled `blink.provider=docker`. Scoped to that label so nothing else on
 the host is touched.
 
 ## Failure Handling

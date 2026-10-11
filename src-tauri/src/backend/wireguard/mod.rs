@@ -1292,7 +1292,7 @@ pub fn tunnel_config_dir_path() -> PathBuf {
     .map(PathBuf::from)
     .unwrap_or_else(std::env::temp_dir);
 
-  base.join("GoatStare").join("tunnels")
+  base.join("Blink").join("tunnels")
 }
 
 fn tunnel_config_dir() -> Result<PathBuf, WireGuardError> {
@@ -2111,7 +2111,7 @@ mod tests {
 
   //
   // Each filesystem-touching test uses its own tunnel name. They all shared `wg-node-1`, and so
-  // shared one path under `%LOCALAPPDATA%\GoatStare\tunnels\` — one test's unregister could delete
+  // shared one path under `%LOCALAPPDATA%\Blink\tunnels\` — one test's unregister could delete
   // the file another had just imported, failing at random under the default parallel runner.
   #[test]
   fn imported_config_survives_import_and_is_removed_on_unregister() {

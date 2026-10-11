@@ -1,8 +1,8 @@
 [package]
-name = "goatstare-vpn-app"
+name = "blink-vpn-app"
 version = "0.1.0"
-description = "GoatStare VPN desktop manager"
-authors = ["goatstare"]
+description = "Blink VPN desktop manager"
+authors = ["blink"]
 license = ""
 repository = ""
 edition = "2021"
@@ -11,7 +11,7 @@ rust-version = "1.77.2"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-name = "goatstare_vpn_app_lib"
+name = "blink_vpn_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -192,7 +192,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
                 <AppIcon name="shield" className="h-6 w-6" />
               </div>
               <div>
-                <div className="text-xl font-semibold tracking-tight text-[var(--on-surface)]">GoatStare VPN</div>
+                <div className="text-xl font-semibold tracking-tight text-[var(--on-surface)]">Blink VPN</div>
                 <div className="text-sm text-[var(--on-surface-variant)]">Enterprise Edition</div>
               </div>
             </div>
@@ -232,7 +232,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
               <AppIcon name="shield" className="h-6 w-6" />
             </div>
             <div>
-              <div className="text-xl font-semibold tracking-tight text-[var(--on-surface)]">GoatStare VPN</div>
+              <div className="text-xl font-semibold tracking-tight text-[var(--on-surface)]">Blink VPN</div>
               <div className="text-sm text-[var(--on-surface-variant)]">Enterprise Edition</div>
             </div>
           </div>
@@ -309,7 +309,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         <main className="flex-1 lg:pl-[240px]">
           <div className="mx-auto flex min-h-screen w-full max-w-[1420px] flex-col gap-6 px-4 py-4 lg:px-6 lg:py-5">
             <div className="flex items-center justify-between rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3 text-sm text-[var(--on-surface-variant)] lg:hidden">
-              <div className="font-medium text-[var(--on-surface)]">GoatStare VPN</div>
+              <div className="font-medium text-[var(--on-surface)]">Blink VPN</div>
               <button type="button" onClick={() => setMobileNavOpen((current) => !current)} className="inline-flex items-center gap-2 rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] px-3 py-2 text-[var(--on-surface)]" aria-label="Open menu">
                 <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" className="fill-none stroke-current stroke-[1.8]" /></svg>
                 Menu

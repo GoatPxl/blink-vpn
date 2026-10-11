@@ -202,12 +202,12 @@ export function SettingsView({
         </Card>
       )}
 
-      <Card title="Window" description="How GoatStare behaves when you close its window.">
+      <Card title="Window" description="How Blink behaves when you close its window.">
         <div className="flex items-start justify-between gap-6">
           <div>
             <div className="text-sm font-medium text-[var(--on-surface)]">Close to system tray</div>
             <p className="mt-1 text-sm text-[var(--on-surface-variant)]">
-              Closing the window keeps GoatStare running in the notification area. Open it again from the
+              Closing the window keeps Blink running in the notification area. Open it again from the
               tray icon; choose Quit there to exit. A connected tunnel stays up either way.
             </p>
           </div>
@@ -227,7 +227,7 @@ export function SettingsView({
       <Card title="About" description="Versions of the app and the WireGuard runtime it drives.">
         <dl className="grid gap-3 sm:grid-cols-2">
           <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3">
-            <dt className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">GoatStare VPN</dt>
+            <dt className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Blink VPN</dt>
             <dd className="mt-1 font-mono text-sm text-[var(--on-surface)]">{readiness?.app_version ?? "unknown"}</dd>
           </div>
           <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3">
@@ -238,7 +238,7 @@ export function SettingsView({
         {/* Names where the credential actually lives, which is the fact that lets someone go and
             revoke it. "Encrypted at rest" was true only by delegation and only on Windows. */}
         <p className="mt-4 text-xs leading-5 text-[var(--on-surface-variant)]">
-          API keys are held in Windows Credential Manager under <span className="font-mono">com.goatstare.vpn</span>,
+          API keys are held in Windows Credential Manager under <span className="font-mono">app.blink.vpn</span>,
           never in this app&apos;s database. They are used only for calls to your provider from this
           device, and are stripped from diagnostics exports.
         </p>

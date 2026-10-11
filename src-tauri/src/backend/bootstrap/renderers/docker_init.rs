@@ -23,22 +23,22 @@ pub(crate) fn build_docker_init_script(
 set -euo pipefail
 
 umask 077
-mkdir -p /etc/wireguard /var/lib/goatstare
+mkdir -p /etc/wireguard /var/lib/blink
 
 # Equivalent of cloud-init write_files: stage server key material before bootstrap.
-cat > /etc/wireguard/server_private.key <<'GOATSTARE_EOF_PRIVATE'
+cat > /etc/wireguard/server_private.key <<'BLINK_EOF_PRIVATE'
 {server_private_key}
-GOATSTARE_EOF_PRIVATE
-cat > /etc/wireguard/server_public.key <<'GOATSTARE_EOF_PUBLIC'
+BLINK_EOF_PRIVATE
+cat > /etc/wireguard/server_public.key <<'BLINK_EOF_PUBLIC'
 {server_public_key}
-GOATSTARE_EOF_PUBLIC
+BLINK_EOF_PUBLIC
 chmod 600 /etc/wireguard/server_private.key /etc/wireguard/server_public.key
 
-cat > /etc/sysctl.d/99-goatstare-vpn.conf <<'GOATSTARE_EOF_SYSCTL'
+cat > /etc/sysctl.d/99-blink-vpn.conf <<'BLINK_EOF_SYSCTL'
 net.ipv4.ip_forward=1
 net.ipv4.conf.all.forwarding=1
 net.ipv4.conf.default.forwarding=1
-GOATSTARE_EOF_SYSCTL
+BLINK_EOF_SYSCTL
 
 # The dev image ships these preinstalled; the install is a no-op there and a fallback on a bare
 # base image. Tolerate failure so provisioning works offline, then verify the tools below.
@@ -64,7 +64,7 @@ fn render_docker_bootstrap_body(params: &BootstrapParams) -> Result<String, Boot
 log_stage() {{
   local stage="$1"
   shift || true
-  echo "goatstare.bootstrap.stage=${{stage}} $*"
+  echo "blink.bootstrap.stage=${{stage}} $*"
 }}
 
 trap 'log_stage "failed" "line=${{LINENO}} exit_status=$?"' ERR
@@ -78,7 +78,7 @@ PEER_SPECS="{peer_specs}"
 MARKER_PATH="{marker}"
 
 umask 077
-mkdir -p /etc/wireguard /var/lib/goatstare
+mkdir -p /etc/wireguard /var/lib/blink
 
 log_stage "start" "iface=${{WG_IFACE}} port=${{WG_PORT}} endpoint={endpoint}"
 log_stage "validate-tools" "checking WireGuard and container networking toolchain"
@@ -99,12 +99,12 @@ if command -v ufw >/dev/null 2>&1; then ufw --force reset >/dev/null 2>&1 || tru
 log_stage "validate-privileges" "checking WireGuard interface operations inside container"
 probe="gspw0"
 ip link delete "$probe" >/dev/null 2>&1 || true
-if ! ip link add "$probe" type wireguard >/tmp/goatstare-wg-prereq.err 2>&1; then
-  cat /tmp/goatstare-wg-prereq.err >&2 || true
-  rm -f /tmp/goatstare-wg-prereq.err
+if ! ip link add "$probe" type wireguard >/tmp/blink-wg-prereq.err 2>&1; then
+  cat /tmp/blink-wg-prereq.err >&2 || true
+  rm -f /tmp/blink-wg-prereq.err
   exit 61
 fi
-rm -f /tmp/goatstare-wg-prereq.err
+rm -f /tmp/blink-wg-prereq.err
 ip link delete "$probe" >/dev/null 2>&1 || true
 
 if [ ! -f /etc/wireguard/server_private.key ] || [ ! -f /etc/wireguard/server_public.key ]; then
@@ -141,11 +141,11 @@ log_stage "firewall" "installing input chain rules"
 {firewall_rules_fragment}
 
 log_stage "interface" "activating WireGuard interface"
-if command -v wg-quick >/dev/null 2>&1 && wg-quick up "${{WG_IFACE}}" >/tmp/goatstare-wg-up.log 2>&1; then
-  rm -f /tmp/goatstare-wg-up.log
+if command -v wg-quick >/dev/null 2>&1 && wg-quick up "${{WG_IFACE}}" >/tmp/blink-wg-up.log 2>&1; then
+  rm -f /tmp/blink-wg-up.log
 else
-  cat /tmp/goatstare-wg-up.log >&2 || true
-  rm -f /tmp/goatstare-wg-up.log
+  cat /tmp/blink-wg-up.log >&2 || true
+  rm -f /tmp/blink-wg-up.log
   ip link delete "${{WG_IFACE}}" >/dev/null 2>&1 || true
   ip link add "${{WG_IFACE}}" type wireguard
   ip addr replace "${{SERVER_CIDR}}" dev "${{WG_IFACE}}"

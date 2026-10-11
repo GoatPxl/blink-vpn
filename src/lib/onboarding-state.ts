@@ -16,7 +16,7 @@ export interface OnboardingState {
   lastWireGuardPassed: boolean;
 }
 
-const ONBOARDING_STORAGE_KEY = "goatstare.onboarding.v1";
+const ONBOARDING_STORAGE_KEY = "blink.onboarding.v1";
 
 export const DEFAULT_ONBOARDING_STATE: OnboardingState = {
   status: "not_started",

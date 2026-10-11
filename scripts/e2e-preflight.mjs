@@ -81,11 +81,11 @@ if (elevated) {
 // Leftovers from an interrupted run. Not fatal — the fixture resets nodes and kills stale app
 // instances — but worth surfacing, because a stale config holds a private key.
 const staleContainers = tryRun("docker", [
-  "ps", "-aq", "--filter", "label=goatstare.provider=docker",
+  "ps", "-aq", "--filter", "label=blink.provider=docker",
 ]);
 if (staleContainers) {
   const count = staleContainers.split(/\s+/).filter(Boolean).length;
-  if (count > 0) warn(`${count} leftover GoatStare container(s)`, null, "npm run docker:cleanup");
+  if (count > 0) warn(`${count} leftover Blink container(s)`, null, "npm run docker:cleanup");
 }
 
 console.log(

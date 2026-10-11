@@ -10,7 +10,7 @@
 ## Where Credentials Live
 
 Provider API keys are stored in **Windows Credential Manager**, under the service name
-`com.goatstare.vpn`, written as a generic credential. SQLite holds only a non-secret
+`app.blink.vpn`, written as a generic credential. SQLite holds only a non-secret
 `token_ref` handle pointing at that entry — never the key.
 
 A credential is a **set of named fields**, serialized to a JSON object inside that single entry:

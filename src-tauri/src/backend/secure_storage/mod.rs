@@ -232,7 +232,7 @@ pub struct WindowsCredentialStore {
 impl WindowsCredentialStore {
   pub fn new() -> Self {
     Self {
-      service_name: "com.goatstare.vpn".to_string(),
+      service_name: "app.blink.vpn".to_string(),
     }
   }
 

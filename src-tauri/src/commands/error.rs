@@ -180,7 +180,7 @@ impl From<tauri::Error> for CommandError {
     Self::new(
       CommandErrorKind::Dependency,
       format!("The desktop shell rejected the request: {error}"),
-      "Restart GoatStare and retry.",
+      "Restart Blink and retry.",
     )
   }
 }

@@ -42,7 +42,7 @@ async function connectWithRetry(endpoint: string, timeoutMs: number): Promise<Br
  */
 async function killExistingAppInstances(): Promise<void> {
   await new Promise<void>((resolve) => {
-    const killer = spawn("taskkill", ["/IM", "goatstare-vpn-app.exe", "/T", "/F"], {
+    const killer = spawn("taskkill", ["/IM", "blink-vpn-app.exe", "/T", "/F"], {
       stdio: "ignore",
     });
     killer.on("exit", () => resolve());

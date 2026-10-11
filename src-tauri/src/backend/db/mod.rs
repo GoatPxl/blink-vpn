@@ -12,7 +12,7 @@ use thiserror::Error;
 ///
 /// Named once so that startup and the "where are my files" listing cannot drift apart and point the
 /// user at a database that does not exist.
-pub const DATABASE_FILE_NAME: &str = "goatstare.sqlite3";
+pub const DATABASE_FILE_NAME: &str = "blink.sqlite3";
 
 /// How long a statement waits for a competing writer before reporting SQLITE_BUSY.
 ///
@@ -1878,7 +1878,7 @@ mod tests {
       .duration_since(UNIX_EPOCH)
       .expect("clock must be after unix epoch")
       .as_nanos();
-    path.push(format!("goatstare_{test_name}_{nanos}.sqlite3"));
+    path.push(format!("blink_{test_name}_{nanos}.sqlite3"));
     path
   }
 

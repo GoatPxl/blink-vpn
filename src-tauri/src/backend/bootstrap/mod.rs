@@ -74,7 +74,7 @@ mod tests {
     assert!(artifact.init_payload.contains("net.ipv4.ip_forward=1"));
     assert!(artifact.init_payload.contains("net.ipv4.conf.all.forwarding=1"));
     assert!(artifact.init_payload.contains("net.ipv4.conf.default.forwarding=1"));
-    assert!(artifact.init_payload.contains("goatstare.bootstrap.stage=${stage}"));
+    assert!(artifact.init_payload.contains("blink.bootstrap.stage=${stage}"));
     assert!(!artifact.init_payload.contains("wg genkey"));
     assert!(artifact.init_payload.contains("keypair-missing"));
     assert!(artifact.init_payload.contains(&keypair.public_key));
@@ -110,8 +110,8 @@ mod tests {
     assert!(artifact.init_payload.contains("#!/usr/bin/env bash"));
     assert!(artifact.init_payload.contains("apt-get update"));
     assert!(artifact.init_payload.contains("apt-get install -y --no-install-recommends wireguard-tools iproute2 iptables"));
-    assert!(artifact.init_payload.contains("/etc/sysctl.d/99-goatstare-vpn.conf"));
-    assert!(artifact.init_payload.contains("goatstare.bootstrap.stage=${stage}"));
+    assert!(artifact.init_payload.contains("/etc/sysctl.d/99-blink-vpn.conf"));
+    assert!(artifact.init_payload.contains("blink.bootstrap.stage=${stage}"));
     assert!(!artifact.init_payload.contains("wg genkey"));
     assert!(artifact.init_payload.contains("wg-quick up \"${WG_IFACE}\""));
     assert!(!artifact.init_payload.contains("systemctl enable --now"));
@@ -218,7 +218,7 @@ mod tests {
   ///
   /// This replaces two tests that parsed a readiness-marker JSON document into the contract. That
   /// machinery was the original design — the server generated its own keys and the app read them
-  /// back out of `/var/lib/goatstare/bootstrap-ready.json` — and it required an SSH channel the app
+  /// back out of `/var/lib/blink/bootstrap-ready.json` — and it required an SSH channel the app
   /// does not have and must not gain (AGENTS.md §2). Nothing called it any more, so the only thing
   /// keeping it alive was its own tests.
   #[test]

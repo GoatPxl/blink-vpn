@@ -2,7 +2,7 @@
 
 ## Overview
 
-GoatStare is a desktop control plane for running user-owned WireGuard VPN infrastructure through provider adapters and a unified NodeProvider interface.
+Blink is a desktop control plane for running user-owned WireGuard VPN infrastructure through provider adapters and a unified NodeProvider interface.
 
 Stack:
 
@@ -102,7 +102,7 @@ connection-mode toggle (see Connection Model above).
 ## Window and Tray
 
 The app always shows a notification-area icon (`lib.rs`, `build_tray`). Left-clicking it, or
-choosing "Open GoatStare", restores the window; "Quit" exits the process.
+choosing "Open Blink", restores the window; "Quit" exits the process.
 
 With `close_to_tray` on, the default, closing the main window hides it instead of exiting. The close
 handler runs on the event-loop thread, so it reads a cached `CloseToTray` flag rather than SQLite;
@@ -251,7 +251,7 @@ are all driven by what the adapter reports.
 
 ## Saved Locations
 
-GoatStare servers are meant to be short-lived: turned on when needed and destroyed afterwards so they
+Blink servers are meant to be short-lived: turned on when needed and destroyed afterwards so they
 stop billing. Destroying a node deletes its `vpn_nodes` row, so `saved_locations` keeps what is needed
 to bring it back — provider, region, plan, and the last price.
 

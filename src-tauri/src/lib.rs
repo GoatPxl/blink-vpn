@@ -173,12 +173,12 @@ pub fn run() {
 /// "Quit" exits the app only. A connected tunnel is a Windows service and keeps running, exactly as
 /// it does when the window is closed with the setting off.
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-  let open = MenuItem::with_id(app, TRAY_MENU_OPEN, "Open GoatStare", true, None::<&str>)?;
+  let open = MenuItem::with_id(app, TRAY_MENU_OPEN, "Open Blink", true, None::<&str>)?;
   let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "Quit", true, None::<&str>)?;
   let menu = Menu::with_items(app, &[&open, &quit])?;
 
   let mut builder = TrayIconBuilder::with_id("main")
-    .tooltip("GoatStare VPN")
+    .tooltip("Blink VPN")
     .menu(&menu)
     // Left click restores the window; the menu is on right click, the Windows convention.
     .show_menu_on_left_click(false)

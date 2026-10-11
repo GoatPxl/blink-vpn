@@ -1,12 +1,12 @@
 // Remove containers created by the Docker dev provider.
 //
-// Scoped strictly to the `goatstare.provider=docker` label that the adapter sets on every
+// Scoped strictly to the `blink.provider=docker` label that the adapter sets on every
 // container it creates. Nothing else on the host is touched — filtering by image or name would
 // risk removing unrelated containers that happen to share a base image.
 
 import { execFileSync } from "node:child_process";
 
-const LABEL = "goatstare.provider=docker";
+const LABEL = "blink.provider=docker";
 
 function docker(args) {
   return execFileSync("docker", args, { encoding: "utf8" });
@@ -23,7 +23,7 @@ try {
 }
 
 if (ids.length === 0) {
-  console.log("No GoatStare containers to remove.");
+  console.log("No Blink containers to remove.");
   process.exit(0);
 }
 
@@ -37,9 +37,9 @@ try {
     "--format",
     "{{.Names}}\t{{.Status}}",
   ]).trim();
-  console.log(`Removing ${ids.length} GoatStare container(s):\n${listing}`);
+  console.log(`Removing ${ids.length} Blink container(s):\n${listing}`);
 } catch {
-  console.log(`Removing ${ids.length} GoatStare container(s).`);
+  console.log(`Removing ${ids.length} Blink container(s).`);
 }
 
 try {
