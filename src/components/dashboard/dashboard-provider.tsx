@@ -85,7 +85,12 @@ type CreateNodeInput = {
   nodeName: string;
   region: string;
   planKey: string;
+  /** What the build screen calls it, "BUILDING FRANKFURT". Defaults to the node name. */
+  place?: string;
 };
+
+/** The "one Windows prompt is coming" explainer, waiting on the user's answer. */
+export type UacPrompt = { place: string };
 
 type ThroughputSample = {
   timestamp: number;
@@ -135,6 +140,8 @@ export type OperationAttempt =
       kind: "provision";
       nodeId: string;
       nodeName: string;
+      /** The city, or the node name when the region has no geography. */
+      place: string;
       providerName: string;
       /** `Date.now()` at the click. */
       startedAt: number;
@@ -142,6 +149,11 @@ export type OperationAttempt =
       status: NodeLifecycleStatus | null;
       /** `Date.now()` when `bootstrapping` was first seen, so that stage's clock starts there. */
       bootstrappingSince: number | null;
+      /**
+       * The user asked to cancel. A create is one blocking provider call with nothing to cancel
+       * part-way, so the server is deleted as soon as it exists instead of being connected to.
+       */
+      cancelRequested: boolean;
     }
   | {
       kind: "destroy" | "force-cleanup";
@@ -229,6 +241,17 @@ type DashboardContextValue = {
   appPreferences: AppPreferences | null;
   /** Resolves true when the preferences were stored. */
   saveAppPreferences: (preferences: AppPreferences) => Promise<boolean>;
+  /**
+   * Merges a change into the stored preferences without the global busy state — for small pieces
+   * of interface state (favourites, the game's best score) that must not freeze the window.
+   */
+  updateAppPreferences: (patch: Partial<AppPreferences>) => Promise<void>;
+  /** Marks the running build to be deleted as soon as the provider finishes creating it. */
+  requestCancelBuild: () => void;
+  /** The pre-connect explainer, while it waits for an answer. */
+  uacPrompt: UacPrompt | null;
+  /** Answers the explainer. `dontExplainAgain` turns it off for later connects. */
+  answerUacPrompt: (proceed: boolean, dontExplainAgain: boolean) => void;
   throughputSamples: ThroughputSample[];
   loadDashboard: (preferredSelectedNodeId?: string) => Promise<void>;
   refreshHealth: () => Promise<void>;
@@ -282,6 +305,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [healthUpdatedAt, setHealthUpdatedAt] = useState<number | null>(null);
   const [tunnelSettings, setTunnelSettings] = useState<TunnelSettings | null>(null);
   const [appPreferences, setAppPreferencesState] = useState<AppPreferences | null>(null);
+  const [uacPrompt, setUacPrompt] = useState<UacPrompt | null>(null);
   const [throughputSamples, setThroughputSamples] = useState<ThroughputSample[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsBundle | null>(null);
   // Null rather than a "No export yet." sentinel: the UI hides the row instead of printing prose
@@ -308,6 +332,18 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const selectedTunnelIdRef = useRef(selectedTunnelId);
   // Guards against a slow health read queueing more of itself behind the tick.
   const healthPollInFlightRef = useRef(false);
+  // The latest stored preferences, for callbacks that must not re-create on every change.
+  const appPreferencesRef = useRef<AppPreferences | null>(null);
+  // Preference writes run one after another, each merging into the previous result, so two quick
+  // changes (a favourite and a game score) cannot overwrite each other.
+  const preferencesWriteRef = useRef<Promise<void>>(Promise.resolve());
+  // Resolves the pre-connect explainer's promise when the user answers it.
+  const uacResolverRef = useRef<((proceed: boolean) => void) | null>(null);
+  // The node id of a build the user cancelled, so it is deleted instead of connected when it lands.
+  const cancelBuildRef = useRef<string | null>(null);
+  // Declared further down; the build flow reaches them through these so it can be declared first.
+  const connectNodeRef = useRef<(node: VpnNodeRecord) => Promise<void>>(async () => {});
+  const destroyNodeNowRef = useRef<(node: VpnNodeRecord, reason?: "cancelled") => Promise<void>>(async () => {});
   const lastTrafficSampleRef = useRef<{
     timestamp: number;
     nodeId: string;
@@ -534,10 +570,16 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, pushToast]);
 
+  useEffect(() => {
+    appPreferencesRef.current = appPreferences;
+  }, [appPreferences]);
+
   const saveAppPreferences = useCallback(async (preferences: AppPreferences) => {
     setBusyAction("save-app-preferences");
     try {
-      setAppPreferencesState(await setAppPreferencesCommand(preferences));
+      const stored = await setAppPreferencesCommand(preferences);
+      appPreferencesRef.current = stored;
+      setAppPreferencesState(stored);
       return true;
     } catch (error) {
       handleError(error);
@@ -546,6 +588,51 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setBusyAction(null);
     }
   }, [handleError]);
+
+  const updateAppPreferences = useCallback((patch: Partial<AppPreferences>) => {
+    const write = preferencesWriteRef.current.then(async () => {
+      try {
+        const base = appPreferencesRef.current ?? await getAppPreferences();
+        const next = { ...base, ...patch };
+        // Shown at once; the stored result replaces it when the write lands.
+        appPreferencesRef.current = next;
+        setAppPreferencesState(next);
+        const stored = await setAppPreferencesCommand(next);
+        appPreferencesRef.current = stored;
+        setAppPreferencesState(stored);
+      } catch (error) {
+        handleError(error);
+      }
+    });
+    preferencesWriteRef.current = write;
+    return write;
+  }, [handleError]);
+
+  /**
+   * Explains, once, that connecting raises one Windows prompt and pauses the internet briefly.
+   *
+   * Resolves true to go ahead. Shown before the first ever connect and, after that, only if the
+   * user un-ticked "don't explain this again".
+   */
+  const ensureUacExplained = useCallback((place: string) => {
+    if (appPreferencesRef.current && !appPreferencesRef.current.explain_uac) {
+      return Promise.resolve(true);
+    }
+    return new Promise<boolean>((resolve) => {
+      // A second connect while the first explainer is open supersedes it.
+      uacResolverRef.current?.(false);
+      uacResolverRef.current = resolve;
+      setUacPrompt({ place });
+    });
+  }, []);
+
+  const answerUacPrompt = useCallback((proceed: boolean, dontExplainAgain: boolean) => {
+    const resolve = uacResolverRef.current;
+    uacResolverRef.current = null;
+    setUacPrompt(null);
+    if (proceed && dontExplainAgain) void updateAppPreferences({ explain_uac: false });
+    resolve?.(proceed);
+  }, [updateAppPreferences]);
 
   const refreshWireGuardReadiness = useCallback(async () => {
     try {
@@ -930,19 +1017,54 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [dockerDevEnabled, dockerKeyStored, handleError, pushToast]);
 
+  /**
+   * What happens when a build the user started reaches ready: delete it if they cancelled, else
+   * connect to it (one UAC prompt, the same connect a click would start) unless auto-connect is off.
+   */
+  const finishBuild = useCallback(async (nodeId: string, place: string) => {
+    const node = (await listVpnNodes()).find((candidate) => candidate.id === nodeId) ?? null;
+
+    if (cancelBuildRef.current === nodeId) {
+      cancelBuildRef.current = null;
+      if (node) await destroyNodeNowRef.current(node, "cancelled");
+      return;
+    }
+
+    if (appPreferencesRef.current?.auto_connect_after_provision === false || !node) {
+      pushToast("success", `${place} is ready`, "Connect when you want to use it.");
+      return;
+    }
+
+    pushToast("success", `${place} is ready — connecting now`, "Windows will ask for permission in a second.");
+    void connectNodeRef.current(node);
+  }, [pushToast]);
+
+  const requestCancelBuild = useCallback(() => {
+    setOperationAttempt((current) => {
+      if (current?.kind !== "provision") return current;
+      cancelBuildRef.current = current.nodeId;
+      return { ...current, cancelRequested: true };
+    });
+  }, []);
+
   const createNode = useCallback(async (input: CreateNodeInput) => {
+    const place = input.place ?? input.nodeName;
+    cancelBuildRef.current = null;
     setBusyAction("create-node");
     setOperationAttempt({
       kind: "provision",
       nodeId: input.nodeId,
       nodeName: input.nodeName,
+      place,
       providerName: providerNameFor(providerId),
       startedAt: Date.now(),
       status: null,
       bootstrappingSince: null,
+      cancelRequested: false,
     });
+    let ready = false;
     try {
-      const result = await createVpnNode({
+      await createVpnNode({
         nodeId: input.nodeId,
         providerId,
         nodeName: input.nodeName,
@@ -950,17 +1072,17 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         planKey: input.planKey,
       });
       setRecovery(null);
-      pushToast("success", "Node created", result);
       await loadDashboard(input.nodeId);
-      return true;
+      ready = true;
     } catch (error) {
       handleError(error);
-      return false;
     } finally {
       setOperationAttempt(null);
       setBusyAction(null);
     }
-  }, [handleError, loadDashboard, providerId, providerNameFor, pushToast]);
+    if (ready) await finishBuild(input.nodeId, place);
+    return ready;
+  }, [finishBuild, handleError, loadDashboard, providerId, providerNameFor]);
 
   const installHostForNode = useCallback(async (node: VpnNodeRecord) => {
     if (node.lifecycle_status !== "new") {
@@ -979,10 +1101,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       kind: "provision",
       nodeId: node.id,
       nodeName: node.name,
+      place: node.region_geo?.city ?? node.name,
       providerName: providerNameFor(node.provider_id),
       startedAt: Date.now(),
       status: node.lifecycle_status,
       bootstrappingSince: null,
+      cancelRequested: false,
     });
     try {
       const result = await createVpnNode({
@@ -1009,6 +1133,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       pushToast("warning", "No node selected", "Select a node before connecting.");
       return;
     }
+    if (!(await ensureUacExplained(node.region_geo?.city ?? node.name))) return;
 
     const canonicalTunnelName = `${node.name
       .trim()
@@ -1118,7 +1243,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
     // No `finally` clearing the attempt: on success it stays live so the phase poll can watch the
     // handshake land. The poll owns clearing it.
-  }, [handleError, loadDashboard, pushToast, tunnels]);
+  }, [ensureUacExplained, handleError, loadDashboard, pushToast, tunnels]);
+
+  useEffect(() => {
+    connectNodeRef.current = connectNode;
+  }, [connectNode]);
 
   const connectPrimary = useCallback(async () => {
     if (!activeNode) {
@@ -1130,6 +1259,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [activeNode, connectNode, pushToast]);
 
   const connectTunnel = useCallback(async (tunnel: TunnelRecord) => {
+    const tunnelNode = nodes.find((node) => node.id === tunnel.node_id);
+    if (!(await ensureUacExplained(tunnelNode?.region_geo?.city ?? tunnelNode?.name ?? tunnel.name))) return;
     setConnectAttempt({
       nodeId: tunnel.node_id,
       tunnelId: tunnel.id,
@@ -1183,7 +1314,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setConnectAttempt(null);
       handleError(error);
     }
-  }, [handleError, loadDashboard, nodes]);
+  }, [ensureUacExplained, handleError, loadDashboard, nodes]);
 
   const disconnectTunnel = useCallback(async (tunnel: TunnelRecord) => {
     setBusyAction("disconnect-tunnel");
@@ -1257,17 +1388,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, loadDashboard, pushToast, refreshHealthSnapshot]);
 
-  const destroyNode = useCallback(async (node: VpnNodeRecord) => {
-    // Names the location as well as the node: with the fleet keyed by city, "which one is this?"
-    // is the question a user needs answered before deleting a server they pay for.
-    const where = node.region_geo?.city ?? node.region;
-    const confirmed = window.confirm(
-      `Turn off ${node.name} in ${where}?\n\nThis deletes the server at your provider and stops its billing. The location stays saved, so you can turn it back on later.`,
-    );
-    if (!confirmed) {
-      return;
-    }
-
+  /** Deletes a server at its provider, no questions asked. Callers decide whether to ask first. */
+  const destroyNodeNow = useCallback(async (node: VpnNodeRecord, reason?: "cancelled") => {
     setBusyAction("destroy-node");
     setOperationAttempt({
       kind: "destroy",
@@ -1279,7 +1401,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     try {
       await destroyVpnNode(node.id);
       setRecovery(null);
-      pushToast("success", "Server turned off", `${node.name} was deleted at the provider and is no longer billing.`);
+      pushToast(
+        "success",
+        reason === "cancelled" ? "Build cancelled" : "Server turned off",
+        `${node.name} was deleted at the provider and is no longer billing.`,
+      );
       await loadDashboard();
     } catch (error) {
       handleError(error);
@@ -1288,6 +1414,20 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setBusyAction(null);
     }
   }, [handleError, loadDashboard, providerNameFor, pushToast]);
+
+  useEffect(() => {
+    destroyNodeNowRef.current = destroyNodeNow;
+  }, [destroyNodeNow]);
+
+  const destroyNode = useCallback(async (node: VpnNodeRecord) => {
+    // Names the location as well as the node: with the fleet keyed by city, "which one is this?"
+    // is the question a user needs answered before deleting a server they pay for.
+    const where = node.region_geo?.city ?? node.region;
+    const confirmed = window.confirm(
+      `Turn off ${node.name} in ${where}?\n\nThis deletes the server at your provider and stops its billing. The location stays saved, so you can turn it back on later.`,
+    );
+    if (confirmed) await destroyNodeNow(node);
+  }, [destroyNodeNow]);
 
 
   const turnOnLocation = useCallback(async (location: SavedLocationRecord) => {
@@ -1311,26 +1451,36 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       );
       return;
     }
-    if (!window.confirm(question)) {
+    // The button that started this already showed the saved price. Ask again only when today's
+    // price differs or could not be read, so billing never starts at a price the user has not seen.
+    const priceAsShown = livePlan != null
+      && livePlan.monthly_usd === location.price_monthly_usd
+      && livePlan.hourly_usd === location.price_hourly_usd;
+    if (!priceAsShown && !window.confirm(question)) {
       return;
     }
 
     const nodeId = `node-${crypto.randomUUID().slice(0, 8)}`;
+    const place = location.region_geo?.city ?? location.name;
+    cancelBuildRef.current = null;
     setBusyAction("create-node");
     setOperationAttempt({
       kind: "provision",
       nodeId,
       nodeName: location.name,
+      place,
       providerName: location.provider_name ?? providerNameFor(location.provider_id),
       startedAt: Date.now(),
       status: null,
       bootstrappingSince: null,
+      cancelRequested: false,
     });
+    let ready = false;
     try {
       await turnOnSavedLocation(location.id, nodeId);
       setRecovery(null);
-      pushToast("success", "Server on", `${location.name} is ready to connect.`);
       await loadDashboard(nodeId);
+      ready = true;
     } catch (error) {
       handleError(error);
       // A failed create leaves its node in error; the list shows that rather than "starting".
@@ -1339,7 +1489,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setOperationAttempt(null);
       setBusyAction(null);
     }
-  }, [handleError, loadDashboard, providerNameFor, pushToast]);
+    if (ready) await finishBuild(nodeId, place);
+  }, [finishBuild, handleError, loadDashboard, providerNameFor, pushToast]);
 
   const turnOffLocation = useCallback(async (location: SavedLocationRecord) => {
     if (!location.node_id) return;
@@ -1597,6 +1748,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
             "Tunnel connected",
             `${snapshot.tunnel_name} is carrying traffic.`,
           );
+          // From now on HOLD ON is the compact version: the user has seen it work once.
+          if (appPreferencesRef.current && !appPreferencesRef.current.first_connect_done) {
+            void updateAppPreferences({ first_connect_done: true });
+          }
           // Forced refresh: this both updates the egress card immediately and generates the
           // traffic that keeps proving the tunnel works.
           void refreshHealthSnapshot(true);
@@ -1629,7 +1784,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [connectAttempt?.nodeId, connectAttempt?.tunnelId, pushToast, refreshHealthSnapshot]);
+  }, [connectAttempt?.nodeId, connectAttempt?.tunnelId, pushToast, refreshHealthSnapshot, updateAppPreferences]);
 
   /**
    * Follows a provision's lifecycle status so the progress bar can jump to the stage the backend
@@ -1816,6 +1971,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     saveTunnelSettings,
     appPreferences,
     saveAppPreferences,
+    updateAppPreferences,
+    requestCancelBuild,
+    uacPrompt,
+    answerUacPrompt,
     throughputSamples,
     loadDashboard,
     refreshHealth,

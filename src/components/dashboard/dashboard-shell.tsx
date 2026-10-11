@@ -7,8 +7,8 @@ import { GoatMark, PixelIcon, type PixelIconName } from "@/components/ui/pixel-i
 import { deriveShellTone, SHELL_TONE_COLOR, type ShellTone } from "@/lib/shell-tone";
 import { useDashboard } from "./dashboard-provider";
 import { Button, type AppView, VIEW_ROUTE } from "./shared";
-import { ConnectProgress } from "./connect-progress";
-import { OperationProgress } from "./operation-progress";
+import { OperationStrip } from "./operation-strip";
+import { UacExplainer } from "./uac-explainer";
 
 const NAV_ITEMS: Array<{ id: AppView; label: string; icon: PixelIconName }> = [
   { id: "home", label: "Home", icon: "home" },
@@ -93,6 +93,8 @@ export function DashboardShell({ children }: { children: ReactNode }) {
             </div>
           ) : null}
 
+          <OperationStrip onHome={activeView === "home"} />
+
           {children}
         </div>
       </main>
@@ -115,10 +117,8 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         ))}
       </div>
 
-      {/* Mounted at the shell so a connect started on one page keeps explaining itself after the
-          user navigates away from it. */}
-      <ConnectProgress />
-      <OperationProgress />
+      {/* Mounted at the shell so a connect started from any view is explained before it starts. */}
+      <UacExplainer />
     </div>
   );
 }

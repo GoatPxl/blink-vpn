@@ -3,10 +3,13 @@ import {
   APP_URL,
   createDockerNode,
   expectSuccess,
+  invokeCommand,
   readDiagnostics,
   resetNodes,
   saveDockerCredential,
+  setPreferences,
   settleToasts,
+  type AppPreferences,
 } from "./fixtures/dashboard";
 
 /**
@@ -29,8 +32,10 @@ test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
     await resetNodes(tauriPage);
     await saveDockerCredential(tauriPage);
     await createDockerNode(tauriPage, nodeId, nodeName);
+    // The explainer is on, as on a fresh install, so this connect must pass through it.
+    await setPreferences(tauriPage, { explain_uac: true });
 
-    await tauriPage.goto(`${APP_URL}/dashboard/nodes`);
+    await tauriPage.goto(`${APP_URL}/dashboard/map`);
     await expect(tauriPage.getByRole("heading", { name: "Server Locations" }).first()).toBeVisible({
       timeout: 30_000,
     });
@@ -42,7 +47,16 @@ test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
 
     await settleToasts(tauriPage);
     await nodeRow.getByRole("button", { name: "Connect", exact: true }).click();
+
+    // Nothing may connect before the explainer is answered, and answering it with the box ticked
+    // turns it off for good.
+    const explainer = tauriPage.getByRole("dialog", { name: "One Windows prompt is coming" });
+    await expect(explainer).toBeVisible({ timeout: 10_000 });
+    await explainer.getByRole("button", { name: "Continue", exact: true }).click();
     await expectSuccess(tauriPage, "Tunnel connected", 120_000);
+    const preferences = await invokeCommand<AppPreferences>(tauriPage, "get_app_preferences");
+    expect(preferences.explain_uac).toBe(false);
+    expect(preferences.first_connect_done).toBe(true);
 
     // The row must report the connection, not merely that the container is powered on — the badge
     // used to render the provider's VM state, which reads "active" either way.
@@ -89,9 +103,9 @@ test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
     // the dashboard never reloaded its tunnel list afterwards, so "Disconnect" had nothing to stop
     // and fell through to connecting again.
     await createDockerNode(tauriPage, nodeId, nodeName);
+    await setPreferences(tauriPage, { explain_uac: false });
 
     await tauriPage.goto(`${APP_URL}/dashboard`);
-    // Scoped to `main`: the sidebar's Quick Connect button carries the same label.
     const main = tauriPage.locator("main");
     const connectButton = main.getByRole("button", { name: "Connect", exact: true });
     await expect(connectButton).toBeEnabled({ timeout: 30_000 });
@@ -129,5 +143,30 @@ test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
     ).toBe(true);
 
     await expect(connectButton).toBeEnabled({ timeout: 30_000 });
+  });
+
+  test("connects by itself when a server it built is ready", async ({ tauriPage }) => {
+    const suffix = Date.now();
+    const nodeId = `node-auto-connect-${suffix}`;
+    const nodeName = `Auto Connect Node ${suffix}`;
+
+    await resetNodes(tauriPage);
+    await saveDockerCredential(tauriPage);
+    await tauriPage.goto(`${APP_URL}/dashboard`);
+    await setPreferences(tauriPage, { explain_uac: false });
+
+    // No Connect click anywhere in this test: the build alone must end in a working tunnel.
+    await createDockerNode(tauriPage, nodeId, nodeName, { autoConnect: true });
+    await expectSuccess(tauriPage, "Tunnel connected", 120_000);
+
+    const connected = await readDiagnostics(tauriPage);
+    const tunnel = (connected.tunnels ?? []).find((candidate) => candidate.node_id === nodeId);
+    expect(tunnel?.status).toBe("connected");
+    expect(tunnel?.rx_bytes ?? 0, "a connected tunnel must have received traffic").toBeGreaterThan(0);
+
+    await tauriPage.goto(`${APP_URL}/dashboard`);
+    await settleToasts(tauriPage);
+    await tauriPage.locator("main").getByRole("button", { name: "Disconnect", exact: true }).click();
+    await expectSuccess(tauriPage, "Tunnel disconnected", 120_000);
   });
 });

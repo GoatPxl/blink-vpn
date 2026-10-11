@@ -526,18 +526,25 @@ export interface AppPreferences {
    * when the server is. At most four (see `settings-display.ts`). Existing servers are unaffected.
    */
   mobile_devices: string[];
+  /** Connect as soon as a server the user built is ready. Defaults to true. Still one UAC prompt. */
+  auto_connect_after_provision: boolean;
+  /** Set after the first connect that reached a working tunnel; until then HOLD ON explains itself. */
+  first_connect_done: boolean;
+  /** Show the "one Windows prompt is coming" explainer before a connect. Defaults to true. */
+  explain_uac: boolean;
+  /** Favourite locations as `<provider_id>:<region>` keys. */
+  favourites: string[];
+  /** Best score in the build-screen game. */
+  game_high_score: number;
 }
 
 export async function getAppPreferences(): Promise<AppPreferences> {
   return invokeCommand<AppPreferences>("get_app_preferences");
 }
 
-/** Resolves with the preferences as stored, device names trimmed. */
+/** Resolves with the preferences as stored: device names trimmed, favourites deduplicated. */
 export async function setAppPreferences(preferences: AppPreferences): Promise<AppPreferences> {
-  return invokeCommand<AppPreferences>("set_app_preferences", {
-    closeToTray: preferences.close_to_tray,
-    mobileDevices: preferences.mobile_devices,
-  });
+  return invokeCommand<AppPreferences>("set_app_preferences", { preferences });
 }
 
 export async function createVpnNode(params: {

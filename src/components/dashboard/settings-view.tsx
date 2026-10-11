@@ -202,6 +202,29 @@ export function SettingsView({
         </Panel>
       )}
 
+      <Panel title="Connecting" description="What happens around a connect.">
+        <div className="divide-y-2 divide-line-2">
+          <PreferenceToggle
+            title="Connect when a new server is ready"
+            detail="A server you build connects by itself the moment it is ready. Windows still asks for permission once, exactly as when you click Connect."
+            checked={appPreferences?.auto_connect_after_provision ?? true}
+            disabled={appPreferences === null || busyAction !== null}
+            onChange={(checked) => {
+              if (appPreferences) void onSaveAppPreferences({ ...appPreferences, auto_connect_after_provision: checked });
+            }}
+          />
+          <PreferenceToggle
+            title="Explain before connecting"
+            detail="Before each connect, say that Windows will ask for permission and that the internet pauses for about 15 seconds."
+            checked={appPreferences?.explain_uac ?? true}
+            disabled={appPreferences === null || busyAction !== null}
+            onChange={(checked) => {
+              if (appPreferences) void onSaveAppPreferences({ ...appPreferences, explain_uac: checked });
+            }}
+          />
+        </div>
+      </Panel>
+
       <Panel title="Window" description="How Blink behaves when you close its window.">
         <div className="flex items-start justify-between gap-6">
           <div>
@@ -258,6 +281,31 @@ export function SettingsView({
         />
       ) : null}
     </PageChrome>
+  );
+}
+
+/** A title, one sentence, and a switch. */
+function PreferenceToggle({
+  title,
+  detail,
+  checked,
+  disabled,
+  onChange,
+}: {
+  title: string;
+  detail: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-6 py-4 first:pt-0 last:pb-0">
+      <div>
+        <div className="text-[15px] font-medium text-bone">{title}</div>
+        <p className="mt-1 text-[13.5px] text-stone">{detail}</p>
+      </div>
+      <Toggle label={title} checked={checked} disabled={disabled} onChange={onChange} />
+    </div>
   );
 }
 

@@ -152,6 +152,22 @@ export async function readDiagnostics(page: Page): Promise<DiagnosticsBundle> {
   return invokeCommand<DiagnosticsBundle>(page, "get_diagnostics_bundle");
 }
 
+export type AppPreferences = {
+  close_to_tray: boolean;
+  mobile_devices: string[];
+  auto_connect_after_provision: boolean;
+  first_connect_done: boolean;
+  explain_uac: boolean;
+  favourites: string[];
+  game_high_score: number;
+};
+
+/** Merge a change into the stored preferences through the real backend, and return the result. */
+export async function setPreferences(page: Page, patch: Partial<AppPreferences>): Promise<AppPreferences> {
+  const current = await invokeCommand<AppPreferences>(page, "get_app_preferences");
+  return invokeCommand<AppPreferences>(page, "set_app_preferences", { preferences: { ...current, ...patch } });
+}
+
 /** Save the dev Docker credential. Provisioning is blocked until provider access is healthy. */
 export async function saveDockerCredential(page: Page): Promise<void> {
   await page.goto(`${APP_URL}/dashboard/settings`);
@@ -175,13 +191,21 @@ export async function saveDockerCredential(page: Page): Promise<void> {
   await expect(dockerRow.getByText("Verified", { exact: true })).toBeVisible({ timeout: 30_000 });
 }
 
-/** Provision a node through the UI and wait for it to reach ready. */
+/**
+ * Provision a node through the UI and wait for it to reach ready.
+ *
+ * Auto-connect is off unless a test asks for it. A connect needs elevation, and most specs run
+ * without it — an automatic connect there would stop on a UAC prompt nobody can answer.
+ */
 export async function createDockerNode(
   page: Page,
   nodeId: string,
   nodeName: string,
+  { autoConnect = false }: { autoConnect?: boolean } = {},
 ): Promise<void> {
-  await page.goto(`${APP_URL}/dashboard/nodes/create`);
+  await page.goto(`${APP_URL}/dashboard`);
+  await setPreferences(page, { auto_connect_after_provision: autoConnect });
+  await page.goto(`${APP_URL}/dashboard/map/create`);
   await expect(page.getByRole("heading", { name: "Create Node" }).first()).toBeVisible({
     timeout: 30_000,
   });
@@ -203,10 +227,11 @@ export async function createDockerNode(
   await expect(progress).toHaveAttribute("data-kind", "provision", { timeout: 10_000 });
   await expect(progress).toContainText(nodeName);
 
-  // Provisioning pulls an image and runs apt inside the container on a cold cache.
-  await expectSuccess(page, "Node created", 240_000);
+  // Provisioning pulls an image and runs apt inside the container on a cold cache. The toast names
+  // the node, so another build's message cannot satisfy this one.
+  await expectSuccess(page, autoConnect ? `${nodeName} is ready — connecting now` : `${nodeName} is ready`, 240_000);
 
-  // A finished provision returns to the server list, and the card goes away with it.
-  await expect(page).toHaveURL(/\/dashboard\/nodes\/?$/, { timeout: 15_000 });
+  // A finished provision returns to the server list, and the progress goes away with it.
+  await expect(page).toHaveURL(/\/dashboard\/map\/?$/, { timeout: 15_000 });
   await expect(progress).toHaveCount(0);
 }

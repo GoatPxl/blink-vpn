@@ -92,9 +92,21 @@ cleared when its node is destroyed. This is a fourth status axis, deliberately s
 three below — "the server I mean" is not the same fact as "the VM is on", "the app finished
 provisioning it", or "a tunnel is up right now". See `docs/DB_SCHEMA.md` for the exact semantics.
 
-It also holds `close_to_tray` and `mobile_devices`, app preferences rather than tunnel parameters,
-owned by `backend/app_preferences.rs`. Both default in code (on, and empty), so neither needs a
-migration. `mobile_devices` is read once per node create; see "Device slots" below.
+It also holds the app preferences, owned by `backend/app_preferences.rs`. Every one defaults in
+code, so none needs a migration:
+
+- `close_to_tray` (on) and `mobile_devices` (empty). `mobile_devices` is read once per node create;
+  see "Device slots" below.
+- `auto_connect_after_provision` (on): when a build the user started reaches ready, the frontend
+  calls the same connect a click would. It is still exactly one UAC prompt, never from a polling
+  loop. The backend has no auto-connect step; the orchestrator is unchanged.
+- `explain_uac` (on): before a connect, a dialog says a Windows prompt is coming and the internet
+  pauses for about 15 seconds. Its "don't explain this again" box is ticked by default, so it is
+  shown once unless the user chooses otherwise.
+- `first_connect_done` (off): set when a connect first reaches `connected`. Until then the HOLD ON
+  screen lists the connect steps and offers Roll back at 45 s.
+- `favourites` (empty, `provider_id:region` keys) and `game_high_score` (0): interface state that
+  must survive a restart.
 
 It previously also held `wireguard_connection_mode`, removed in migration 0014 along with the
 connection-mode toggle (see Connection Model above).
@@ -122,7 +134,16 @@ The frontend has four views on a left rail: Home (`/dashboard`), Map (`/dashboar
 (`/dashboard/shield`) and Setup (`/dashboard/settings`). The rail logo and active item take one
 colour from `deriveShellTone` (`src/lib/shell-tone.ts`): lime secure, ember working, stone off,
 alert failed. Old routes (`/dashboard/nodes`, `/dashboard/health`, `/dashboard/activity`) are stubs
-that redirect, since a static export has no server to answer a redirect. Fonts are bundled under
+that redirect, since a static export has no server to answer a redirect.
+
+While a server builds, Home shows the Build panel (status strip, clock against ~2:00, block bar)
+and an optional game, Goat Invaders (`src/lib/game/invaders.ts`, a pure reducer; the component
+draws to a canvas and touches nothing outside itself). The strip sits outside the game's error
+boundary, so the game cannot hide the build. Cancel build cannot stop a create part-way — it is one
+blocking provider call — so it marks the build, and the server is deleted the moment it exists
+instead of being connected to. While a tunnel comes up, Home shows HOLD ON, driven by the same
+`TunnelPhase` poll as before and ended only by inbound traffic. On any other view both appear as a
+one-line strip linking to Home, so a connect started from the server list stays there. Fonts are bundled under
 `public/fonts/` and never fetched, because the kill switch can hold the default route with no DNS
 while a tunnel comes up.
 

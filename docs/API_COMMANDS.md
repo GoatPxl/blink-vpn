@@ -67,7 +67,7 @@ Provider adapters currently included:
 | `get_tunnel_settings` | none | `TunnelSettings` | DNS server and keepalive used when a tunnel next starts |
 | `set_tunnel_settings` | `dns_server` (nullable), `keepalive_seconds` | `void` | Validates before storing; a non-IP DNS value is rejected with `invalid-input` |
 | `get_app_preferences` | none | `AppPreferences` | `close_to_tray` (default `true`) and `mobile_devices` (default empty) |
-| `set_app_preferences` | `close_to_tray`, `mobile_devices` | `AppPreferences` | Validates and stores both, returning them as stored (names trimmed). `close_to_tray` applies to the running window immediately; `mobile_devices` applies to servers created afterwards. An unusable device list is rejected with `invalid-input` |
+| `set_app_preferences` | `preferences: AppPreferences` | `AppPreferences` | Validates and stores the whole struct, returning it as stored (device names trimmed, favourites trimmed and deduplicated). One struct argument, so adding a preference does not change the signature. `close_to_tray` applies to the running window immediately; `mobile_devices` to servers created afterwards. An unusable device list or a favourite that is not `provider_id:region` is rejected with `invalid-input`, and nothing is stored |
 | `list_providers` | none | `ProviderRecord[]` | Local provider records, including `last_validation_status` / `last_validated_at` from the last key check |
 | `list_tunnels_for_node` | `node_id` | `TunnelRecord[]` | Local tunnels for node |
 | `get_tunnel_phase` | `node_id`, `tunnel_id` | `TunnelPhaseSnapshot` | How far along a connect is. Cheap enough to poll at 1 Hz — see below |

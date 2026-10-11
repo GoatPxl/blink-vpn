@@ -62,7 +62,7 @@ test.describe("Docker provisioning (real backend)", () => {
     // The node the backend reports must actually reach the fleet list. Located by id rather than
     // by name: the row leads with location and only shows the name to disambiguate same-region
     // servers, so a name match would pass or fail depending on what else is provisioned.
-    await tauriPage.goto(`${APP_URL}/dashboard/nodes`);
+    await tauriPage.goto(`${APP_URL}/dashboard/map`);
     await expect(tauriPage.getByRole("heading", { name: "Server Locations" }).first()).toBeVisible({
       timeout: 30_000,
     });

@@ -559,7 +559,7 @@ pub async fn set_tunnel_settings(
   .await
 }
 
-/// Desktop-shell preferences — currently only whether closing the window hides it to the tray.
+/// App preferences: window behaviour, device names for new servers, and persisted UI state.
 #[tauri::command]
 pub async fn get_app_preferences(backend: State<'_, Backend>) -> Result<AppPreferences, CommandError> {
   let backend = backend.inner().clone();
@@ -567,16 +567,18 @@ pub async fn get_app_preferences(backend: State<'_, Backend>) -> Result<AppPrefe
 }
 
 /// Stores the preferences and returns them as stored, with device names trimmed.
+///
+/// Takes the whole struct rather than one argument per field, so adding a preference does not
+/// change this command's signature.
 #[tauri::command]
 pub async fn set_app_preferences(
-  close_to_tray: bool,
-  mobile_devices: Vec<String>,
+  preferences: AppPreferences,
   app: AppHandle,
   backend: State<'_, Backend>,
 ) -> Result<AppPreferences, CommandError> {
   let backend = backend.inner().clone();
   run_blocking(move || {
-    let stored = app_preferences::set(&backend.db, &AppPreferences { close_to_tray, mobile_devices })
+    let stored = app_preferences::set(&backend.db, &preferences)
       .map_err(CommandError::from)?;
     // Updated only after the write lands, so the window never behaves differently from what a
     // restart would load.

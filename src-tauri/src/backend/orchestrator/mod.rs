@@ -7282,8 +7282,8 @@ mod tests {
     app_preferences::set(
       &db,
       &app_preferences::AppPreferences {
-        close_to_tray: true,
         mobile_devices: vec!["Pixel 9".to_string(), "iPad".to_string()],
+        ..app_preferences::AppPreferences::default()
       },
     )
     .expect("saving devices should succeed");
