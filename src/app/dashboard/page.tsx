@@ -3,6 +3,7 @@
 import { DashboardOverview } from "@/components/dashboard/dashboard-overview";
 import { useDashboard } from "@/components/dashboard/dashboard-provider";
 import { MobileDevicesCard } from "@/components/dashboard/mobile-devices-card";
+import { useConnectivityChecks } from "@/components/dashboard/use-connectivity-checks";
 import { DashboardEmptyState } from "@/components/dashboard-empty-state";
 
 export default function DashboardPage() {
@@ -12,58 +13,62 @@ export default function DashboardPage() {
     connectAttempt,
     connectedTunnel,
     connectPrimary,
+    connectTunnel,
     copyText,
+    destroyNode,
+    disconnectTunnel,
     exportDeviceConfig,
+    forceDisconnectNodeService,
     health,
     loadDeviceConfig,
+    nodes,
+    providers,
     savedLocations,
-    turnOnLocation,
-    loadDashboard,
-    noServerConfigured,
-    recovery,
-    refreshHealth,
-    connectTunnel,
-    disconnectTunnel,
-    forceDisconnectNodeService,
-    throughputSamples,
     tunnelConnected,
+    turnOnLocation,
   } = useDashboard();
+  const checks = useConnectivityChecks();
+  // With several servers and no default chosen there is no active node, but something is still
+  // running and billing — "Off · nothing billing" would be false. Show the first one instead.
+  const homeNode = activeNode ?? nodes[0] ?? null;
+
+  if (!homeNode) {
+    const hasVerifiedKey = providers.some(
+      (provider) => provider.status === "active" && !!provider.token_ref && provider.last_validation_status !== "failed",
+    );
+    return (
+      <DashboardEmptyState
+        savedLocations={savedLocations}
+        favourites={[]}
+        busyAction={busyAction}
+        hasVerifiedKey={hasVerifiedKey}
+        onTurnOn={turnOnLocation}
+      />
+    );
+  }
 
   return (
     <DashboardOverview
-      activeView="home"
-      noServerConfigured={noServerConfigured}
-      activeNode={activeNode}
+      activeNode={homeNode}
       connectedTunnel={connectedTunnel}
       health={health}
       tunnelConnected={tunnelConnected}
-      throughputSamples={throughputSamples}
-      recovery={recovery}
       busyAction={busyAction}
       connectAttempt={connectAttempt}
+      checks={checks}
       onConnectPrimary={connectPrimary}
       onConnectTunnel={connectTunnel}
       onDisconnectTunnel={disconnectTunnel}
       onForceDisconnectNodeService={forceDisconnectNodeService}
-      onRefresh={loadDashboard}
-      onRefreshHealth={refreshHealth}
-      emptyState={
-        <DashboardEmptyState
-          savedLocations={savedLocations}
-          busyAction={busyAction}
-          onTurnOn={turnOnLocation}
-        />
-      }
+      onPowerOff={destroyNode}
       devices={
-        activeNode ? (
-          <MobileDevicesCard
-            node={activeNode}
-            busyAction={busyAction}
-            onLoadDeviceConfig={loadDeviceConfig}
-            onExportDeviceConfig={exportDeviceConfig}
-            onCopyText={copyText}
-          />
-        ) : null
+        <MobileDevicesCard
+          node={homeNode}
+          busyAction={busyAction}
+          onLoadDeviceConfig={loadDeviceConfig}
+          onExportDeviceConfig={exportDeviceConfig}
+          onCopyText={copyText}
+        />
       }
     />
   );

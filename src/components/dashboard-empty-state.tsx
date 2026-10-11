@@ -1,64 +1,146 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
-import { SavedLocationList } from "@/components/dashboard/saved-locations-view";
-import type { DashboardBusyAction } from "@/components/dashboard/shared";
+import { HomeHero } from "@/components/dashboard/home-hero";
+import { Button, GiantAction, Panel, Tag, Tile, VIEW_ROUTE, useNow, type DashboardBusyAction } from "@/components/dashboard/shared";
+import { PixelIcon } from "@/components/ui/pixel-icon";
+import { cityLine, formatAgo, formatMonthly, lastLocation, orderLocations, regionCode } from "@/lib/home-display";
 import type { SavedLocationRecord } from "@/lib/tauri";
 
+/** How many saved locations get a tile beside "Cheapest near me". */
+const TILE_COUNT = 3;
+
 /**
- * The dashboard with no server running.
+ * Home with no server running.
  *
- * Servers are meant to be turned off, so "no server" is the normal resting state, not a first run.
- * When the user has saved locations, this offers them back; only with none is it a setup prompt.
+ * Servers are meant to be turned off, so "off" is the normal resting state, not a first run. The
+ * one primary action turns the last location back on; the tiles offer somewhere else.
  */
 export function DashboardEmptyState({
-  savedLocations = [],
-  busyAction = null,
+  savedLocations,
+  favourites,
+  busyAction,
+  hasVerifiedKey,
   onTurnOn,
 }: {
-  savedLocations?: SavedLocationRecord[];
-  busyAction?: DashboardBusyAction;
-  onTurnOn?: (location: SavedLocationRecord) => Promise<void>;
+  savedLocations: SavedLocationRecord[];
+  favourites: readonly string[];
+  busyAction: DashboardBusyAction;
+  /** False on a first run: no provider key yet, so nothing can be built. */
+  hasVerifiedKey: boolean;
+  onTurnOn: (location: SavedLocationRecord) => Promise<void>;
 }) {
-  if (savedLocations.length > 0 && onTurnOn) {
+  const router = useRouter();
+  const now = useNow();
+  const last = lastLocation(savedLocations);
+  const others = orderLocations(savedLocations, favourites).filter((location) => location.id !== last?.id);
+  const favourite = new Set(favourites);
+  const busy = busyAction !== null;
+
+  if (!hasVerifiedKey) {
     return (
-      <div className="flex min-h-[58vh] items-center justify-center">
-        <div className="w-full max-w-2xl rounded-[24px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(28,32,39,0.96),rgba(16,19,27,0.96))] p-8 shadow-[var(--shadow-elevated)]">
-          <h2 className="text-2xl font-semibold tracking-tight text-[var(--on-surface)]">No server is on</h2>
-          <p className="mt-2 text-sm leading-6 text-[var(--on-surface-variant)]">
-            Turn one of your saved locations back on. It takes a few minutes and billing starts when the
-            server is created.
-          </p>
-          <div className="mt-5">
-            <SavedLocationList locations={savedLocations} busyAction={busyAction} onTurnOn={onTurnOn} />
-          </div>
-          <div className="mt-5 text-right">
-            <Link href="/dashboard/nodes/create" className="text-sm text-[var(--primary)] hover:underline">
-              Or create a server somewhere new
-            </Link>
-          </div>
-        </div>
-      </div>
+      <HomeHero
+        tone="off"
+        tag="Off · nothing running · nothing billing"
+        headline="Off"
+        subline={<span className="text-stone">Add a cloud key and Blink builds your first server.</span>}
+        action={
+          <GiantAction
+            wide
+            tone="primary"
+            label="Get started"
+            sublabel="Key · build · connect"
+            icon={<PixelIcon name="key" className="h-12 w-12" />}
+            onClick={() => router.push("/onboarding")}
+          />
+        }
+        footer={<p className="text-[14px] text-stone">Takes about three minutes. You need an account with a cloud provider such as DigitalOcean.</p>}
+      />
     );
   }
 
+  const lastPrice = last ? formatMonthly(last.price_monthly_usd) : null;
+
   return (
-    <div className="flex min-h-[58vh] items-center justify-center">
-      <div className="w-full max-w-xl rounded-[24px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(28,32,39,0.96),rgba(16,19,27,0.96))] p-8 text-center shadow-[var(--shadow-elevated)]">
-        <h2 className="text-2xl font-semibold tracking-tight text-[var(--on-surface)]">No VPN server configured yet</h2>
-        <p className="mt-3 text-sm leading-6 text-[var(--on-surface-variant)]">
-          Complete the guided setup to verify WireGuard readiness, save your provider token, and provision your first VPN node.
+    <>
+      <HomeHero
+        tone="off"
+        tag="Off · nothing running · nothing billing"
+        headline="Off"
+        subline={
+          last ? (
+            <span className="text-stone">
+              Last time: {cityLine(last.region_geo, last.region)}
+              {formatAgo(last.last_turned_on_at, now) ? ` · ${formatAgo(last.last_turned_on_at, now)}` : ""}
+            </span>
+          ) : (
+            <span className="text-stone">Pick a city on the map to build your first server.</span>
+          )
+        }
+        action={
+          last ? (
+            <GiantAction
+              wide
+              tone="primary"
+              label="Connect"
+              sublabel={[last.region_geo?.city ?? last.region, "~2 min", lastPrice].filter(Boolean).join(" · ")}
+              icon={<PixelIcon name="power" className="h-12 w-12" />}
+              onClick={() => void onTurnOn(last)}
+              disabled={busy}
+            />
+          ) : (
+            <GiantAction
+              wide
+              tone="primary"
+              label="Open the map"
+              icon={<PixelIcon name="map" className="h-12 w-12" />}
+              onClick={() => router.push(VIEW_ROUTE.map)}
+            />
+          )
+        }
+        footer={
+          <div>
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <Tag>Or somewhere else</Tag>
+              <Link href={VIEW_ROUTE.map} className="inline-flex items-center gap-1 text-[15px] text-lime">
+                Open the map <PixelIcon name="arrow-right" className="h-3.5 w-3.5" />
+              </Link>
+            </div>
+            <div className="grid grid-cols-4 gap-5 max-[1000px]:grid-cols-2">
+              {others.slice(0, TILE_COUNT).map((location) => (
+                <Tile
+                  key={location.id}
+                  code={regionCode(location.region)}
+                  name={location.region_geo?.city ?? location.name}
+                  meta={[
+                    favourite.has(`${location.provider_id}:${location.region}`) ? "favourite" : formatAgo(location.last_turned_on_at, now) ? `last on ${formatAgo(location.last_turned_on_at, now)}` : null,
+                    formatMonthly(location.price_monthly_usd),
+                  ].filter(Boolean).join(" · ")}
+                  onClick={() => void onTurnOn(location)}
+                  disabled={busy}
+                />
+              ))}
+              <Tile
+                dashed
+                code="+"
+                name="Cheapest near me"
+                meta="any cloud with a key"
+                onClick={() => router.push(`${VIEW_ROUTE.map}?filter=cheapest`)}
+              />
+            </div>
+          </div>
+        }
+      />
+
+      <Panel bodyClassName="flex items-center gap-5 px-8 py-5">
+        <PixelIcon name="tray" className="h-7 w-7 shrink-0 text-stone" />
+        <p className="min-w-0 flex-1 text-[15px] text-stone">
+          Tip: closing this window keeps Blink in the tray, next to the clock. Your tunnel stays up.
         </p>
-        <div className="mt-7">
-          <Link
-            href="/onboarding"
-            className="inline-flex items-center justify-center rounded-xl border border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] px-5 py-2.5 text-sm font-medium text-[#10131b] transition-colors hover:brightness-105"
-          >
-            Get Started
-          </Link>
-        </div>
-      </div>
-    </div>
+        <Button tone="quiet" onClick={() => router.push(VIEW_ROUTE.setup)}>Window settings</Button>
+      </Panel>
+    </>
   );
 }

@@ -2,12 +2,8 @@
 
 import { HealthView } from "@/components/dashboard/health-view";
 import { useDashboard } from "@/components/dashboard/dashboard-provider";
-import {
-  buildConnectivityChecks,
-  describeKillSwitch,
-  describeTunnelConfig,
-  type ProviderAccess,
-} from "@/lib/health-display";
+import { useConnectivityChecks } from "@/components/dashboard/use-connectivity-checks";
+import { describeKillSwitch, describeTunnelConfig } from "@/lib/health-display";
 import { useCallback, useEffect, useMemo } from "react";
 
 export function HealthSection() {
@@ -20,7 +16,6 @@ export function HealthSection() {
     diagnostics,
     health,
     healthUpdatedAt,
-    providerAccessState,
     refreshDiagnostics,
     refreshHealth,
     refreshWireGuardReadiness,
@@ -42,15 +37,7 @@ export function HealthSection() {
 
   const killSwitch = useMemo(() => describeKillSwitch(health?.kill_switch), [health?.kill_switch]);
 
-  const checks = useMemo(
-    () => buildConnectivityChecks({
-      readiness: wireguardReadiness,
-      providerAccess: providerAccessState as ProviderAccess,
-      health,
-      tunnelConnected,
-    }),
-    [health, providerAccessState, tunnelConnected, wireguardReadiness],
-  );
+  const checks = useConnectivityChecks();
 
   const tunnelConfig = useMemo(() => describeTunnelConfig(diagnostics), [diagnostics]);
 

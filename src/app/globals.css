@@ -126,48 +126,59 @@
   --shadow-hard-alert: var(--shadow-hard-alert);
 }
 
-html,
-body {
-  height: 100%;
+/*
+ * Resets live in the base layer. Unlayered CSS outranks every Tailwind utility regardless of
+ * specificity, so an unlayered `a { color: inherit }` silently beat `text-lime` on every link.
+ */
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--bone);
+    font-family: var(--font-sans);
+    /* The window is a desktop app, not a page: nothing scrolls except the content column. */
+    overflow: hidden;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--lime);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--lime);
+    color: var(--ink);
+  }
 }
 
-body {
-  margin: 0;
-  background: var(--ink);
-  color: var(--bone);
-  font-family: var(--font-sans);
-  /* The window is a desktop app, not a page: nothing scrolls except the content column. */
-  overflow: hidden;
-}
-
-/* Radius is zero by design. This guards anything a view forgets to strip. */
+/* Radius is zero by design. Unlayered and important on purpose: it must beat any utility. */
 *,
 *::before,
 *::after {
-  box-sizing: border-box;
   border-radius: 0 !important;
-}
-
-a {
-  color: inherit;
-  text-decoration: none;
-}
-
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
-
-:focus-visible {
-  outline: 2px solid var(--lime);
-  outline-offset: 2px;
-}
-
-::selection {
-  background: var(--lime);
-  color: var(--ink);
 }
 
 /* Pixel art must stay pixel art when scaled. */
