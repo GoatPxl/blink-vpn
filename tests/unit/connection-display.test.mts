@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { describeEgress, describeIpv6, formatElapsed, handshakeFreshness } from "../../src/lib/connection-display.ts";
+import { describeEgress, describeIpv6, formatElapsed } from "../../src/lib/connection-display.ts";
 
 const START = "2026-08-15T10:00:00.000Z";
 const startMs = Date.parse(START);
@@ -95,21 +95,3 @@ describe("describeIpv6", () => {
   });
 });
 
-describe("handshakeFreshness", () => {
-  // Without elevation there is no handshake age. The bar must be absent, not a hardcoded width
-  // that reads as a real measurement of a nearly-dead link.
-  it("is null when the age could not be read", () => {
-    assert.equal(handshakeFreshness(null, 180), null);
-    assert.equal(handshakeFreshness(undefined, 180), null);
-  });
-
-  it("falls from full to the floor across the keepalive window", () => {
-    assert.equal(handshakeFreshness(0, 180), 100);
-    assert.equal(handshakeFreshness(90, 180), 50);
-    assert.equal(handshakeFreshness(180, 180), 4);
-  });
-
-  it("clamps an age beyond the window to the floor", () => {
-    assert.equal(handshakeFreshness(10_000, 180), 4);
-  });
-});

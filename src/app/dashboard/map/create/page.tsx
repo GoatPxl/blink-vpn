@@ -47,8 +47,8 @@ export default function DashboardNodesCreatePage() {
   const [pricingError, setPricingError] = useState<string | null>(null);
   const isProviderSuspended = configuredProvider?.status === "suspended";
   const suspendedMessage = configuredProvider
-    ? `Provider '${configuredProvider.id}' is suspended. Resume the provider from Settings before running this operation.`
-    : "Selected provider is suspended. Resume the provider from Settings before running this operation.";
+    ? `Provider '${configuredProvider.id}' is suspended. Resume the provider from Setup before running this operation.`
+    : "Selected provider is suspended. Resume the provider from Setup before running this operation.";
   const effectiveProviderStatusMessage = isProviderSuspended
     ? suspendedMessage
     : providerStatusMessage;

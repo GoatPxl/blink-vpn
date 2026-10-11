@@ -467,13 +467,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const providerLabel = provider?.name ?? "provider";
     if (!provider?.token_ref) {
       setProviderAccessState("missing");
-      setProviderStatusMessage(`No ${providerLabel} token is stored yet. Save and validate a token in Settings to provision nodes.`);
+      setProviderStatusMessage(`No ${providerLabel} token is stored yet. Save and validate a token in Setup to provision nodes.`);
       return;
     }
 
     if (provider.status === "suspended") {
       setProviderAccessState("invalid");
-      setProviderStatusMessage(`Provider ${providerLabel} is suspended. Resume it in Settings before running this operation.`);
+      setProviderStatusMessage(`Provider ${providerLabel} is suspended. Resume it in Setup before running this operation.`);
       return;
     }
 
@@ -897,9 +897,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     try {
       if (!dockerKeyStored) {
         setDockerReadinessState("missing");
-        setDockerReadinessMessage("Save a Docker development key in Settings before validating readiness.");
+        setDockerReadinessMessage("Save a Docker development key in Setup before validating readiness.");
         if (!silent) {
-          pushToast("warning", "Docker key missing", "Add a Docker development key in Settings first.");
+          pushToast("warning", "Docker key missing", "Add a Docker development key in Setup first.");
         }
         return;
       }
@@ -1390,7 +1390,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   /**
    * Force cleanup for a node named by id.
    *
-   * The Activity page recovers the node a failed run names, which is not necessarily the selected
+   * Shield's log recovers the node a failed run names, which is not necessarily the selected
    * one — so the id is the parameter and selection is a caller's concern.
    */
   const forceCleanupNode = useCallback(async (nodeId: string) => {
@@ -1745,7 +1745,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         // clearing here.
         setDockerReadiness(null);
         setDockerReadinessState("missing");
-        setDockerReadinessMessage("Save a Docker development key in Settings before validating readiness.");
+        setDockerReadinessMessage("Save a Docker development key in Setup before validating readiness.");
       }
 
       setRecovery(null);

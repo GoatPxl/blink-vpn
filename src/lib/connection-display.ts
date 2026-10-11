@@ -128,19 +128,3 @@ export function describeIpv6(input: {
   };
 }
 
-/**
- * How recent the last handshake is, as a percentage, or null when it could not be measured.
- *
- * Reading handshake age needs administrator, so null is the ordinary case rather than an error.
- * Callers must omit the bar entirely then — the previous code substituted a hardcoded 14%, which
- * rendered as a real measurement of a nearly-dead link on every unelevated run.
- */
-export function handshakeFreshness(
-  ageSeconds: number | null | undefined,
-  windowSeconds: number,
-): number | null {
-  if (ageSeconds === null || ageSeconds === undefined) return null;
-
-  const clamped = Math.min(Math.max(ageSeconds, 0), windowSeconds);
-  return Math.max(4, Math.min(100, 100 - ((clamped / windowSeconds) * 100)));
-}

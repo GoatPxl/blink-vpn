@@ -1389,7 +1389,7 @@ pub async fn check_docker_readiness(
         cli_version,
         daemon_version: Some(daemon_version),
         message: "Docker CLI and daemon are available for development emulation.".to_string(),
-        action_guidance: "You can use Docker development mode workflows from Settings and Node planning surfaces.".to_string(),
+        action_guidance: "You can use Docker development mode workflows from Setup and the map.".to_string(),
       })
     }
     Ok(output) => {

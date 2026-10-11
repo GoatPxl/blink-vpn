@@ -182,7 +182,7 @@ impl ProviderCredential {
   /// A required field, or a capability error naming what is missing.
   pub fn require(&self, key: &str) -> Result<&str, ProviderAdapterError> {
     self.field(key).ok_or_else(|| ProviderAdapterError::Unsupported {
-      detail: format!("Stored credential is missing the '{key}' field. Re-save this provider's credential in Settings."),
+      detail: format!("Stored credential is missing the '{key}' field. Re-save this provider's credential in Setup."),
     })
   }
 
@@ -1928,7 +1928,7 @@ impl GceProviderAdapter {
     let raw = credential.require(GCE_CREDENTIAL_KEY)?;
 
     ServiceAccountKey::parse(raw).map_err(|source| ProviderAdapterError::Unsupported {
-      detail: format!("{source} Re-save the credential in Settings."),
+      detail: format!("{source} Re-save the credential in Setup."),
     })
   }
 
@@ -3670,7 +3670,7 @@ impl ProviderRegistry {
     if provider.status == ProviderStatus::Suspended {
       return Err(ProviderFlowError::ProviderSuspended {
         provider_id: provider.id.clone(),
-        detail: "Resume the provider from Settings before running this operation.".to_string(),
+        detail: "Resume the provider from Setup before running this operation.".to_string(),
       });
     }
 

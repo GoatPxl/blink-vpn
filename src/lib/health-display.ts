@@ -1,5 +1,5 @@
 /**
- * Pure presentation logic for the Kill Switch page.
+ * Pure presentation logic for Shield.
  *
  * Free of JSX and React so it can be unit tested directly. The point of testing it is that the
  * page it feeds is a safety surface: its previous rows were a literal array with `active: true`
@@ -97,8 +97,8 @@ export function buildConnectivityChecks(input: {
     title: "Provider credential",
     detail: {
       ready: "Token stored and validated.",
-      missing: "No provider token stored. Save one in Settings.",
-      invalid: "Stored token was rejected. Re-validate it in Settings.",
+      missing: "No provider token stored. Save one in Setup.",
+      invalid: "Stored token was rejected. Re-validate it in Setup.",
       unknown: "Provider access not checked yet.",
     }[providerAccess],
     status: providerAccess === "ready" ? "pass" : providerAccess === "unknown" ? "unknown" : "fail",

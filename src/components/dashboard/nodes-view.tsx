@@ -159,7 +159,7 @@ export function NodesView({
             <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-6 text-sm text-[var(--on-surface-variant)]">
               {providerAccessState === "ready"
                 ? "No nodes have been provisioned yet. Use Create Node to launch your first WireGuard server."
-                : "No nodes yet. Save and validate the selected provider token in Settings before creating your first node."}
+                : "No nodes yet. Save and validate the selected provider token in Setup before creating your first node."}
             </div>
           ) : rows.length === 0 ? (
             <div className="rounded-[18px] border border-dashed border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-6 text-sm text-[var(--on-surface-variant)]">

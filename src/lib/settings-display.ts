@@ -1,5 +1,5 @@
 /**
- * Pure presentation and validation logic for the Settings page.
+ * Pure presentation and validation logic for the Setup page.
  *
  * Free of JSX and React so it can be unit tested directly.
  */

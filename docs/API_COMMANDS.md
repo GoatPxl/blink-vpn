@@ -376,7 +376,7 @@ that is how reworded backend messages used to silently break recovery paths.
 | `invalid-state` | transition conflicts, interrupted flows | Refresh, reconcile, run Force Cleanup |
 | `missing-resource` | node, tunnel, or provider row absent | Refresh the dashboard so lists reload |
 | `persistence` | local SQLite read/write failure | Refresh; use Force Cleanup if state stays stale |
-| `secret-storage` | Windows Credential Manager read/write failure | Re-save the credential in Settings |
+| `secret-storage` | Windows Credential Manager read/write failure | Re-save the credential in Setup |
 | `invalid-input` | request the command cannot accept | Correct the input and retry |
 | `dependency` | missing local prerequisite (WireGuard, Docker) | Install or start the prerequisite |
 | `unknown` | unclassified exceptions | Retry and export diagnostics |

@@ -83,7 +83,7 @@ What that means when a tunnel drops:
 
 - **Docker dev tunnels have no protection.** `scope_allowed_ips_for_endpoint` strips the `/0` routes
   for loopback/RFC1918 endpoints, so the dev lane runs a split tunnel and WireGuard restricts
-  nothing. The Kill Switch page reports this explicitly rather than implying parity with production.
+  nothing. Shield reports this explicitly rather than implying parity with production.
 - **A service crash is an exposure window the app detects but does not prevent.** The health poll
   classifies an unexpected stop — distinguished from a user disconnect by an intent marker recorded
   at disconnect time — and raises a visible alert with a Reconnect action. It does not block traffic

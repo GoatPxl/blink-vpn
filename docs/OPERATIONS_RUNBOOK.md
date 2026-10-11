@@ -11,7 +11,7 @@
 
 ### Provision
 
-1. Register token in Settings.
+1. Register token in Setup.
 2. Validate token.
 3. Select provider, region, and plan.
 4. Create node. A progress card in the corner follows it to `ready`; the percentage is an estimate
@@ -41,7 +41,7 @@ Force cleanup on the node.
 ### Closing and quitting
 
 Closing the window hides Blink to the system tray by default; the tray icon restores it, and its
-"Quit" item exits. Turn this off in Settings → Window. Quitting leaves a connected tunnel running.
+"Quit" item exits. Turn this off in Setup → Window. Quitting leaves a connected tunnel running.
 
 ## Recovery Workflow
 

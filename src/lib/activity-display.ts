@@ -1,5 +1,5 @@
 /**
- * Pure presentation logic for the Activity page.
+ * Pure presentation logic for the log in Shield.
  *
  * Free of JSX and React so it can be unit tested directly. `now` is always a parameter rather than
  * a `Date.now()` call, which is what keeps these tests deterministic and keeps impure work out of

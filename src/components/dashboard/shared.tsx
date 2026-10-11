@@ -118,13 +118,6 @@ export function categorizeError(kind: CommandErrorKind): { kind: ErrorCategory; 
   }
 }
 
-export function formatBytes(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "n/a";
-  if (value < 1024) return `${value} B`;
-  const kib = value / 1024;
-  if (kib < 1024) return `${kib.toFixed(1)} KiB`;
-  return `${(kib / 1024).toFixed(1)} MiB`;
-}
 
 /**
  * Handshake age, or why it is missing.
@@ -358,6 +351,7 @@ export function Button({
   size = "md",
   className = "",
   label,
+  pressed,
   type = "button",
 }: {
   children: ReactNode;
@@ -367,6 +361,8 @@ export function Button({
   size?: "md" | "sm";
   className?: string;
   label?: string;
+  /** Set for a toggle button, such as a filter chip. */
+  pressed?: boolean;
   type?: "button" | "submit";
 }) {
   const height = size === "md" ? "h-12 px-5 text-[14px]" : "h-9 px-3 text-[12px]";
@@ -376,6 +372,7 @@ export function Button({
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
+      aria-pressed={pressed}
       className={`inline-flex shrink-0 items-center justify-center gap-2 border-2 font-display uppercase tracking-[0.04em] transition-colors disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none ${height} ${BUTTON_TONE[tone]} ${className}`}
     >
       {children}
@@ -496,7 +493,7 @@ export function Tabs<T extends string>({
   }
 
   return (
-    <div role="tablist" aria-label={label} onKeyDown={onKeyDown} className="flex flex-wrap gap-0 border-b-2 border-line">
+    <div role="tablist" aria-label={label} onKeyDown={onKeyDown} className="flex flex-wrap gap-0 border-b-2 border-lime">
       {tabs.map((tab) => {
         const active = tab.id === selected;
         return (
@@ -618,15 +615,6 @@ export function Toggle({
   );
 }
 
-export function MetricCard({ title, value, detail }: { title: string; value: string; detail: string }) {
-  return (
-    <div className="border-2 border-line bg-panel p-5">
-      <Tag>{title}</Tag>
-      <div className="mt-3 font-mono text-[24px] font-bold text-bone">{value}</div>
-      <p className="mt-2 text-[13px] text-stone">{detail}</p>
-    </div>
-  );
-}
 
 /**
  * The panel: `--panel` fill, 2px `--line` border, square. A title is optional; state tints are for

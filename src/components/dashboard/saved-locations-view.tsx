@@ -56,7 +56,7 @@ export function SavedLocationsView({
   );
 }
 
-/** The rows themselves, shared by the Nodes page card and the dashboard's empty state. */
+/** The rows themselves, shown in the server list on the map. */
 export function SavedLocationList({
   locations,
   busyAction,

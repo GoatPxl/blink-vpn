@@ -410,6 +410,6 @@ Two rules make it worth keeping:
 It replaced `init_run_logs`, which only the create flow wrote to, so the app forgot every connect and
 disconnect the moment it closed. Bounded at 1000 rows, pruned on startup.
 
-The Activity page reads it through `get_diagnostics_bundle` rather than a dedicated list command:
+Shield's log reads it through `get_diagnostics_bundle` rather than a dedicated list command:
 the bundle already carries the rows and is already polled, and a second command returning a subset
 would be a parallel path to the same data.

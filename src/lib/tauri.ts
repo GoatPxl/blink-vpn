@@ -75,7 +75,7 @@ export function toCommandError(error: unknown): CommandError {
   return new CommandError({
     kind: "unknown",
     message,
-    next_action: "Retry the action. If it keeps failing, export a diagnostics bundle from the Activity page.",
+    next_action: "Retry the action. If it keeps failing, export a diagnostics bundle from Shield › Log.",
   });
 }
 

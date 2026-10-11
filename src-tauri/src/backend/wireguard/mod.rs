@@ -1285,7 +1285,7 @@ fn wireguard_service_name(tunnel_name: &str) -> String {
 /// private key out of other users' reach while still readable by the SYSTEM-hosted tunnel service.
 /// Where tunnel `.conf` files live, without creating anything.
 ///
-/// Separate from [`tunnel_config_dir`] so that showing the user the path — on the Activity page —
+/// Separate from [`tunnel_config_dir`] so that showing the user the path — in Shield › Log —
 /// does not have the side effect of creating a directory they may never need.
 pub fn tunnel_config_dir_path() -> PathBuf {
   let base = std::env::var_os("LOCALAPPDATA")
@@ -2072,7 +2072,7 @@ mod tests {
   /// `/installtunnelservice` records the path in the service command line and reads it on every
   /// start; it does not copy the file. Deleting it after import — which this used to do — created
   /// services that imported cleanly and then failed every start, because the file was gone.
-  /// The config snapshot is shown to the user on the Kill Switch page, and it is recorded whole.
+  /// The config snapshot is shown to the user in Shield, and it is recorded whole.
   ///
   /// WireGuard key material is not a secret in this app (AGENTS.md §6), so the snapshot keeps the
   /// entire config. Every field has to survive: `Address`, `DNS`, `AllowedIPs` and

@@ -1547,7 +1547,7 @@ impl Orchestrator {
       .map(|provider| provider.slug)
       .ok_or_else(|| OrchestratorError::Provider {
         detail:
-          "Provider record was not found before the node create flow. Re-open Settings so built-in providers are re-seeded, then retry."
+          "Provider record was not found before the node create flow. Re-open Setup so built-in providers are re-seeded, then retry."
             .to_string(),
         source: ProviderFlowError::MissingPersistedProvider {
           provider_id: request.provider_id.clone(),
@@ -7654,7 +7654,7 @@ impl OrchestratorError {
       Self::SecretStorage { detail, .. } => UserFacingError {
         kind: UserFacingErrorKind::Persistence,
         message: detail.clone(),
-        next_action: "Open Settings, re-save provider credentials, then retry Connect."
+        next_action: "Open Setup, re-save provider credentials, then retry Connect."
           .to_string(),
       },
       Self::Bootstrap { detail, .. } => UserFacingError {

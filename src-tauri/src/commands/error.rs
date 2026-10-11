@@ -90,7 +90,7 @@ impl CommandError {
     Self::new(
       CommandErrorKind::Unknown,
       message,
-      "Retry the action. If it keeps failing, export a diagnostics bundle from the Activity page.",
+      "Retry the action. If it keeps failing, export a diagnostics bundle from Shield › Log.",
     )
   }
 }
@@ -140,7 +140,7 @@ impl From<SecretStoreError> for CommandError {
     Self::new(
       CommandErrorKind::SecretStorage,
       error.to_string(),
-      "Re-save the credential in Settings. If it keeps failing, check Windows Credential Manager health.",
+      "Re-save the credential in Setup. If it keeps failing, check Windows Credential Manager health.",
     )
   }
 }
@@ -150,7 +150,7 @@ impl From<ProviderFlowError> for CommandError {
     Self::new(
       CommandErrorKind::Provider,
       error.to_string(),
-      "Validate the provider credential in Settings, then retry.",
+      "Validate the provider credential in Setup, then retry.",
     )
   }
 }
