@@ -86,6 +86,12 @@ jsonwebtoken = "9.3"
 # selection and mask evaluation are intricate enough that a subtly wrong encoder produces a code
 # that scans on one phone and fails on another).
 qrcode = { version = "0.14", default-features = false }
+# Native Windows notifications while the window is hidden in the tray: a dropped tunnel, a server
+# that is ready, a key that stopped working. Official Tauri plugin, maintained with Tauri itself.
+# The alternative, driving WinRT toasts through a raw crate, means owning the registration and
+# app-id plumbing this plugin already does. Desktop toasts here carry no action buttons; the action
+# is one click away in the tray.
+tauri-plugin-notification = "~2.4"
 
 [dev-dependencies]
 mockito = "1"

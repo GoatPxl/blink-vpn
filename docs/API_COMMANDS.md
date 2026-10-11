@@ -85,6 +85,8 @@ Provider adapters currently included:
 | `open_wireguard_install_page` | none | `void` | Opens the WireGuard download page in the default browser (Windows only) |
 | `install_wireguard_with_prerequisites` | none | `WireGuardInstallResult` | Runs the WireGuard installer with elevation (Windows only) |
 | `force_disconnect_node_service` | `node_id` | `void` | Best-effort teardown of every tunnel service for a node; ignores individual failures |
+| `update_tray` | `state: TrayState` | `void` | Replaces the tray icon colour, tooltip and menu. `TrayState` is `{ tone: "secure" \| "busy" \| "off" \| "failed", status, primary?, places_label, places[], power_off? }`, items `{ id, label }`. Menu clicks come back as the `tray-action` event carrying the item id |
+| `quit_app` | none | `void` | Exits the app. Called by the frontend after `tray-quit`, once any pending power-off has run. A connected tunnel stays up |
 
 ### Reading a `ForceCleanupResult`
 

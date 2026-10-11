@@ -163,7 +163,7 @@ export function DashboardOverview({
         <Panel bodyClassName="flex items-center gap-6 px-8 py-5">
           <div className="min-w-0 flex-1">
             <div className="text-[18px] font-semibold text-bone">Done for the day?</div>
-            <p className="text-[14px] text-stone">Power off deletes the server and stops the bill.</p>
+            <p className="text-[14px] text-stone">Power off deletes the server and stops the bill. One click, 6 s to undo.</p>
           </div>
           <Button tone="ghost" onClick={() => void onPowerOff(activeNode)} disabled={busy}>
             Power off

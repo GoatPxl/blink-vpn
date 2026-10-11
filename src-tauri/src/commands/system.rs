@@ -1563,6 +1563,29 @@ pub async fn open_wireguard_install_page() -> Result<(), CommandError> {
   .await
 }
 
+/// Replaces the tray's icon, tooltip and menu with what the frontend says the app's state is.
+///
+/// The frontend decides the state — the same function colours the rail — so the tray can never
+/// disagree with the window.
+#[tauri::command]
+pub async fn update_tray(state: crate::tray::TrayState, app: AppHandle) -> Result<(), CommandError> {
+  run_blocking(move || {
+    crate::tray::apply(&app, &state).map_err(|error| CommandError::unknown(format!("The tray could not be updated: {error}")))
+  })
+  .await
+}
+
+/// Exits the app, after the frontend has finished anything pending. A connected tunnel is a
+/// Windows service and stays up.
+#[tauri::command]
+pub async fn quit_app(app: AppHandle) -> Result<(), CommandError> {
+  run_blocking(move || {
+    app.exit(0);
+    Ok(())
+  })
+  .await
+}
+
 /// Opens the page where a provider issues the credential Blink needs.
 ///
 /// Takes a provider id, never a URL: the address comes from the adapter's own declaration, so the

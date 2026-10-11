@@ -1,17 +1,14 @@
 mod backend;
 mod commands;
+mod tray;
 
 use std::path::PathBuf;
 
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::{Manager, WindowEvent};
 
 use backend::app_preferences::{self, CloseToTray};
 
 const MAIN_WINDOW_LABEL: &str = "main";
-const TRAY_MENU_OPEN: &str = "tray-open";
-const TRAY_MENU_QUIT: &str = "tray-quit";
 
 pub fn run() {
   // One builder, no test-only variant.
@@ -24,8 +21,11 @@ pub fn run() {
     // Must be the first plugin registered: it decides, before anything else starts, whether this
     // process is a relaunch that should hand off to the window already running in the tray.
     .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-      show_main_window(app);
+      tray::show_main_window(app);
     }))
+    // Native toasts while the window is hidden in the tray. Sent from the frontend, which knows
+    // what happened; see `notification-bridge.tsx`.
+    .plugin(tauri_plugin_notification::init())
     .setup(move |app| {
       app.handle().plugin(
         tauri_plugin_log::Builder::default()
@@ -69,7 +69,7 @@ pub fn run() {
         })
         .close_to_tray;
       app.manage(CloseToTray::new(close_to_tray));
-      build_tray(app.handle())?;
+      tray::init(app.handle())?;
 
       match backend.orchestrator.reconcile_startup(
         &backend.provider,
@@ -163,64 +163,12 @@ pub fn run() {
       commands::system::reveal_app_location,
       commands::system::validate_provider_token,
       commands::system::provision_provider_node,
-      commands::system::delete_provider_node
+      commands::system::delete_provider_node,
+      commands::system::update_tray,
+      commands::system::quit_app
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
-}
-
-/// The notification-area icon. It is what a window closed to the tray comes back from, so it
-/// exists whether or not close-to-tray is on — turning the setting on later must not need a restart.
-///
-/// "Quit" exits the app only. A connected tunnel is a Windows service and keeps running, exactly as
-/// it does when the window is closed with the setting off.
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-  let open = MenuItem::with_id(app, TRAY_MENU_OPEN, "Open Blink", true, None::<&str>)?;
-  let quit = MenuItem::with_id(app, TRAY_MENU_QUIT, "Quit", true, None::<&str>)?;
-  let menu = Menu::with_items(app, &[&open, &quit])?;
-
-  let mut builder = TrayIconBuilder::with_id("main")
-    .tooltip("Blink VPN")
-    .menu(&menu)
-    // Left click restores the window; the menu is on right click, the Windows convention.
-    .show_menu_on_left_click(false)
-    .on_menu_event(|app, event| match event.id.as_ref() {
-      TRAY_MENU_OPEN => show_main_window(app),
-      TRAY_MENU_QUIT => app.exit(0),
-      _ => {}
-    })
-    .on_tray_icon_event(|tray, event| {
-      if let TrayIconEvent::Click {
-        button: MouseButton::Left,
-        button_state: MouseButtonState::Up,
-        ..
-      } = event
-      {
-        show_main_window(tray.app_handle());
-      }
-    });
-
-  if let Some(icon) = app.default_window_icon() {
-    builder = builder.icon(icon.clone());
-  }
-
-  builder.build(app)?;
-  Ok(())
-}
-
-fn show_main_window(app: &AppHandle) {
-  let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-    log::warn!("event=window.restore_failed reason=main_window_missing");
-    return;
-  };
-
-  let restore = window
-    .show()
-    .and_then(|()| window.unminimize())
-    .and_then(|()| window.set_focus());
-  if let Err(err) = restore {
-    log::warn!("event=window.restore_failed error={err}");
-  }
 }
 
 fn summarize_path_for_log(path_value: Option<&str>) -> String {

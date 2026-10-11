@@ -60,6 +60,8 @@ export type Toast = {
   kind: ToastKind;
   title: string;
   message: string;
+  /** One follow-up, as a link: "Fix key" to Setup. */
+  action?: { label: string; href: string };
 };
 
 export type RecoveryState = {

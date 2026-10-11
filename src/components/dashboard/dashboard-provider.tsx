@@ -120,6 +120,24 @@ type PendingMove = {
 /** The "one Windows prompt is coming" explainer, waiting on the user's answer. */
 export type UacPrompt = { place: string };
 
+/** How long a power-off, turn-off or forget waits for Undo before it runs. */
+export const UNDO_WINDOW_MS = 6_000;
+
+/**
+ * A removal waiting out its undo window.
+ *
+ * One click, six seconds to change your mind, then it happens — instead of a typed confirmation.
+ * The timer lives in the provider, not a view, so navigating away or hiding the window to the tray
+ * does not cancel it: a power-off the user asked for still reaches the provider.
+ */
+export type PendingRemoval = {
+  id: string;
+  title: string;
+  detail: string;
+  /** `Date.now()` when it runs. */
+  runsAt: number;
+};
+
 type ThroughputSample = {
   timestamp: number;
   downloadBytesPerSecond: number;
@@ -278,6 +296,11 @@ type DashboardContextValue = {
   requestCancelBuild: () => void;
   /** The pre-connect explainer, while it waits for an answer. */
   uacPrompt: UacPrompt | null;
+  /** A power-off, turn-off or forget in its undo window. */
+  pendingRemoval: PendingRemoval | null;
+  undoRemoval: () => void;
+  /** Runs the pending removal now, for Quit: a server the user powered off must not keep billing. */
+  flushRemoval: () => Promise<void>;
   /** Answers the explainer. `dontExplainAgain` turns it off for later connects. */
   answerUacPrompt: (proceed: boolean, dontExplainAgain: boolean) => void;
   throughputSamples: ThroughputSample[];
@@ -349,6 +372,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [tunnelSettings, setTunnelSettings] = useState<TunnelSettings | null>(null);
   const [appPreferences, setAppPreferencesState] = useState<AppPreferences | null>(null);
   const [uacPrompt, setUacPrompt] = useState<UacPrompt | null>(null);
+  const [pendingRemoval, setPendingRemoval] = useState<PendingRemoval | null>(null);
   const [throughputSamples, setThroughputSamples] = useState<ThroughputSample[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsBundle | null>(null);
   // Null rather than a "No export yet." sentinel: the UI hides the row instead of printing prose
@@ -388,6 +412,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const connectNodeRef = useRef<(node: VpnNodeRecord) => Promise<void>>(async () => {});
   const destroyNodeNowRef = useRef<(node: VpnNodeRecord, reason?: DestroyReason) => Promise<void>>(async () => {});
   const pendingMoveRef = useRef<PendingMove | null>(null);
+  // The pending removal's work and timer. A ref, because the timer fires long after the render
+  // that scheduled it and must run the work it was given, not a stale copy.
+  const removalRef = useRef<{ id: string; run: () => Promise<void>; timer: number } | null>(null);
   const lastTrafficSampleRef = useRef<{
     timestamp: number;
     nodeId: string;
@@ -439,9 +466,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     selectedTunnelIdRef.current = selectedTunnelId;
   }, [providerId, selectedNodeId, selectedTunnelId]);
 
-  const pushToast = useCallback((kind: ToastKind, title: string, message: string) => {
+  const pushToast = useCallback((kind: ToastKind, title: string, message: string, action?: Toast["action"]) => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    setToasts((current) => [...current, { id, kind, title, message }]);
+    setToasts((current) => [...current, { id, kind, title, message, action }]);
     window.setTimeout(() => {
       setToasts((current) => current.filter((toast) => toast.id !== id));
     }, 5000);
@@ -462,6 +489,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       classification.kind === "state" ? "warning" : "error",
       classification.title,
       `${commandError.message} ${commandError.nextAction}`,
+      // A provider or credential failure is fixed in Setup; say so with a way there. Keyed on the
+      // structured kind, never on the message.
+      classification.kind === "provider" ? { label: "Fix key", href: "/dashboard/settings" } : undefined,
     );
 
     return `${commandError.message} ${commandError.nextAction}`;
@@ -1519,6 +1549,37 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, loadDashboard, pushToast, refreshHealthSnapshot]);
 
+  const runRemoval = useCallback(async (id: string) => {
+    const pending = removalRef.current;
+    if (!pending || pending.id !== id) return;
+    removalRef.current = null;
+    window.clearTimeout(pending.timer);
+    setPendingRemoval((current) => (current?.id === id ? null : current));
+    await pending.run();
+  }, []);
+
+  const scheduleRemoval = useCallback(async (title: string, detail: string, run: () => Promise<void>) => {
+    // One at a time: a second removal while one is pending runs the first now rather than
+    // silently replacing it — the user asked for both.
+    if (removalRef.current) await runRemoval(removalRef.current.id);
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const timer = window.setTimeout(() => void runRemoval(id), UNDO_WINDOW_MS);
+    removalRef.current = { id, run, timer };
+    setPendingRemoval({ id, title, detail, runsAt: Date.now() + UNDO_WINDOW_MS });
+  }, [runRemoval]);
+
+  const undoRemoval = useCallback(() => {
+    const pending = removalRef.current;
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    removalRef.current = null;
+    setPendingRemoval(null);
+  }, []);
+
+  const flushRemoval = useCallback(async () => {
+    if (removalRef.current) await runRemoval(removalRef.current.id);
+  }, [runRemoval]);
+
   /** Deletes a server at its provider, no questions asked. Callers decide whether to ask first. */
   const destroyNodeNow = useCallback(async (node: VpnNodeRecord, reason?: DestroyReason) => {
     setBusyAction("destroy-node");
@@ -1554,11 +1615,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     // Names the location as well as the node: with the fleet keyed by city, "which one is this?"
     // is the question a user needs answered before deleting a server they pay for.
     const where = node.region_geo?.city ?? node.region;
-    const confirmed = window.confirm(
-      `Turn off ${node.name} in ${where}?\n\nThis deletes the server at your provider and stops its billing. The location stays saved, so you can turn it back on later.`,
+    await scheduleRemoval(
+      `Powering off ${where}…`,
+      `Deletes the server at ${providerNameFor(node.provider_id)} and stops the bill. The location stays saved.`,
+      () => destroyNodeNow(node),
     );
-    if (confirmed) await destroyNodeNow(node);
-  }, [destroyNodeNow]);
+  }, [destroyNodeNow, providerNameFor, scheduleRemoval]);
 
 
   const turnOnLocation = useCallback(async (location: SavedLocationRecord) => {
@@ -1623,13 +1685,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     if (ready) await finishBuild(nodeId, place);
   }, [finishBuild, handleError, loadDashboard, providerNameFor, pushToast]);
 
-  const turnOffLocation = useCallback(async (location: SavedLocationRecord) => {
+  const turnOffLocationNow = useCallback(async (location: SavedLocationRecord) => {
     if (!location.node_id) return;
-
-    const confirmed = window.confirm(
-      `Turn off ${location.name}?\n\nThis deletes the server at your provider and stops its billing. The location stays saved, so you can turn it back on later.`,
-    );
-    if (!confirmed) return;
 
     setBusyAction("destroy-node");
     setOperationAttempt({
@@ -1652,12 +1709,16 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, loadDashboard, providerNameFor, pushToast]);
 
-  const forgetLocation = useCallback(async (location: SavedLocationRecord) => {
-    const confirmed = window.confirm(
-      `Forget ${location.name}?\n\nIt is removed from your saved locations. Nothing at the provider changes.`,
+  const turnOffLocation = useCallback(async (location: SavedLocationRecord) => {
+    if (!location.node_id) return;
+    await scheduleRemoval(
+      `Powering off ${location.region_geo?.city ?? location.name}…`,
+      `Deletes the server at ${location.provider_name ?? providerNameFor(location.provider_id)} and stops the bill. The location stays saved.`,
+      () => turnOffLocationNow(location),
     );
-    if (!confirmed) return;
+  }, [providerNameFor, scheduleRemoval, turnOffLocationNow]);
 
+  const forgetLocationNow = useCallback(async (location: SavedLocationRecord) => {
     setBusyAction("forget-location");
     try {
       await forgetSavedLocation(location.id);
@@ -1668,6 +1729,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setBusyAction(null);
     }
   }, [handleError]);
+
+  const forgetLocation = useCallback(async (location: SavedLocationRecord) => {
+    await scheduleRemoval(
+      `Forgetting ${location.region_geo?.city ?? location.name}…`,
+      "Removed from your saved locations. Nothing at the provider changes.",
+      () => forgetLocationNow(location),
+    );
+  }, [forgetLocationNow, scheduleRemoval]);
 
   /**
    * Force cleanup for a node named by id.
@@ -2109,6 +2178,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     moveTo,
     uacPrompt,
     answerUacPrompt,
+    pendingRemoval,
+    undoRemoval,
+    flushRemoval,
     throughputSamples,
     loadDashboard,
     refreshHealth,

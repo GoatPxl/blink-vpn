@@ -7,7 +7,10 @@ import { GoatMark, PixelIcon, type PixelIconName } from "@/components/ui/pixel-i
 import { deriveShellTone, SHELL_TONE_COLOR, type ShellTone } from "@/lib/shell-tone";
 import { useDashboard } from "./dashboard-provider";
 import { Button, type AppView, VIEW_ROUTE } from "./shared";
+import { NotificationBridge } from "@/components/shell/notification-bridge";
+import { TrayBridge } from "@/components/shell/tray-bridge";
 import { OperationStrip } from "./operation-strip";
+import { RemovalToast } from "./removal-toast";
 import { UacExplainer } from "./uac-explainer";
 
 const NAV_ITEMS: Array<{ id: AppView; label: string; icon: PixelIconName }> = [
@@ -67,7 +70,7 @@ function Rail({ activeView, tone }: { activeView: AppView; tone: ShellTone }) {
 export function DashboardShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const activeView = getActiveView(pathname);
-  const { connectAttempt, dismissRecovery, operationAttempt, recovery, toasts, tunnelPhase } = useDashboard();
+  const { connectAttempt, dismissRecovery, operationAttempt, pendingRemoval, recovery, toasts, tunnelPhase } = useDashboard();
 
   const tone = deriveShellTone({
     tunnelPhase,
@@ -103,22 +106,37 @@ export function DashboardShell({ children }: { children: ReactNode }) {
           tests can tell "this action just failed" from "an earlier one did". */}
       <div
         data-testid="toast-region"
-        className={`fixed bottom-6 right-6 z-50 flex w-[min(92vw,520px)] flex-col gap-3 ${toasts.length === 0 ? "pointer-events-none" : ""}`}
+        className={`fixed bottom-6 right-6 z-50 flex w-[min(92vw,520px)] flex-col gap-3 ${toasts.length === 0 && !pendingRemoval ? "pointer-events-none" : ""}`}
       >
+        <RemovalToast />
         {toasts.map((toast) => (
           <div
             key={toast.id}
             data-testid={`toast-${toast.kind}`}
             className={`border-2 border-bone bg-panel p-[14px] ${toast.kind === "error" ? "shadow-hard-alert" : toast.kind === "warning" ? "shadow-[4px_4px_0_var(--ember)]" : "shadow-hard-lime"}`}
           >
-            <div className="text-[15px] font-semibold text-bone">{toast.title}</div>
-            <div className="mt-1 text-[12.5px] text-stone">{toast.message}</div>
+            <div className="flex items-start gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="text-[15px] font-semibold text-bone">{toast.title}</div>
+                <div className="mt-1 text-[12.5px] text-stone">{toast.message}</div>
+              </div>
+              {toast.action ? (
+                <Link
+                  href={toast.action.href}
+                  className="inline-flex h-9 shrink-0 items-center border-2 border-bone px-3 font-display text-[12px] uppercase text-bone hover:bg-panel-2"
+                >
+                  {toast.action.label}
+                </Link>
+              ) : null}
+            </div>
           </div>
         ))}
       </div>
 
       {/* Mounted at the shell so a connect started from any view is explained before it starts. */}
       <UacExplainer />
+      <TrayBridge />
+      <NotificationBridge />
     </div>
   );
 }

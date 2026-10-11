@@ -113,8 +113,28 @@ connection-mode toggle (see Connection Model above).
 
 ## Window and Tray
 
-The app always shows a notification-area icon (`lib.rs`, `build_tray`). Left-clicking it, or
-choosing "Open Blink", restores the window; "Quit" exits the process.
+The app always shows a notification-area icon (`tray.rs`). It is the pixel goat in the app's state
+colour — lime secure, ember working, stone off, alert failed — drawn at runtime, no image assets.
+The frontend computes that state with the same `deriveShellTone` that colours the rail and pushes
+it, with the menu's lines, through `update_tray` (`src/components/shell/tray-bridge.tsx`), so the
+tray and the window cannot disagree.
+
+The menu names actions only: a status line, Disconnect or Connect · <place>, a places submenu,
+Power off server ($x so far), Open Blink, Quit. A click is emitted to the frontend as `tray-action`
+and runs through the same functions the window's buttons call; the tray never calls a provider.
+Left click restores the window; double-click connects to the last place. Quit emits `tray-quit`:
+the frontend runs any power-off still in its undo window — so a server the user powered off does
+not keep billing — then calls `quit_app`. If the frontend does not answer within 30 s, Rust exits
+anyway.
+
+While the window is hidden, `tauri-plugin-notification` shows one native toast per event: the
+tunnel dropped, no reply from the server, a server is ready, a key stopped working, a disconnected
+server has been on for 12 hours. The plugin's action buttons are mobile-only, so the toasts name the
+next step in text and the action is one click away in the tray.
+
+Destructive actions — power off, turn off, forget — run after a 6-second undo window instead of a
+typed confirmation. The timer lives in the dashboard provider, so navigating or hiding the window
+does not cancel it.
 
 With `close_to_tray` on, the default, closing the main window hides it instead of exiting. The close
 handler runs on the event-loop thread, so it reads a cached `CloseToTray` flag rather than SQLite;
