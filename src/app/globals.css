@@ -1,43 +1,151 @@
 @import "tailwindcss";
 
+/*
+ * Fonts are bundled, never fetched. The kill switch can hold the default route with no DNS while a
+ * tunnel comes up, and the app must render identically through that window. All three are OFL;
+ * the licences sit beside the files in public/fonts/.
+ */
+@font-face {
+  font-family: "Silkscreen";
+  src: url("/fonts/Silkscreen-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: "Silkscreen";
+  src: url("/fonts/Silkscreen-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: block;
+}
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("/fonts/SpaceGrotesk-Variable.ttf") format("truetype");
+  font-weight: 300 700;
+  font-display: block;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Variable.ttf") format("truetype");
+  font-weight: 100 800;
+  font-display: block;
+}
+
 :root {
-  --surface-container-lowest: #0b0e15;
-  --surface: #10131b;
-  --surface-container: #1c2027;
-  --surface-container-high: #262a32;
-  --surface-container-highest: #313640;
-  --outline: #8b91a0;
-  --outline-variant: rgba(139, 145, 160, 0.24);
-  --on-surface: #e8ebf4;
-  --on-surface-variant: #a2a8b7;
-  --primary: #abc7ff;
-  --secondary: #4edea3;
-  --tertiary: #ffb95f;
-  --danger: #ff6b6b;
-  --shadow-elevated: 0 24px 80px rgba(0, 0, 0, 0.42);
+  /* Ground */
+  --ink: #0b0b0a;
+  --ink-2: #0e0e0c;
+  --panel: #121210;
+  --panel-2: #1a1a17;
+  --line: #24241f;
+  --line-2: #1c1c19;
+  --line-3: #3a3a34;
+
+  /* Text */
+  --bone: #f2f0e6;
+  --stone: #a29f92;
+  /* 3.2:1 on ink — large or non-essential text only. */
+  --stone-2: #6e6b60;
+
+  /* Signal — one meaning each, never decorative. */
+  --lime: #d4ff3a;
+  --ember: #ff8a3d;
+  --alert: #ff4d6d;
+
+  --ember-ink: #16110c;
+  --alert-ink: #170e11;
+  --lime-dim: #5d7019;
+  --ember-dim: #7a4220;
+  --ember-track: #2a2218;
+  --track: #1e1e1b;
+
+  /* Type. Silkscreen is display only: headlines >= 32px, tags, nav labels, button labels. */
+  --font-display: "Silkscreen", monospace;
+  --font-sans: "Space Grotesk", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* Shape — no radius anywhere, no blur anywhere. */
+  --shadow-hard: 4px 4px 0 var(--bone);
+  --shadow-hard-lime: 4px 4px 0 var(--lime);
+  --shadow-hard-lg: 8px 8px 0 var(--lime);
+  --shadow-hard-alert: 6px 6px 0 var(--alert);
+
+  --rail-w: 96px;
+  --titlebar-h: 36px;
+
+  /*
+   * Transitional aliases: the previous palette's names, pointed at the new one, so views not yet
+   * rewritten for the redesign stay legible. Each is deleted once its last reference is gone; the
+   * branch is not finished while any remain.
+   */
+  --surface-container-lowest: var(--ink);
+  --surface: var(--panel);
+  --surface-container: var(--panel);
+  --surface-container-high: var(--panel-2);
+  --surface-container-highest: var(--panel-2);
+  --outline: var(--stone-2);
+  --outline-variant: var(--line);
+  --on-surface: var(--bone);
+  --on-surface-variant: var(--stone);
+  --primary: var(--lime);
+  --secondary: var(--lime);
+  --tertiary: var(--ember);
+  --danger: var(--alert);
+  --shadow-elevated: none;
+
   color-scheme: dark;
 }
 
 @theme inline {
-  --color-background: var(--surface-container-lowest);
-  --color-foreground: var(--on-surface);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-line-3: var(--line-3);
+  --color-bone: var(--bone);
+  --color-stone: var(--stone);
+  --color-stone-2: var(--stone-2);
+  --color-lime: var(--lime);
+  --color-lime-dim: var(--lime-dim);
+  --color-ember: var(--ember);
+  --color-alert: var(--alert);
+  --color-ember-ink: var(--ember-ink);
+  --color-alert-ink: var(--alert-ink);
+  --color-ember-dim: var(--ember-dim);
+  --color-ember-track: var(--ember-track);
+  --color-track: var(--track);
+
+  --font-display: var(--font-display);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+
+  --shadow-hard: var(--shadow-hard);
+  --shadow-hard-lime: var(--shadow-hard-lime);
+  --shadow-hard-lg: var(--shadow-hard-lg);
+  --shadow-hard-alert: var(--shadow-hard-alert);
+}
+
+html,
+body {
+  height: 100%;
 }
 
 body {
   margin: 0;
-  min-height: 100vh;
-  background:
-    radial-gradient(circle at top right, rgba(171, 199, 255, 0.08), transparent 34%),
-    radial-gradient(circle at 18% 22%, rgba(78, 222, 163, 0.06), transparent 26%),
-    linear-gradient(180deg, #10131b 0%, #0b0e15 100%);
-  color: var(--on-surface);
-  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+  background: var(--ink);
+  color: var(--bone);
+  font-family: var(--font-sans);
+  /* The window is a desktop app, not a page: nothing scrolls except the content column. */
+  overflow: hidden;
 }
 
-* {
+/* Radius is zero by design. This guards anything a view forgets to strip. */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+  border-radius: 0 !important;
 }
 
 a {
@@ -52,7 +160,23 @@ textarea {
   font: inherit;
 }
 
+:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+}
+
 ::selection {
-  background: rgba(171, 199, 255, 0.35);
-  color: var(--on-surface);
+  background: var(--lime);
+  color: var(--ink);
+}
+
+/* Pixel art must stay pixel art when scaled. */
+.pixelated {
+  image-rendering: pixelated;
+  shape-rendering: crispEdges;
+}
+
+.scroll-area {
+  scrollbar-color: var(--line-3) var(--ink);
+  scrollbar-width: thin;
 }

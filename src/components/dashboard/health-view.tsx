@@ -1,16 +1,17 @@
 "use client";
 
-import { AppIcon, Button, Card, ConnectionTimer, MetricCard, PageChrome, formatBytes, formatHandshakeAge, useNow, type DashboardBusyAction, type HealthPanelData, type VpnNodeRecord } from "./shared";
+import { PixelIcon, type PixelIconName } from "@/components/ui/pixel-icon";
+import { Button, Panel, ConnectionTimer, MetricCard, PageChrome, formatBytes, formatHandshakeAge, useNow, type DashboardBusyAction, type HealthPanelData, type VpnNodeRecord } from "./shared";
 import { formatDropAge, type CheckStatus, type ConnectivityCheck, type describeTunnelConfig } from "@/lib/health-display";
 import type { WireGuardReadiness } from "@/lib/tauri";
 
 type TunnelConfigDisplay = ReturnType<typeof describeTunnelConfig>;
 
-const STATUS_STYLES: Record<CheckStatus, { border: string; text: string; icon: string }> = {
+const STATUS_STYLES: Record<CheckStatus, { border: string; text: string; icon: PixelIconName }> = {
   pass: { border: "border-[color:rgba(78,222,163,0.3)] bg-[color:rgba(78,222,163,0.07)]", text: "text-[var(--secondary)]", icon: "check" },
-  fail: { border: "border-[color:rgba(255,155,155,0.35)] bg-[color:rgba(255,155,155,0.07)]", text: "text-[#ff9b9b]", icon: "lock" },
-  warn: { border: "border-[color:rgba(255,185,95,0.3)] bg-[color:rgba(255,185,95,0.07)]", text: "text-[var(--tertiary)]", icon: "lock" },
-  unknown: { border: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]", text: "text-[var(--on-surface-variant)]", icon: "lock" },
+  fail: { border: "border-[color:rgba(255,155,155,0.35)] bg-[color:rgba(255,155,155,0.07)]", text: "text-[#ff9b9b]", icon: "alert" },
+  warn: { border: "border-[color:rgba(255,185,95,0.3)] bg-[color:rgba(255,185,95,0.07)]", text: "text-[var(--tertiary)]", icon: "alert" },
+  unknown: { border: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)]", text: "text-[var(--on-surface-variant)]", icon: "alert" },
 };
 
 /**
@@ -68,7 +69,7 @@ export function HealthView({
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <div className="flex items-center gap-2 text-[#ff9b9b]">
-                <AppIcon name="shield" className="h-4 w-4" />
+                <PixelIcon name="shield" className="h-4 w-4" />
                 <span className="text-[11px] font-semibold uppercase tracking-[0.24em]">Tunnel dropped</span>
               </div>
               <p className="mt-2 max-w-2xl text-sm text-[var(--on-surface)]">
@@ -93,7 +94,7 @@ export function HealthView({
       <div className={`rounded-[24px] border px-6 py-5 ${killSwitchStyle.border}`}>
         <div className="flex items-start gap-4">
           <div className={`mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[color:var(--outline-variant)] ${killSwitchStyle.text}`}>
-            <AppIcon name="shield" className="h-5 w-5" />
+            <PixelIcon name="shield" className="h-5 w-5" />
           </div>
           <div>
             <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Kill switch</div>
@@ -109,7 +110,7 @@ export function HealthView({
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[390px_minmax(0,1fr)]">
-        <Card
+        <Panel
           title="System Health"
           description={lastCheckedAt ? `Last check: ${new Date(lastCheckedAt).toLocaleTimeString()}` : "Waiting for the first health poll."}
           action={
@@ -138,16 +139,16 @@ export function HealthView({
               </div>
             </div>
           </div>
-        </Card>
+        </Panel>
 
         {/* Sits beside the kill-switch verdict because AllowedIPs is what decides it: a config
             without a /0 route is exactly the case the banner above reports as unprotected. */}
-        <Card
+        <Panel
           title="Tunnel Configuration"
           description="What the tunnel service was handed, in full."
           action={
             onCopyConfig ? (
-              <Button tone="secondary" onClick={() => void onCopyConfig()}>Copy</Button>
+              <Button tone="ghost" onClick={() => void onCopyConfig()}>Copy</Button>
             ) : null
           }
         >
@@ -166,14 +167,14 @@ export function HealthView({
               {tunnelConfig.emptyReason}
             </div>
           )}
-        </Card>
+        </Panel>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[390px_minmax(0,1fr)]">
-        <Card
+        <Panel
           title="Connectivity Check"
           description={failing > 0 ? `${failing} check${failing === 1 ? "" : "s"} failing.` : "All checks passing."}
-          action={<Button tone="secondary" onClick={() => void onRunChecks()} disabled={busyAction !== null}>{busyAction === "refresh-health" ? "Checking" : "Run Again"}</Button>}
+          action={<Button tone="ghost" onClick={() => void onRunChecks()} disabled={busyAction !== null}>{busyAction === "refresh-health" ? "Checking" : "Run Again"}</Button>}
         >
           <div className="space-y-3">
             {checks.map((check) => {
@@ -182,7 +183,7 @@ export function HealthView({
                 <div key={check.id} className={`rounded-[10px] border px-4 py-3 ${style.border}`}>
                   <div className="flex items-start gap-3">
                     <div className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-[color:var(--outline-variant)] ${style.text}`}>
-                      <AppIcon name={style.icon} className="h-3.5 w-3.5" />
+                      <PixelIcon name={style.icon} className="h-3.5 w-3.5" />
                     </div>
                     <div>
                       <div className="font-medium text-[var(--on-surface)]">{check.title}</div>
@@ -193,22 +194,22 @@ export function HealthView({
               );
             })}
           </div>
-        </Card>
+        </Panel>
 
-        <Card title="Connection Stats" description="Live handshake, addressing, and throughput for the selected tunnel.">
+        <Panel title="Connection Stats" description="Live handshake, addressing, and throughput for the selected tunnel.">
           {health ? (
             <div className="grid gap-4 md:grid-cols-2">
-              <MetricCard title="Endpoint" value={health.endpoint_ip ?? "n/a"} detail={`Node ${health.node_id}`} tone="primary" />
-              <MetricCard title="Egress IP" value={health.external_ipv4 ?? "Not verified"} detail={health.external_ipv4 ? "Observed through the tunnel" : "Connect to verify"} tone="secondary" />
-              <MetricCard title="Handshake" value={formatHandshakeAge(health.handshake_age_seconds, health.tunnel_status)} detail={`Tunnel status ${health.tunnel_status ?? "n/a"}`} tone="tertiary" />
-              <MetricCard title="Traffic" value={`RX ${formatBytes(health.rx_bytes)} / TX ${formatBytes(health.tx_bytes)}`} detail={`Selected tunnel ${selectedTunnelId || "none"}`} tone="primary" />
+              <MetricCard title="Endpoint" value={health.endpoint_ip ?? "n/a"} detail={`Node ${health.node_id}`} />
+              <MetricCard title="Egress IP" value={health.external_ipv4 ?? "Not verified"} detail={health.external_ipv4 ? "Observed through the tunnel" : "Connect to verify"} />
+              <MetricCard title="Handshake" value={formatHandshakeAge(health.handshake_age_seconds, health.tunnel_status)} detail={`Tunnel status ${health.tunnel_status ?? "n/a"}`} />
+              <MetricCard title="Traffic" value={`RX ${formatBytes(health.rx_bytes)} / TX ${formatBytes(health.tx_bytes)}`} detail={`Selected tunnel ${selectedTunnelId || "none"}`} />
             </div>
           ) : (
             <div className="rounded-[10px] border border-dashed border-[color:var(--outline-variant)] px-4 py-6 text-sm text-[var(--on-surface-variant)]">
               {selectedNode ? "Waiting for the first health poll." : "Select a node to load health details."}
             </div>
           )}
-        </Card>
+        </Panel>
       </div>
     </PageChrome>
   );

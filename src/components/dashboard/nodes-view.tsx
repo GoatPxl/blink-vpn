@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 
-import { Button, Card, Field, Modal, PageChrome, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type TunnelRecord, type VpnNodeRecord, type PlanDisplayModel, type HealthPanelData } from "./shared";
+import { Button, Panel, Field, Modal, PageChrome, type DashboardBusyAction, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord, type TunnelRecord, type VpnNodeRecord, type PlanDisplayModel, type HealthPanelData } from "./shared";
 import { formatCreatedTime, formatCurrency, formatMemory, getNodePricingDisplay } from "./shared";
 import { DeviceSlots } from "./device-slots";
 import type { NodePeerRecord, PeerConfigPayload } from "@/lib/tauri";
@@ -128,7 +128,7 @@ export function NodesView({
       <div className="space-y-4">
         {/* The page header above already names this screen; a second identical title was the
             "Node Management" repeated twice in the original layout. */}
-        <Card
+        <Panel
           title="Fleet"
           description="Existing node records stay visible even if the provider key becomes invalid."
           action={<Button tone="primary" onClick={onNavigateToCreate} disabled={busyAction !== null}><span className="text-lg leading-none">+</span> Create Node</Button>}
@@ -221,7 +221,7 @@ export function NodesView({
                               // A node in Error cannot be connected or re-created under the same
                               // id until it is cleaned up, so cleanup is the only useful action —
                               // offering a dead Connect button here just strands the user.
-                              <Button tone="secondary" onClick={() => onOpenNodeDetails(node.id)} disabled={busyAction !== null} className="px-3 py-2 text-xs">
+                              <Button tone="ghost" onClick={() => onOpenNodeDetails(node.id)} disabled={busyAction !== null} className="px-3 py-2 text-xs">
                                 Resolve
                               </Button>
                             ) : canInstallHost ? (
@@ -230,7 +230,7 @@ export function NodesView({
                               </Button>
                             ) : (
                               <Button
-                                tone={isConnectedRow ? "danger" : "primary"}
+                                tone={isConnectedRow ? "destructive" : "primary"}
                                 onClick={() => {
                                   if (isConnectedRow) {
                                     void (tunnelForNode
@@ -265,7 +265,7 @@ export function NodesView({
               </table>
             </div>
           )}
-        </Card>
+        </Panel>
       </div>
 
       {isDetailsModalOpen && selectedNode ? (
@@ -357,12 +357,12 @@ function NodeDetailsDrawer({
             <p className="text-xs uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Server</p>
             <h2 id="node-details-title" className="mt-2 text-2xl font-semibold tracking-tight text-[var(--on-surface)]">{node.name}</h2>
           </div>
-          <Button tone="secondary" onClick={onClose} className="px-3 py-2 text-xs">Close</Button>
+          <Button tone="ghost" onClick={onClose} className="px-3 py-2 text-xs">Close</Button>
         </div>
 
         {!isCurrent ? (
           <div className="mt-5">
-            <Button tone="secondary" onClick={() => void onSetCurrentNode(node.id)} disabled={busyAction !== null} className="w-full justify-center">
+            <Button tone="ghost" onClick={() => void onSetCurrentNode(node.id)} disabled={busyAction !== null} className="w-full justify-center">
               Make this my current server
             </Button>
           </div>
@@ -443,7 +443,7 @@ function NodeDetailsDrawer({
                   {busyAction === "force-cleanup" ? "Cleaning up" : "Force cleanup"}
                 </Button>
               ) : null}
-              <Button tone="danger" onClick={() => void onDestroyNode(node)} disabled={busyAction !== null} className="px-3 py-2 text-xs">
+              <Button tone="destructive" onClick={() => void onDestroyNode(node)} disabled={busyAction !== null} className="px-3 py-2 text-xs">
                 {busyAction === "destroy-node" ? "Turning off" : "Turn off"}
               </Button>
             </div>

@@ -1,7 +1,8 @@
 "use client";
 
+import { PixelIcon } from "@/components/ui/pixel-icon";
 import { DashboardEmptyState } from "@/components/dashboard-empty-state";
-import { AppIcon, Button, ConnectionTimer, PageChrome, formatHandshakeAge, type AppView, type HealthPanelData, type RecoveryState, type DashboardBusyAction, type TunnelRecord, type VpnNodeRecord } from "./shared";
+import { Button, ConnectionTimer, PageChrome, formatHandshakeAge, type AppView, type HealthPanelData, type RecoveryState, type DashboardBusyAction, type TunnelRecord, type VpnNodeRecord } from "./shared";
 import { describeEgress, describeIpv6, handshakeFreshness, type EgressTone } from "@/lib/connection-display";
 import type { ConnectAttempt } from "./dashboard-provider";
 import type { ReactNode } from "react";
@@ -94,7 +95,7 @@ function RefreshButton({
       onClick={() => { void onRefresh(); }}
       className="rounded-full p-1 text-[var(--on-surface-variant)] transition hover:bg-[color:rgba(255,255,255,0.06)] hover:text-[var(--on-surface)] disabled:opacity-50"
     >
-      <AppIcon name="refresh" className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />
+      <PixelIcon name="refresh" className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />
     </button>
   );
 }
@@ -140,11 +141,11 @@ export function DashboardOverview({
   /** Replaces the default first-run prompt when no server exists. */
   emptyState?: ReactNode;
 }) {
-  if (noServerConfigured && activeView === "dashboard") {
+  if (noServerConfigured && activeView === "home") {
     return emptyState ?? <DashboardEmptyState />;
   }
 
-  if (!(noServerConfigured && activeView === "dashboard") && activeView === "dashboard") {
+  if (!(noServerConfigured && activeView === "home") && activeView === "home") {
     // Every connection widget reads the same live value, so the headline can no longer contradict
     // the handshake card beside it.
     // A connect in flight outranks everything else here: the user's internet is down during it, so
@@ -172,7 +173,7 @@ export function DashboardOverview({
       : tunnelConnected
         ? (busyAction === "disconnect-tunnel" ? "Disconnecting" : "Disconnect")
         : "Connect";
-    const buttonTone = tunnelConnected ? "danger" : "primary";
+    const buttonTone = tunnelConnected ? "destructive" : "primary";
 
     // Known only when this app established the session. A tunnel already running at startup has
     // no recorded start, and inventing one would render a timer counting from an arbitrary moment.
@@ -241,7 +242,7 @@ export function DashboardOverview({
                 }}
                 disabled={busyAction !== null || isConnecting || !activeNode}
               >
-                <AppIcon name="power" className="h-4 w-4" />
+                <PixelIcon name="power" className="h-4 w-4" />
                 {buttonLabel}
               </Button>
             </div>
@@ -260,7 +261,7 @@ export function DashboardOverview({
               </div>
               <div>
                 <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--on-surface-variant)]">Encryption Protocol</div>
-                <div className="mt-1 flex items-center gap-2 text-[22px] font-semibold text-[var(--on-surface)]"><AppIcon name="lock" className="h-5 w-5 text-[var(--primary)]" />{WIREGUARD_SUITE}</div>
+                <div className="mt-1 flex items-center gap-2 text-[22px] font-semibold text-[var(--on-surface)]"><PixelIcon name="key" className="h-5 w-5 text-[var(--primary)]" />{WIREGUARD_SUITE}</div>
                 <div className="mt-1 text-[11px] text-[var(--on-surface-variant)]">WireGuard · {WIREGUARD_SUITE_DETAIL}</div>
               </div>
             </div>

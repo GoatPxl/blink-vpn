@@ -1,9 +1,10 @@
 "use client";
 
+import { PixelIcon } from "@/components/ui/pixel-icon";
 import { formatElapsedMs } from "@/lib/connect-progress-display";
 import { describeProvisionProgress, describeRemovalProgress } from "@/lib/progress-estimate";
 import { useDashboard, type OperationAttempt } from "./dashboard-provider";
-import { AppIcon, ProgressBar, useNow } from "./shared";
+import { BlockProgress, useNow } from "./shared";
 
 const HEADLINE: Record<OperationAttempt["kind"], string> = {
   provision: "Provisioning server",
@@ -51,15 +52,15 @@ export function OperationProgress() {
       className="fixed bottom-4 right-4 z-50 w-[min(92vw,24rem)] rounded-2xl border border-[color:var(--outline-variant)] bg-[color:rgba(15,18,26,0.98)] px-5 py-4 shadow-[var(--shadow-elevated)]"
     >
       <div className="mb-3 flex items-center gap-2" style={{ color: tone }}>
-        <AppIcon name="server" className="h-4 w-4" />
+        <PixelIcon name="map" className="h-4 w-4" />
         <span className="truncate text-[11px] font-semibold uppercase tracking-[0.24em]">
           {HEADLINE[operationAttempt.kind]} · {operationAttempt.nodeName}
         </span>
       </div>
-      <ProgressBar
+      <BlockProgress
         percent={report.percent}
         line={report.line}
-        tone={tone}
+        tone="ember"
         trailing={formatElapsedMs(operationAttempt.startedAt, now)}
       />
     </div>

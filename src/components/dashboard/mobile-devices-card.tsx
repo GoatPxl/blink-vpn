@@ -112,7 +112,7 @@ export function MobileDevicesCard({
           </p>
         </div>
         <Link
-          href={VIEW_ROUTE.settings}
+          href={VIEW_ROUTE.setup}
           className="shrink-0 text-xs text-[var(--primary)] hover:underline"
         >
           Manage devices

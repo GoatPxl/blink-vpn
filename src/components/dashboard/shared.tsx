@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { formatElapsed } from "@/lib/connection-display";
 import type { CommandErrorKind, ProviderPlanPricing, VpnNodeRecord } from "@/lib/tauri";
 
@@ -9,7 +9,7 @@ import type { CommandErrorKind, ProviderPlanPricing, VpnNodeRecord } from "@/lib
 export type { ProviderPlanPricing, ProviderRecord, TunnelRecord, VpnNodeRecord } from "@/lib/tauri";
 
 export type ToastKind = "info" | "success" | "warning" | "error";
-export type AppView = "dashboard" | "nodes" | "health" | "activity" | "settings";
+export type AppView = "home" | "map" | "shield" | "setup";
 export type DashboardBusyAction =
   | "refresh"
   // Replaces "save-wireguard-mode", left behind when the admin/user connection-mode toggle was
@@ -71,15 +71,15 @@ export type RecoveryState = {
 
 export const DEFAULT_PROVIDER_ID = "provider-1";
 export const DEFAULT_PROVIDER_NAME = "DigitalOcean";
-export const VIEW_ROUTE: Record<AppView, string> = {
-  dashboard: "/dashboard",
-  nodes: "/dashboard/nodes",
-  health: "/dashboard/health",
-  activity: "/dashboard/activity",
-  settings: "/dashboard/settings",
-};
+/** The server form, until the Move sheet replaces it. */
+export const NODE_CREATE_ROUTE = "/dashboard/map/create";
 
-export const NODE_CREATE_ROUTE = "/dashboard/nodes/create";
+export const VIEW_ROUTE: Record<AppView, string> = {
+  home: "/dashboard",
+  map: "/dashboard/map",
+  shield: "/dashboard/shield",
+  setup: "/dashboard/settings",
+};
 
 // `statusBadge` lived here: a stringly-typed switch over lowercased status text returning Tailwind
 // classes. Every view that shows a status now derives it through a typed map instead —
@@ -224,61 +224,18 @@ export function planDisplayFromPricing(plan: ProviderPlanPricing): PlanDisplayMo
 
 export function providerAccessBadge(state: ProviderAccessState): { label: string; classes: string } {
   if (state === "ready") {
-    return { label: "Ready", classes: "border-[color:rgba(78,222,163,0.25)] bg-[color:rgba(78,222,163,0.1)] text-[var(--secondary)]" };
+    return { label: "Ready", classes: "border-lime text-lime" };
   }
   if (state === "checking") {
-    return { label: "Checking", classes: "border-[color:rgba(171,199,255,0.25)] bg-[color:rgba(171,199,255,0.1)] text-[var(--primary)]" };
+    return { label: "Checking", classes: "border-ember text-ember" };
   }
   if (state === "invalid") {
-    return { label: "Needs attention", classes: "border-[color:rgba(255,107,107,0.25)] bg-[color:rgba(255,107,107,0.1)] text-[#ffd5d5]" };
+    return { label: "Needs attention", classes: "border-alert text-alert" };
   }
   if (state === "missing") {
-    return { label: "Missing", classes: "border-[color:rgba(255,185,95,0.25)] bg-[color:rgba(255,185,95,0.08)] text-[var(--tertiary)]" };
+    return { label: "Missing", classes: "border-line-3 text-stone" };
   }
-  return { label: "Unknown", classes: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface-variant)]" };
-}
-
-export function AppIcon({ name, className = "h-4 w-4" }: { name: string; className?: string }) {
-  const stroke = "fill-none stroke-current stroke-[1.8]";
-  switch (name) {
-    case "shield":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><path d="M12 3 19 6v6c0 4.5-2.7 8.2-7 10-4.3-1.8-7-5.5-7-10V6l7-3Z" className={stroke} /></svg>;
-    case "grid":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.6" className={stroke} /><rect x="14" y="3" width="7" height="7" rx="1.6" className={stroke} /><rect x="3" y="14" width="7" height="7" rx="1.6" className={stroke} /><rect x="14" y="14" width="7" height="7" rx="1.6" className={stroke} /></svg>;
-    case "server":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.8" className={stroke} /><rect x="3" y="14" width="18" height="6" rx="1.8" className={stroke} /></svg>;
-    case "support":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><circle cx="12" cy="12" r="9" className={stroke} /><path d="M9.5 9a2.7 2.7 0 1 1 4 2.4c-.8.4-1.5 1-1.5 2.1v.4" className={stroke} /><circle cx="12" cy="17" r="1" className="fill-current stroke-none" /></svg>;
-    case "bell":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><path d="M6 16h12l-1.2-1.5V11a4.8 4.8 0 0 0-9.6 0v3.5L6 16Z" className={stroke} /><path d="M10 18a2 2 0 0 0 4 0" className={stroke} /></svg>;
-    case "refresh":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><path d="M20 12a8 8 0 0 1-14 5" className={stroke} /><path d="M6 17V13H2" className={stroke} /><path d="M4 12a8 8 0 0 1 14-5" className={stroke} /><path d="M18 7V11h4" className={stroke} /></svg>;
-    case "power":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><path d="M12 3v8" className={stroke} /><path d="M7.2 6.3a8 8 0 1 0 9.6 0" className={stroke} /></svg>;
-    case "copy":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><rect x="9" y="9" width="10" height="11" rx="2" className={stroke} /><path d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1" className={stroke} /></svg>;
-    case "lock":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2" className={stroke} /><path d="M8 11V8a4 4 0 0 1 8 0v3" className={stroke} /></svg>;
-    case "check":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><path d="m6.5 12 3.5 3.5L17.5 8" className={stroke} /><circle cx="12" cy="12" r="8.5" className={stroke} /></svg>;
-    case "database":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3" className={stroke} /><path d="M5 6v8c0 1.7 3.1 3 7 3s7-1.3 7-3V6" className={stroke} /></svg>;
-    case "activity":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><path d="M4 12h4l2-6 4 12 2-6h4" className={stroke} /></svg>;
-    case "search":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><circle cx="11" cy="11" r="6.5" className={stroke} /><path d="m16 16 4 4" className={stroke} /></svg>;
-    case "user":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><circle cx="12" cy="8" r="4" className={stroke} /><path d="M4 20c1.5-4 5-6 8-6s6.5 2 8 6" className={stroke} /></svg>;
-    case "settings":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><circle cx="12" cy="12" r="3" className={stroke} /><path d="M19.4 15a7.8 7.8 0 0 0 .1-2l2-1.1-2-3.5-2.2.6a7.8 7.8 0 0 0-1.7-1l-.3-2.3h-4l-.3 2.3a7.8 7.8 0 0 0-1.7 1L7 8.4 5 11.9 7 13a7.8 7.8 0 0 0 .1 2L5 16.1l2 3.5 2.2-.6a7.8 7.8 0 0 0 1.7 1l.3 2.3h4l.3-2.3a7.8 7.8 0 0 0 1.7-1l2.2.6 2-3.5L19.4 15Z" className={stroke} /></svg>;
-    // Points down by default; rotate with a class to point up for an expanded disclosure.
-    case "chevron":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><path d="m7 10 5 5 5-5" className={stroke} /></svg>;
-    case "cloud":
-      return <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><path d="M8.5 18.5h8.8a3.7 3.7 0 0 0 .6-7.4A5.7 5.7 0 0 0 6.9 9.2a4 4 0 0 0 1.6 9.3Z" className={stroke} /></svg>;
-    default:
-      return null;
-  }
+  return { label: "Unknown", classes: "border-line-3 text-stone-2" };
 }
 
 /**
@@ -288,21 +245,22 @@ export function AppIcon({ name, className = "h-4 w-4" }: { name: string; classNa
  * adding a third for device configs is exactly the parallel implementation AGENTS.md §5 forbids.
  * Both were folded into this on the way.
  *
- * Consolidating also fixed what both copies had wrong: `aria-hidden` sat on the element
- * *containing* the dialog, which hides the dialog itself from assistive technology, and Escape
- * did nothing.
+ * `aria-hidden` must never sit on an element containing the dialog — that hides the dialog itself
+ * from assistive technology — and Escape closes it.
  */
 export function Modal({
   children,
   onClose,
   labelledBy,
   placement = "center",
+  width = "md",
 }: {
   children: ReactNode;
   onClose: () => void;
   /** Id of the element naming this dialog, usually its heading. */
   labelledBy: string;
   placement?: "center" | "end";
+  width?: "md" | "lg";
 }) {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -319,7 +277,7 @@ export function Modal({
 
   return (
     <div
-      className={`fixed inset-0 z-50 flex ${isDrawer ? "justify-end bg-black/70" : "items-center justify-center bg-black/75 p-4"} backdrop-blur-[2px]`}
+      className={`fixed inset-x-0 bottom-0 top-[var(--titlebar-h)] z-50 flex bg-[rgba(11,11,10,0.72)] backdrop-grayscale-[0.4] ${isDrawer ? "justify-end" : "items-center justify-center p-6"}`}
       onClick={onClose}
     >
       <div
@@ -328,8 +286,8 @@ export function Modal({
         aria-labelledby={labelledBy}
         className={
           isDrawer
-            ? "flex h-full w-full max-w-[460px] flex-col overflow-y-auto border-l border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(24,28,36,0.99),rgba(13,16,23,0.99))] p-6 shadow-[-30px_0_90px_rgba(0,0,0,0.45)]"
-            : "max-h-full w-full max-w-[520px] overflow-y-auto rounded-[24px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(24,28,36,0.99),rgba(13,16,23,0.99))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.45)]"
+            ? "scroll-area flex h-full w-full max-w-[480px] flex-col overflow-y-auto border-l-2 border-bone bg-panel p-6"
+            : `scroll-area max-h-full w-full ${width === "lg" ? "max-w-[760px]" : "max-w-[560px]"} overflow-y-auto border-2 border-bone bg-panel p-6 shadow-hard-lg`
         }
         onClick={(event) => event.stopPropagation()}
       >
@@ -339,68 +297,293 @@ export function Modal({
   );
 }
 
+/** Silkscreen 12px uppercase label. `state` adds the `■` prefix and colours it. */
+export function Tag({
+  children,
+  state,
+  className = "",
+}: {
+  children: ReactNode;
+  state?: "secure" | "busy" | "off" | "failed";
+  className?: string;
+}) {
+  const color = state ? STATE_TEXT[state] : "text-stone";
+  return (
+    <span className={`font-display text-[12px] uppercase tracking-[0.06em] ${color} ${className}`}>
+      {state ? "■ " : null}
+      {children}
+    </span>
+  );
+}
+
+const STATE_TEXT = {
+  secure: "text-lime",
+  busy: "text-ember",
+  off: "text-stone-2",
+  failed: "text-alert",
+} as const;
+
+export const INPUT_CLASS =
+  "h-12 w-full border-2 border-line-3 bg-ink px-3 font-mono text-[14px] text-bone outline-none placeholder:text-stone-2 focus:border-lime disabled:opacity-50";
+
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   return (
-    <label className="block space-y-2 text-sm text-[var(--on-surface-variant)]">
-      <span className="text-[11px] uppercase tracking-[0.24em]">{label}</span>
+    <label className="block space-y-2">
+      <Tag>{label}</Tag>
       {children}
-      {hint ? <span className="block text-xs text-[var(--on-surface-variant)]/80">{hint}</span> : null}
+      {hint ? <span className="block text-[12.5px] text-stone">{hint}</span> : null}
     </label>
   );
 }
 
-export function Button({ children, onClick, disabled, tone = "primary", className = "" }: { children: ReactNode; onClick?: () => void; disabled?: boolean; tone?: "primary" | "secondary" | "danger"; className?: string }) {
-  const toneClasses = {
-    primary: "border-[color:rgba(171,199,255,0.25)] bg-[var(--primary)] text-[#10131b] hover:brightness-105 disabled:opacity-50",
-    secondary: "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.03)] text-[var(--on-surface)] hover:bg-[color:rgba(255,255,255,0.06)] disabled:opacity-50",
-    danger: "border-[color:rgba(255,107,107,0.22)] bg-[color:rgba(255,107,107,0.12)] text-[#ffd5d5] hover:bg-[color:rgba(255,107,107,0.18)] disabled:opacity-50",
-  };
+export type ButtonTone = "primary" | "ghost" | "quiet" | "destructive";
 
-  return <button type="button" onClick={onClick} disabled={disabled} className={`inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed ${toneClasses[tone]} ${className}`}>{children}</button>;
+const BUTTON_TONE: Record<ButtonTone, string> = {
+  primary: "border-lime bg-lime text-ink shadow-hard hover:bg-[#e2ff70] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none",
+  ghost: "border-bone bg-transparent text-bone hover:bg-panel-2",
+  quiet: "border-line-3 bg-transparent text-stone hover:border-stone hover:text-bone",
+  destructive: "border-alert bg-transparent text-alert hover:bg-alert-ink",
+};
+
+/**
+ * Silkscreen label, 48px high, square. One primary per screen; it is always the next step.
+ *
+ * `label` is the accessible name for an icon-only button.
+ */
+export function Button({
+  children,
+  onClick,
+  disabled,
+  tone = "primary",
+  size = "md",
+  className = "",
+  label,
+  type = "button",
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  tone?: ButtonTone;
+  size?: "md" | "sm";
+  className?: string;
+  label?: string;
+  type?: "button" | "submit";
+}) {
+  const height = size === "md" ? "h-12 px-5 text-[14px]" : "h-9 px-3 text-[12px]";
+  return (
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      className={`inline-flex shrink-0 items-center justify-center gap-2 border-2 font-display uppercase tracking-[0.04em] transition-colors disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none ${height} ${BUTTON_TONE[tone]} ${className}`}
+    >
+      {children}
+    </button>
+  );
 }
 
 /**
- * A thin bar with one line beneath it saying what is happening.
+ * The 200×200 Disconnect / 300×200 Connect square: icon over label, optional sub-label.
  *
- * The percentage is usually an estimate (see `progress-estimate.ts`); the line is what makes the
- * bar honest, by naming the step actually in progress.
+ * Its accessible name is `label` alone, so tests and screen readers find "Connect" and "Disconnect"
+ * exactly, however much the sub-label says.
  */
-export function ProgressBar({
+export function GiantAction({
+  icon,
+  label,
+  sublabel,
+  tone,
+  onClick,
+  disabled,
+  wide = false,
+}: {
+  icon: ReactNode;
+  label: string;
+  sublabel?: string;
+  tone: "primary" | "destructive";
+  onClick: () => void;
+  disabled?: boolean;
+  wide?: boolean;
+}) {
+  const toneClass = tone === "primary"
+    ? "border-lime bg-lime text-ink shadow-hard hover:bg-[#e2ff70]"
+    : "border-alert bg-transparent text-alert shadow-hard-alert hover:bg-alert-ink";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      className={`flex h-[200px] shrink-0 flex-col items-center justify-center gap-4 border-2 transition-colors active:translate-x-[3px] active:translate-y-[3px] active:shadow-none disabled:cursor-not-allowed disabled:opacity-40 ${wide ? "w-[300px]" : "w-[200px]"} ${toneClass}`}
+    >
+      <span aria-hidden="true">{icon}</span>
+      <span aria-hidden="true" className="font-display text-[20px] uppercase">{label}</span>
+      {sublabel ? (
+        <span aria-hidden="true" className="px-3 text-center font-display text-[11px] uppercase opacity-75">{sublabel}</span>
+      ) : null}
+    </button>
+  );
+}
+
+/**
+ * A selectable square: code, name, meta. Dashed for an "add" affordance.
+ */
+export function Tile({
+  code,
+  name,
+  meta,
+  onClick,
+  dashed = false,
+  selected = false,
+  disabled,
+}: {
+  code: ReactNode;
+  name: ReactNode;
+  meta?: ReactNode;
+  onClick?: () => void;
+  dashed?: boolean;
+  selected?: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={selected}
+      className={`flex min-w-0 flex-col items-start gap-1.5 border-2 bg-panel p-5 text-left transition-colors hover:border-lime disabled:cursor-not-allowed disabled:opacity-40 ${dashed ? "border-dashed border-line-3" : selected ? "border-lime" : "border-line"}`}
+    >
+      <span className="font-display text-[24px] uppercase leading-none text-lime">{code}</span>
+      <span className="mt-1 truncate text-[15px] font-semibold text-bone">{name}</span>
+      {meta ? <span className="text-[12.5px] text-stone">{meta}</span> : null}
+    </button>
+  );
+}
+
+/** A list row with a 2px divider. The last row in a list is borderless. */
+export function Row({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={`flex items-center gap-4 border-b-2 border-line-2 py-3 last:border-b-0 ${className}`}>
+      {children}
+    </div>
+  );
+}
+
+/** Real tabs: `role="tablist"`, arrow-key navigation, one tab stop. */
+export function Tabs<T extends string>({
+  tabs,
+  selected,
+  onSelect,
+  label,
+  idPrefix,
+}: {
+  tabs: Array<{ id: T; label: ReactNode }>;
+  selected: T;
+  onSelect: (id: T) => void;
+  label: string;
+  /** Tab ids are `${idPrefix}-tab-${id}`, panels `${idPrefix}-panel-${id}`. */
+  idPrefix: string;
+}) {
+  function onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+    event.preventDefault();
+    const index = tabs.findIndex((tab) => tab.id === selected);
+    const step = event.key === "ArrowRight" ? 1 : -1;
+    const next = tabs[(index + step + tabs.length) % tabs.length];
+    onSelect(next.id);
+    document.getElementById(`${idPrefix}-tab-${next.id}`)?.focus();
+  }
+
+  return (
+    <div role="tablist" aria-label={label} onKeyDown={onKeyDown} className="flex flex-wrap gap-0 border-b-2 border-line">
+      {tabs.map((tab) => {
+        const active = tab.id === selected;
+        return (
+          <button
+            key={tab.id}
+            id={`${idPrefix}-tab-${tab.id}`}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            aria-controls={`${idPrefix}-panel-${tab.id}`}
+            tabIndex={active ? 0 : -1}
+            onClick={() => onSelect(tab.id)}
+            className={`-mb-[2px] h-12 border-2 border-b-0 px-5 font-display text-[13px] uppercase transition-colors ${active ? "border-lime bg-panel text-lime" : "border-transparent text-stone hover:text-bone"}`}
+          >
+            {tab.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export type BlockTone = "lime" | "ember" | "alert";
+
+const BLOCK_COLORS: Record<BlockTone, { done: string; current: string; pending: string }> = {
+  lime: { done: "var(--lime)", current: "var(--lime-dim)", pending: "var(--track)" },
+  ember: { done: "var(--ember)", current: "var(--ember-dim)", pending: "var(--ember-track)" },
+  alert: { done: "var(--alert)", current: "var(--ember-dim)", pending: "var(--track)" },
+};
+
+/**
+ * N equal blocks: done, current, pending. Never a thin bar.
+ *
+ * The percentage is usually an estimate (see `progress-estimate.ts`); the line beneath is what
+ * makes it honest, by naming the step actually in progress.
+ */
+export function BlockProgress({
   percent,
+  blocks = 40,
+  tone = "lime",
+  height = 18,
   line,
   trailing,
-  tone = "var(--primary)",
   testId,
 }: {
   percent: number;
-  line: string;
+  blocks?: number;
+  tone?: BlockTone;
+  /** Block height in px, 14–26. */
+  height?: number;
+  /** Accessible description, and shown beneath when present. */
+  line?: string;
   /** Right-aligned on the text row, typically an elapsed clock. */
   trailing?: ReactNode;
-  /** A CSS color value. */
-  tone?: string;
   testId?: string;
 }) {
   const clamped = Math.min(100, Math.max(0, percent));
+  const done = Math.floor((clamped / 100) * blocks);
+  const colors = BLOCK_COLORS[tone];
 
   return (
-    <div data-testid={testId} className="space-y-1.5">
+    <div data-testid={testId} className="space-y-2">
       <div
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(clamped)}
         aria-valuetext={line}
-        className="h-1.5 overflow-hidden rounded-full bg-[color:rgba(255,255,255,0.07)]"
+        className="grid gap-[3px]"
+        style={{ gridTemplateColumns: `repeat(${blocks}, minmax(0, 1fr))` }}
       >
-        <div
-          className="h-full rounded-full transition-[width] duration-700 ease-out"
-          style={{ width: `${clamped.toFixed(1)}%`, backgroundColor: tone }}
-        />
+        {Array.from({ length: blocks }, (_, index) => (
+          <span
+            key={index}
+            style={{
+              height,
+              backgroundColor: index < done ? colors.done : index === done && clamped < 100 ? colors.current : colors.pending,
+            }}
+          />
+        ))}
       </div>
-      <div className="flex items-center justify-between gap-3 text-xs text-[var(--on-surface-variant)]">
-        <span className="truncate">{line}</span>
-        {trailing ? <span className="shrink-0 font-mono tabular-nums">{trailing}</span> : null}
-      </div>
+      {line || trailing ? (
+        <div className="flex items-center justify-between gap-3 text-[12.5px] text-stone">
+          <span className="truncate">{line}</span>
+          {trailing ? <span className="shrink-0 font-mono tabular-nums">{trailing}</span> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -426,50 +609,78 @@ export function Toggle({
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-        checked
-          ? "border-[color:rgba(171,199,255,0.35)] bg-[var(--primary)]"
-          : "border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.06)]"
-      }`}
+      className={`relative inline-flex h-7 w-14 shrink-0 items-center border-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${checked ? "border-lime bg-lime" : "border-line-3 bg-ink"}`}
     >
       <span
-        className={`inline-block h-4 w-4 rounded-full transition-transform ${
-          checked ? "translate-x-6 bg-[#10131b]" : "translate-x-1 bg-[var(--on-surface-variant)]"
-        }`}
+        className={`inline-block h-[20px] w-[20px] transition-transform ${checked ? "translate-x-[30px] bg-ink" : "translate-x-[2px] bg-stone"}`}
       />
     </button>
   );
 }
 
-export function MetricCard({ title, value, detail, tone = "primary" }: { title: string; value: string; detail: string; tone?: "primary" | "secondary" | "tertiary" }) {
-  const accents = {
-    primary: "from-[rgba(171,199,255,0.18)]",
-    secondary: "from-[rgba(78,222,163,0.18)]",
-    tertiary: "from-[rgba(255,185,95,0.18)]",
-  };
-
+export function MetricCard({ title, value, detail }: { title: string; value: string; detail: string }) {
   return (
-    <div className="relative overflow-hidden rounded-[20px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(28,32,39,0.96),rgba(17,20,28,0.98))] p-4 shadow-[var(--shadow-elevated)]">
-      <div className={`absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r ${accents[tone]} to-transparent`} />
-      <p className="text-[11px] uppercase tracking-[0.28em] text-[var(--on-surface-variant)]">{title}</p>
-      <div className="mt-3 text-2xl font-semibold tracking-tight text-[var(--on-surface)]">{value}</div>
-      <p className="mt-2 text-sm text-[var(--on-surface-variant)]">{detail}</p>
+    <div className="border-2 border-line bg-panel p-5">
+      <Tag>{title}</Tag>
+      <div className="mt-3 font-mono text-[24px] font-bold text-bone">{value}</div>
+      <p className="mt-2 text-[13px] text-stone">{detail}</p>
     </div>
   );
 }
 
-export function Card({ title, description, children, action }: { title: string; description?: string; children: ReactNode; action?: ReactNode }) {
+/**
+ * The panel: `--panel` fill, 2px `--line` border, square. A title is optional; state tints are for
+ * the three big states only.
+ */
+export function Panel({
+  title,
+  description,
+  children,
+  action,
+  tint = "none",
+  className = "",
+  bodyClassName = "p-6",
+}: {
+  title?: ReactNode;
+  description?: ReactNode;
+  children: ReactNode;
+  action?: ReactNode;
+  tint?: "none" | "secure" | "busy" | "failed";
+  className?: string;
+  bodyClassName?: string;
+}) {
+  const tintClass = {
+    none: "border-line bg-panel",
+    secure: "border-lime bg-panel",
+    busy: "border-ember bg-ember-ink",
+    failed: "border-alert bg-alert-ink",
+  }[tint];
   return (
-    <section className="rounded-[24px] border border-[color:var(--outline-variant)] bg-[linear-gradient(180deg,rgba(28,32,39,0.96),rgba(16,19,27,0.96))] shadow-[var(--shadow-elevated)]">
-      <div className="flex items-start justify-between gap-4 border-b border-[color:var(--outline-variant)] px-5 py-4">
-        <div>
-          <h2 className="text-lg font-semibold tracking-tight text-[var(--on-surface)]">{title}</h2>
-          {description ? <p className="mt-1 text-sm text-[var(--on-surface-variant)]">{description}</p> : null}
+    <section className={`border-2 ${tintClass} ${className}`}>
+      {title ? (
+        <div className="flex items-start justify-between gap-4 border-b-2 border-line px-6 py-4">
+          <div className="min-w-0">
+            <h2 className="font-mono text-[18px] font-medium text-bone">{title}</h2>
+            {description ? <p className="mt-1 text-[13.5px] text-stone">{description}</p> : null}
+          </div>
+          {action}
         </div>
-        {action}
-      </div>
-      <div className="p-5">{children}</div>
+      ) : null}
+      <div className={bodyClassName}>{children}</div>
     </section>
+  );
+}
+
+/** A page's title row: MAP / SHIELD / SETUP in display-m, a sentence, and a right-hand slot. */
+export function PageHeader({ title, subtitle, action }: { title: string; subtitle?: ReactNode; action?: ReactNode }) {
+  return (
+    <header className="flex flex-wrap items-end justify-between gap-4">
+      <div className="min-w-0">
+        <h1 className="font-display text-[44px] uppercase leading-none text-bone">{title}</h1>
+        {subtitle ? <p className="mt-3 text-[16px] text-stone">{subtitle}</p> : null}
+      </div>
+      {action}
+    </header>
   );
 }
 

@@ -9,7 +9,7 @@ import {
 } from "@/lib/saved-location-display";
 import type { SavedLocationRecord } from "@/lib/tauri";
 
-import { Button, Card, type DashboardBusyAction } from "./shared";
+import { Button, Panel, type DashboardBusyAction } from "./shared";
 
 const STATE_COLOR: Record<LocationState, string> = {
   off: "var(--on-surface-variant)",
@@ -41,7 +41,7 @@ export function SavedLocationsView({
   if (locations.length === 0) return null;
 
   return (
-    <Card
+    <Panel
       title="Saved locations"
       description="Turn a server off to stop paying for it; turn it back on here in one click. Prices are from the last time each was on."
     >
@@ -52,7 +52,7 @@ export function SavedLocationsView({
         onTurnOff={onTurnOff}
         onForget={onForget}
       />
-    </Card>
+    </Panel>
   );
 }
 
@@ -113,12 +113,12 @@ export function SavedLocationList({
                   Turn on
                 </Button>
               ) : onTurnOff && (state === "on" || state === "error") ? (
-                <Button tone="secondary" className="min-w-[96px] px-3 py-2 text-xs" disabled={busy} onClick={() => void onTurnOff(location)}>
+                <Button tone="ghost" className="min-w-[96px] px-3 py-2 text-xs" disabled={busy} onClick={() => void onTurnOff(location)}>
                   Turn off
                 </Button>
               ) : null}
               {onForget && state === "off" ? (
-                <Button tone="secondary" className="px-3 py-2 text-xs" disabled={busy} onClick={() => void onForget(location)}>
+                <Button tone="ghost" className="px-3 py-2 text-xs" disabled={busy} onClick={() => void onForget(location)}>
                   Forget
                 </Button>
               ) : null}

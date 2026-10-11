@@ -31,7 +31,7 @@ export default function DashboardPage() {
 
   return (
     <DashboardOverview
-      activeView="dashboard"
+      activeView="home"
       noServerConfigured={noServerConfigured}
       activeNode={activeNode}
       connectedTunnel={connectedTunnel}

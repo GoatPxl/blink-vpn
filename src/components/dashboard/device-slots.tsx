@@ -78,7 +78,7 @@ export function DeviceSlots({
                 {peer.client_address_cidr}
               </div>
             </div>
-            <Button tone="secondary" className="px-3 py-2 text-xs" onClick={() => setQrPeer(peer)}>
+            <Button tone="ghost" className="px-3 py-2 text-xs" onClick={() => setQrPeer(peer)}>
               Show code
             </Button>
           </li>
@@ -100,7 +100,7 @@ export function DeviceSlots({
             </Field>
             <div className="mt-3 flex items-center justify-end gap-2">
               <Button
-                tone="secondary"
+                tone="ghost"
                 className="px-3 py-2 text-xs"
                 onClick={() => {
                   setClaimingPeerId(null);
@@ -125,7 +125,7 @@ export function DeviceSlots({
           </div>
         ) : (
           <Button
-            tone="secondary"
+            tone="ghost"
             className="mt-3 px-3 py-2 text-xs"
             onClick={() => setClaimingPeerId(free[0].id)}
           >
@@ -229,11 +229,11 @@ export function DeviceQrModal({
         </p>
 
         <div className="mt-6 flex items-center justify-end gap-2">
-          <Button tone="secondary" onClick={onClose}>
+          <Button tone="ghost" onClick={onClose}>
             Close
           </Button>
           <Button
-            tone="secondary"
+            tone="ghost"
             disabled={!payload}
             onClick={() => {
               if (payload) {

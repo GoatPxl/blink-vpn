@@ -1,5 +1,6 @@
 "use client";
 
+import { PixelIcon } from "@/components/ui/pixel-icon";
 import {
   CONNECT_STEP_LABEL,
   deriveConnectStep,
@@ -8,7 +9,7 @@ import {
 } from "@/lib/connect-progress-display";
 import { estimateConnectProgress } from "@/lib/progress-estimate";
 import { useDashboard } from "./dashboard-provider";
-import { AppIcon, Button, ProgressBar, useNow } from "./shared";
+import { Button, BlockProgress, useNow } from "./shared";
 
 /** Tone tokens, matching the treatment the rest of the dashboard uses for each meaning. */
 const TONE_VAR = {
@@ -53,7 +54,7 @@ export function ConnectProgress() {
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2" style={{ color: tone }}>
-          <AppIcon name="shield" className="h-4 w-4" />
+          <PixelIcon name="shield" className="h-4 w-4" />
           <span className="text-[11px] font-semibold uppercase tracking-[0.24em]">
             {copy.headline}
           </span>
@@ -69,7 +70,7 @@ export function ConnectProgress() {
       <p className="mt-2 text-sm leading-6 text-[var(--on-surface-variant)]">{copy.detail}</p>
 
       <div className="mt-4">
-        <ProgressBar
+        <BlockProgress
           testId="connect-progress-bar"
           percent={estimateConnectProgress({
             step,
@@ -77,7 +78,7 @@ export function ConnectProgress() {
             done: phase === "connected" || phase === "degraded",
           })}
           line={`${CONNECT_STEP_LABEL[step]}…`}
-          tone={tone}
+          tone="ember"
         />
       </div>
 
@@ -87,7 +88,7 @@ export function ConnectProgress() {
       {copy.showDisconnectEscape ? (
         <div className="mt-4 flex justify-end">
           <Button
-            tone="secondary"
+            tone="ghost"
             onClick={() => void cancelConnect()}
             disabled={busyAction !== null}
             className="px-3 py-2 text-xs"

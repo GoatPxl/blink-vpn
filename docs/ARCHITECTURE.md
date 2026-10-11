@@ -111,6 +111,21 @@ handler runs on the event-loop thread, so it reads a cached `CloseToTray` flag r
 Exiting never touches a connected tunnel: it is a Windows service and outlives the app, the same as
 before the tray existed.
 
+The window is undecorated (`decorations: false`). The frontend draws its own 36px titlebar
+(`src/components/shell/titlebar.tsx`) with a drag region and minimize, maximize and close buttons;
+`capabilities/default.json` grants exactly the window permissions those need. Close calls the
+window's own `close()`, so it reaches the same `CloseRequested` handler the native button did and
+close-to-tray behaves identically. The minimum size is 1100×720, smaller than the 1360×840 default,
+so the window fits a 1366×768 laptop screen.
+
+The frontend has four views on a left rail: Home (`/dashboard`), Map (`/dashboard/map`), Shield
+(`/dashboard/shield`) and Setup (`/dashboard/settings`). The rail logo and active item take one
+colour from `deriveShellTone` (`src/lib/shell-tone.ts`): lime secure, ember working, stone off,
+alert failed. Old routes (`/dashboard/nodes`, `/dashboard/health`, `/dashboard/activity`) are stubs
+that redirect, since a static export has no server to answer a redirect. Fonts are bundled under
+`public/fonts/` and never fetched, because the kill switch can hold the default route with no DNS
+while a tunnel comes up.
+
 `tauri-plugin-single-instance` is registered first on the builder. A second launch, for example from
 the Start menu while the window is hidden in the tray, focuses the running window and exits, instead
 of starting a second process against the same database.

@@ -21,7 +21,7 @@ import {
 } from "@/lib/tauri";
 import { describeLocation } from "@/lib/node-display";
 import { describeProvisionProgress } from "@/lib/progress-estimate";
-import { ProgressBar, useNow } from "@/components/dashboard/shared";
+import { BlockProgress, useNow } from "@/components/dashboard/shared";
 import { loadProviderPricingCatalog } from "@/lib/provider-pricing-cache";
 import {
   DEFAULT_ONBOARDING_STATE,
@@ -705,7 +705,7 @@ export function OnboardingWizard() {
                 <div className="font-medium">{provisionPhase === "idle" ? "Not started" : provisionPhase === "provisioning" ? "Provisioning" : provisionPhase === "bootstrapping" ? "Bootstrapping" : provisionPhase === "ready" ? "Ready" : "Error"}</div>
                 {provisionBusy && provisionStartedAt !== null ? (
                   <div className="mt-3">
-                    <ProgressBar
+                    <BlockProgress
                       {...describeProvisionProgress({
                         status: provisionPhase === "bootstrapping" ? "bootstrapping" : provisionPhase === "ready" ? "ready" : "provisioning",
                         startedAt: provisionStartedAt,
@@ -713,7 +713,7 @@ export function OnboardingWizard() {
                         now: provisionNow,
                         providerName: currentProviderName,
                       })}
-                      tone="currentColor"
+                      tone="ember"
                     />
                   </div>
                 ) : (

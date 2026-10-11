@@ -1,6 +1,6 @@
 "use client";
 
-import { Button, Card, Field, PageChrome, type DashboardBusyAction, type PlanDisplayModel, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord } from "./shared";
+import { Button, Panel, Field, PageChrome, type DashboardBusyAction, type PlanDisplayModel, type ProviderAccessState, type ProviderPlanPricing, type ProviderRecord } from "./shared";
 import { formatCurrency, formatMemory } from "./shared";
 import { buildRegionOptions } from "@/lib/node-display";
 import type { ProviderRegion } from "@/lib/tauri";
@@ -72,7 +72,7 @@ export function NodesCreateView({
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className={`inline-flex rounded-full border px-3 py-1.5 text-xs ${providerBadge.classes}`}>Provider access: {providerBadge.label}</span>
-            <Button tone="secondary" onClick={onNavigateToNodes}>Back to Nodes</Button>
+            <Button tone="ghost" onClick={onNavigateToNodes}>Back to Nodes</Button>
           </div>
         </div>
 
@@ -82,11 +82,11 @@ export function NodesCreateView({
               <div className="font-medium text-[var(--on-surface)]">Provisioning is disabled until provider access is healthy.</div>
               <div className="mt-1 text-[var(--on-surface-variant)]">{providerStatusMessage}</div>
             </div>
-            <Button tone="secondary" onClick={onNavigateToSettings}>Open Settings</Button>
+            <Button tone="ghost" onClick={onNavigateToSettings}>Open Settings</Button>
           </div>
         ) : null}
 
-        <Card title="Create Node" description="Provision a new node with the currently selected provider token.">
+        <Panel title="Create Node" description="Provision a new node with the currently selected provider token.">
           <div className="space-y-5">
             <div className="rounded-[18px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] p-4 text-sm">
               <div className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Provider</div>
@@ -170,11 +170,11 @@ export function NodesCreateView({
             <div className="text-sm text-[var(--on-surface-variant)]">{nodeFeedback}</div>
 
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <Button tone="secondary" onClick={onNavigateToNodes}>Back to Nodes</Button>
+              <Button tone="ghost" onClick={onNavigateToNodes}>Back to Nodes</Button>
               <Button onClick={() => void onCreateNode()} disabled={busyAction !== null || nodesProvisioningDisabled || !nodeId.trim() || !nodeName.trim() || !region || !planKey || pricingCatalog.length === 0}>{busyAction === "create-node" ? "Provisioning..." : "Create Node"}</Button>
             </div>
           </div>
-        </Card>
+        </Panel>
       </div>
     </PageChrome>
   );

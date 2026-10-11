@@ -1,8 +1,9 @@
 "use client";
 
+import { PixelIcon } from "@/components/ui/pixel-icon";
 import { useMemo, useState } from "react";
 
-import { AppIcon, Button, Card, PageChrome, useNow, type DashboardBusyAction, type DiagnosticsBundle } from "./shared";
+import { Button, Panel, PageChrome, useNow, type DashboardBusyAction, type DiagnosticsBundle } from "./shared";
 import {
   ACTIVITY_TABS,
   describeRecovery,
@@ -44,8 +45,8 @@ function RunEntry({ run, headline, defaultOpen }: { run: ActivityRun; headline: 
         <span className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">
           {run.steps.length} {run.steps.length === 1 ? "step" : "steps"}
         </span>
-        <AppIcon
-          name="chevron"
+        <PixelIcon
+          name="arrow-down"
           className={`h-4 w-4 text-[var(--on-surface-variant)] transition-transform ${open ? "rotate-180" : ""}`}
         />
       </button>
@@ -115,7 +116,7 @@ export function ActivityView({
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-[#ff9b9b]">
-                <AppIcon name="shield" className="h-4 w-4" />
+                <PixelIcon name="shield" className="h-4 w-4" />
                 <span className="text-[11px] font-semibold uppercase tracking-[0.24em]">Last failure</span>
                 <span className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">
                   {formatRelativeTime(latestFailure.latestAt, now) ?? "unknown time"}
@@ -128,7 +129,7 @@ export function ActivityView({
             </div>
             {recovery?.action === "cleanup" && latestFailure.nodeId && onRecoverNode ? (
               <Button
-                tone="danger"
+                tone="destructive"
                 disabled={busy}
                 onClick={() => void onRecoverNode(latestFailure.nodeId as string)}
               >
@@ -139,7 +140,7 @@ export function ActivityView({
         </div>
       ) : null}
 
-      <Card
+      <Panel
         title="History"
         description="Everything the app has done on this machine, kept across restarts."
         action={
@@ -183,10 +184,10 @@ export function ActivityView({
             ))}
           </div>
         )}
-      </Card>
+      </Panel>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <Card title="Report a problem" description="Export a redacted snapshot to attach to a bug report.">
+        <Panel title="Report a problem" description="Export a redacted snapshot to attach to a bug report.">
           <p className="text-sm leading-6 text-[var(--on-surface-variant)]">
             The bundle carries provider, node and tunnel records plus this history. API tokens, private
             keys and credential references are stripped before it is written.
@@ -196,7 +197,7 @@ export function ActivityView({
             <Button onClick={() => void onExportDiagnostics()} disabled={busy}>
               {busyAction === "export-diagnostics" ? "Exporting" : "Export bundle"}
             </Button>
-            <Button tone="secondary" onClick={() => void onCopyDiagnostics()} disabled={busy || !diagnostics}>
+            <Button tone="ghost" onClick={() => void onCopyDiagnostics()} disabled={busy || !diagnostics}>
               {busyAction === "copy-diagnostics" ? "Copying" : "Copy to clipboard"}
             </Button>
           </div>
@@ -216,9 +217,9 @@ export function ActivityView({
               {diagnostics ? JSON.stringify(diagnostics, null, 2) : "Loading."}
             </pre>
           </details>
-        </Card>
+        </Panel>
 
-        <Card title="Where things are" description="The folders this app writes to on your machine.">
+        <Panel title="Where things are" description="The folders this app writes to on your machine.">
           {locations.length === 0 ? (
             <div className="rounded-[10px] border border-dashed border-[color:var(--outline-variant)] px-4 py-6 text-sm text-[var(--on-surface-variant)]">
               Locations are still loading.
@@ -259,7 +260,7 @@ export function ActivityView({
               ))}
             </div>
           )}
-        </Card>
+        </Panel>
       </div>
     </PageChrome>
   );

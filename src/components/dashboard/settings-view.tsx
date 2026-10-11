@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
-  Card,
+  Panel,
   Field,
   Modal,
   PageChrome,
@@ -91,7 +91,7 @@ export function SettingsView({
 
   return (
     <PageChrome>
-      <Card
+      <Panel
         title="Providers"
         description="Cloud accounts this app can provision servers on. Keys stay on this device."
         action={
@@ -142,7 +142,7 @@ export function SettingsView({
                     <td className="px-4 py-4 align-middle">
                       <div className="flex items-center justify-end gap-2">
                         <Button
-                          tone="secondary"
+                          tone="ghost"
                           onClick={() => void onRevalidate(provider)}
                           disabled={busy || !hasKey}
                           className="px-3 py-2 text-xs"
@@ -173,7 +173,7 @@ export function SettingsView({
             </tbody>
           </table>
         </div>
-      </Card>
+      </Panel>
 
       {tunnelSettings ? (
         <WireGuardSettingsCard
@@ -185,9 +185,9 @@ export function SettingsView({
           reconnecting={reconnecting}
         />
       ) : (
-        <Card title="WireGuard" description="Loading tunnel settings…">
+        <Panel title="WireGuard" description="Loading tunnel settings…">
           <div className="h-16" />
-        </Card>
+        </Panel>
       )}
 
       {appPreferences ? (
@@ -197,12 +197,12 @@ export function SettingsView({
           busyAction={busyAction}
         />
       ) : (
-        <Card title="Mobile devices" description="Loading saved devices…">
+        <Panel title="Mobile devices" description="Loading saved devices…">
           <div className="h-16" />
-        </Card>
+        </Panel>
       )}
 
-      <Card title="Window" description="How Blink behaves when you close its window.">
+      <Panel title="Window" description="How Blink behaves when you close its window.">
         <div className="flex items-start justify-between gap-6">
           <div>
             <div className="text-sm font-medium text-[var(--on-surface)]">Close to system tray</div>
@@ -222,9 +222,9 @@ export function SettingsView({
             }}
           />
         </div>
-      </Card>
+      </Panel>
 
-      <Card title="About" description="Versions of the app and the WireGuard runtime it drives.">
+      <Panel title="About" description="Versions of the app and the WireGuard runtime it drives.">
         <dl className="grid gap-3 sm:grid-cols-2">
           <div className="rounded-[10px] border border-[color:var(--outline-variant)] bg-[color:rgba(255,255,255,0.02)] px-4 py-3">
             <dt className="text-[11px] uppercase tracking-[0.24em] text-[var(--on-surface-variant)]">Blink VPN</dt>
@@ -242,7 +242,7 @@ export function SettingsView({
           never in this app&apos;s database. They are used only for calls to your provider from this
           device, and are stripped from diagnostics exports.
         </p>
-      </Card>
+      </Panel>
 
       {modalProvider ? (
         <KeyModal
@@ -367,7 +367,7 @@ function WireGuardSettingsCard({
   const canSave = dnsValidation.valid && keepaliveValidation.valid && dirty && busyAction === null;
 
   return (
-    <Card
+    <Panel
       title="WireGuard"
       description="Applied the next time a tunnel starts. A running tunnel keeps the settings it started with."
     >
@@ -406,7 +406,7 @@ function WireGuardSettingsCard({
           <>
             <span className="mr-auto text-xs text-[var(--tertiary)]">Reconnect for these to take effect.</span>
             <Button
-              tone="secondary"
+              tone="ghost"
               onClick={() => void onReconnect()}
               disabled={busyAction !== null || reconnecting}
             >
@@ -432,7 +432,7 @@ function WireGuardSettingsCard({
           {busyAction === "save-tunnel-settings" ? "Saving" : "Save changes"}
         </Button>
       </div>
-    </Card>
+    </Panel>
   );
 }
 
@@ -468,7 +468,7 @@ function MobileDevicesSettingsCard({
   }
 
   return (
-    <Card
+    <Panel
       title="Mobile devices"
       description="New servers come with these devices already set up, with QR codes ready on the dashboard. Servers you already have keep their current devices."
     >
@@ -489,7 +489,7 @@ function MobileDevicesSettingsCard({
                 className="w-full max-w-sm rounded-xl border border-[color:var(--outline-variant)] bg-[color:rgba(8,10,16,0.9)] px-3 py-2 text-sm text-[var(--on-surface)] outline-none"
               />
               <Button
-                tone="secondary"
+                tone="ghost"
                 className="px-3 py-2 text-xs"
                 onClick={() => update(names.filter((_, at) => at !== index))}
               >
@@ -511,7 +511,7 @@ function MobileDevicesSettingsCard({
           </span>
         ) : null}
         <Button
-          tone="secondary"
+          tone="ghost"
           disabled={names.length >= MAX_MOBILE_DEVICES}
           onClick={() => update([...names, ""])}
         >
@@ -533,7 +533,7 @@ function MobileDevicesSettingsCard({
           {busyAction === "save-app-preferences" ? "Saving" : "Save devices"}
         </Button>
       </div>
-    </Card>
+    </Panel>
   );
 }
 
@@ -634,7 +634,7 @@ function KeyModal({
                     />
                     {field.secret ? (
                       <Button
-                        tone="secondary"
+                        tone="ghost"
                         onClick={() => setRevealed((current) => ({ ...current, [field.key]: !reveal }))}
                         className="px-3 py-2 text-xs"
                       >
@@ -652,7 +652,7 @@ function KeyModal({
         </div>
 
         <div className="mt-6 flex items-center justify-end gap-2">
-          <Button tone="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button tone="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
           <Button
             onClick={() => {
               void (async () => {
