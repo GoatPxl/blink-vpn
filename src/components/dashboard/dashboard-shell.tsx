@@ -113,6 +113,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
     connectAttempt,
     disconnectTunnel,
     dismissRecovery,
+    forceDisconnectNodeService,
     health,
     recovery,
     toasts,
@@ -279,12 +280,16 @@ export function DashboardShell({ children }: { children: ReactNode }) {
               disabled={busyAction !== null || connecting || !activeNode}
               onClick={() => {
                 if (!activeNode) return;
+                if (tunnelConnected) {
+                  // The label says Disconnect, so the click must never connect. With no tunnel
+                  // record loaded yet, the node-wide stop is the only handle available.
+                  void (connectedTunnel
+                    ? disconnectTunnel(connectedTunnel)
+                    : forceDisconnectNodeService(activeNode));
+                  return;
+                }
                 if (connectedTunnel) {
-                  if (tunnelConnected) {
-                    void disconnectTunnel(connectedTunnel);
-                  } else {
-                    void connectTunnel(connectedTunnel);
-                  }
+                  void connectTunnel(connectedTunnel);
                   return;
                 }
                 void connectPrimary();

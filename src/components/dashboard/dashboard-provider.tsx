@@ -576,6 +576,49 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, pushToast]);
 
+  const loadNodeDetails = useCallback(async (nodeIdValue: string) => {
+    if (!nodeIdValue) {
+      setTunnels([]);
+      setSelectedTunnelId("");
+      setHealth(null);
+      setNodePeers([]);
+      clearThroughputSamples();
+      return;
+    }
+
+    try {
+      const loadedTunnels = await listTunnelsForNode(nodeIdValue);
+      setTunnels(loadedTunnels);
+
+      // Device slots are informational, so a node that predates them must not break the panel
+      // the tunnel and health data also live in.
+      try {
+        setNodePeers(await listNodePeers(nodeIdValue));
+      } catch {
+        setNodePeers([]);
+      }
+
+      if (loadedTunnels.length > 0) {
+        const selectedExists = loadedTunnels.some((tunnel) => tunnel.id === selectedTunnelIdRef.current);
+        setSelectedTunnelId(selectedExists ? selectedTunnelIdRef.current : loadedTunnels[0].id);
+      } else {
+        setSelectedTunnelId("");
+        clearThroughputSamples();
+      }
+
+      const nextHealth = await getHealthPanelData(nodeIdValue, loadedTunnels[0]?.id ?? null);
+      setHealth(nextHealth);
+      setHealthUpdatedAt(Date.now());
+      if (nextHealth.tunnel_id && snapshotIsConnected(nextHealth)) {
+        recordThroughputSample(nextHealth);
+      } else {
+        clearThroughputSamples();
+      }
+    } catch (error) {
+      handleError(error);
+    }
+  }, [clearThroughputSamples, handleError, recordThroughputSample]);
+
   const loadDashboard = useCallback(async (preferredSelectedNodeId?: string) => {
     setBusyAction("refresh");
     try {
@@ -632,19 +675,26 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           ? selectedNodeIdRef.current
           : loadedNodes[0]?.id ?? "";
 
+      const selectionUnchanged = nextSelectedNodeId === selectedNodeIdRef.current;
       setSelectedNodeId(nextSelectedNodeId);
 
       if (!nextSelectedNodeId) {
         setTunnels([]);
         setSelectedTunnelId("");
         setHealth(null);
+      } else if (selectionUnchanged) {
+        // The selection effect only fires when the id changes, so a reload for the same node has
+        // to fetch its tunnels itself. Without this, a connect that created the node's first
+        // tunnel left `tunnels` empty: the button read "Disconnect" off the health snapshot while
+        // its click had no tunnel to stop, and fell through to connecting again.
+        await loadNodeDetails(nextSelectedNodeId);
       }
     } catch (error) {
       handleError(error);
     } finally {
       setBusyAction(null);
     }
-  }, [handleError, refreshProviderAccessStatus, refreshWireGuardReadiness]);
+  }, [handleError, loadNodeDetails, refreshProviderAccessStatus, refreshWireGuardReadiness]);
 
   /// Name an unclaimed slot so it becomes a device.
   const claimDevice = useCallback(
@@ -697,49 +747,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     },
     [handleError, pushToast],
   );
-
-  const loadNodeDetails = useCallback(async (nodeIdValue: string) => {
-    if (!nodeIdValue) {
-      setTunnels([]);
-      setSelectedTunnelId("");
-      setHealth(null);
-      setNodePeers([]);
-      clearThroughputSamples();
-      return;
-    }
-
-    try {
-      const loadedTunnels = await listTunnelsForNode(nodeIdValue);
-      setTunnels(loadedTunnels);
-
-      // Device slots are informational, so a node that predates them must not break the panel
-      // the tunnel and health data also live in.
-      try {
-        setNodePeers(await listNodePeers(nodeIdValue));
-      } catch {
-        setNodePeers([]);
-      }
-
-      if (loadedTunnels.length > 0) {
-        const selectedExists = loadedTunnels.some((tunnel) => tunnel.id === selectedTunnelIdRef.current);
-        setSelectedTunnelId(selectedExists ? selectedTunnelIdRef.current : loadedTunnels[0].id);
-      } else {
-        setSelectedTunnelId("");
-        clearThroughputSamples();
-      }
-
-      const nextHealth = await getHealthPanelData(nodeIdValue, loadedTunnels[0]?.id ?? null);
-      setHealth(nextHealth);
-      setHealthUpdatedAt(Date.now());
-      if (nextHealth.tunnel_id && snapshotIsConnected(nextHealth)) {
-        recordThroughputSample(nextHealth);
-      } else {
-        clearThroughputSamples();
-      }
-    } catch (error) {
-      handleError(error);
-    }
-  }, [clearThroughputSamples, handleError, recordThroughputSample]);
 
   const refreshHealthSnapshot = useCallback(async (silent = false) => {
     if (!selectedNodeIdRef.current) {

@@ -77,4 +77,57 @@ test.describe("Docker tunnel connect (real backend, needs elevation)", () => {
     );
     expect(disconnected?.status).toBe("disconnected");
   });
+
+  test("disconnects from the dashboard button after connecting a fresh node there", async ({ tauriPage }) => {
+    const suffix = Date.now();
+    const nodeId = `node-dash-connect-${suffix}`;
+    const nodeName = `Dash Connect Node ${suffix}`;
+
+    await resetNodes(tauriPage);
+    await saveDockerCredential(tauriPage);
+    // Fresh node with no tunnel row: the first connect creates it. That is the case that broke —
+    // the dashboard never reloaded its tunnel list afterwards, so "Disconnect" had nothing to stop
+    // and fell through to connecting again.
+    await createDockerNode(tauriPage, nodeId, nodeName);
+
+    await tauriPage.goto(`${APP_URL}/dashboard`);
+    // Scoped to `main`: the sidebar's Quick Connect button carries the same label.
+    const main = tauriPage.locator("main");
+    const connectButton = main.getByRole("button", { name: "Connect", exact: true });
+    await expect(connectButton).toBeEnabled({ timeout: 30_000 });
+
+    await settleToasts(tauriPage);
+    await connectButton.click();
+    await expectSuccess(tauriPage, "Tunnel connected", 120_000);
+
+    const disconnectButton = main.getByRole("button", { name: "Disconnect", exact: true });
+    await expect(disconnectButton).toBeEnabled({ timeout: 30_000 });
+
+    const connectStartsFor = (bundle: Awaited<ReturnType<typeof readDiagnostics>>) =>
+      (bundle.activity ?? []).filter(
+        (event) => event.node_id === nodeId && event.stage === "connect.start",
+      ).length;
+    const connectStartsBefore = connectStartsFor(await readDiagnostics(tauriPage));
+
+    await settleToasts(tauriPage);
+    await disconnectButton.click();
+    // The specific toast of the tunnel-scoped disconnect, not the node-wide fallback's — this
+    // proves the tunnel list was actually reloaded after the connect created it.
+    await expectSuccess(tauriPage, "Tunnel disconnected", 120_000);
+
+    const afterDisconnect = await readDiagnostics(tauriPage);
+    const tunnel = (afterDisconnect.tunnels ?? []).find((candidate) => candidate.node_id === nodeId);
+    expect(tunnel?.status).toBe("disconnected");
+
+    // The broken build reported success here too, by reconnecting an already-running tunnel. A
+    // new connect.start, or a missing disconnect.completed, is that regression.
+    expect(connectStartsFor(afterDisconnect)).toBe(connectStartsBefore);
+    expect(
+      (afterDisconnect.activity ?? []).some(
+        (event) => event.node_id === nodeId && event.stage === "disconnect.completed",
+      ),
+    ).toBe(true);
+
+    await expect(connectButton).toBeEnabled({ timeout: 30_000 });
+  });
 });

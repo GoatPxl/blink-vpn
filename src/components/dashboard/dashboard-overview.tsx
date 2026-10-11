@@ -113,6 +113,7 @@ export function DashboardOverview({
   onConnectPrimary,
   onConnectTunnel,
   onDisconnectTunnel,
+  onForceDisconnectNodeService,
   onRefresh,
   onRefreshHealth,
   devices,
@@ -131,6 +132,7 @@ export function DashboardOverview({
   onConnectPrimary: () => Promise<void>;
   onConnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
   onDisconnectTunnel: (tunnel: TunnelRecord) => Promise<void>;
+  onForceDisconnectNodeService: (node: VpnNodeRecord) => Promise<void>;
   onRefresh: () => Promise<void>;
   onRefreshHealth: () => Promise<void>;
   /** The mobile devices card, rendered beneath the overview. */
@@ -223,12 +225,16 @@ export function DashboardOverview({
                     return;
                   }
 
+                  if (tunnelConnected) {
+                    // The label says Disconnect, so the click must never connect. With no tunnel
+                    // record loaded yet, the node-wide stop is the only handle available.
+                    void (connectedTunnel
+                      ? onDisconnectTunnel(connectedTunnel)
+                      : onForceDisconnectNodeService(activeNode));
+                    return;
+                  }
                   if (connectedTunnel) {
-                    if (tunnelConnected) {
-                      void onDisconnectTunnel(connectedTunnel);
-                    } else {
-                      void onConnectTunnel(connectedTunnel);
-                    }
+                    void onConnectTunnel(connectedTunnel);
                     return;
                   }
                   void onConnectPrimary();

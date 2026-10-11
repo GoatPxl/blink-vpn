@@ -24,6 +24,7 @@ export default function DashboardPage() {
     refreshHealth,
     connectTunnel,
     disconnectTunnel,
+    forceDisconnectNodeService,
     throughputSamples,
     tunnelConnected,
   } = useDashboard();
@@ -43,6 +44,7 @@ export default function DashboardPage() {
       onConnectPrimary={connectPrimary}
       onConnectTunnel={connectTunnel}
       onDisconnectTunnel={disconnectTunnel}
+      onForceDisconnectNodeService={forceDisconnectNodeService}
       onRefresh={loadDashboard}
       onRefreshHealth={refreshHealth}
       emptyState={
