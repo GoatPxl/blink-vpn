@@ -287,6 +287,19 @@ mod tests {
   }
 
   #[test]
+  fn the_tray_goat_is_the_rail_goat() {
+    // The logo is drawn once, in the frontend; this copy must not drift from it.
+    let source = include_str!("../../src/components/ui/pixel-icon.tsx");
+    let start = source.find("const GOAT = [").expect("GOAT grid in pixel-icon.tsx");
+    let end = start + source[start..].find("] as const").expect("end of GOAT grid");
+    let rows: Vec<&str> = source[start..end]
+      .split('"')
+      .filter(|part| !part.is_empty() && part.chars().all(|c| c == '#' || c == '.'))
+      .collect();
+    assert_eq!(rows, GOAT.to_vec());
+  }
+
+  #[test]
   fn labels_are_one_bounded_line() {
     assert_eq!(clean_label("  Secure · Frankfurt  "), "Secure · Frankfurt");
     assert_eq!(clean_label("two\nlines"), "two lines");

@@ -1,8 +1,10 @@
 "use client";
 
-import { BuildPanel } from "@/components/dashboard/build-panel";
+import { useEffect, useSyncExternalStore } from "react";
+
 import { DashboardOverview } from "@/components/dashboard/dashboard-overview";
-import { HoldOnPanel } from "@/components/dashboard/hold-on-panel";
+import { WaitScreen } from "@/components/dashboard/wait-screen";
+import { closeSession, getSession, keepWaitScreen, subscribeSession } from "@/lib/game/session";
 import { useDashboard } from "@/components/dashboard/dashboard-provider";
 import { MobileDevicesCard } from "@/components/dashboard/mobile-devices-card";
 import { useConnectivityChecks } from "@/components/dashboard/use-connectivity-checks";
@@ -37,13 +39,23 @@ export default function DashboardPage() {
   // running and billing — "Off · nothing billing" would be false. Show the first one instead.
   const homeNode = activeNode ?? nodes[0] ?? null;
 
-  // While a server builds or a tunnel comes up, that is the only thing Home is about.
-  if (operationAttempt?.kind === "provision") {
-    return <BuildPanel attempt={operationAttempt} />;
-  }
-  if (connectAttempt) {
-    const connecting = nodes.find((node) => node.id === connectAttempt.nodeId);
-    return <HoldOnPanel attempt={connectAttempt} place={connecting?.region_geo?.city ?? connecting?.name ?? connectAttempt.tunnelName} />;
+  // While a server builds or a tunnel comes up — and for as long after as the game goes on — that
+  // is the only thing Home is about.
+  const session = useSyncExternalStore(subscribeSession, getSession, getSession);
+  const waiting = operationAttempt?.kind === "provision" || connectAttempt !== null;
+  const showWaitScreen = keepWaitScreen({ waiting, sessionOpen: session.open, gameOver: session.over });
+
+  // Handing Home back ends the session, so the next wait starts a fresh game.
+  useEffect(() => {
+    if (!showWaitScreen && session.open) closeSession();
+  }, [session.open, showWaitScreen]);
+
+  if (showWaitScreen) {
+    const waitNode = nodes.find((node) => node.id === (connectAttempt?.nodeId ?? homeNode?.id));
+    const place = operationAttempt?.kind === "provision"
+      ? operationAttempt.place
+      : waitNode?.region_geo?.city ?? waitNode?.name ?? connectAttempt?.tunnelName ?? "";
+    return <WaitScreen place={place} />;
   }
 
   if (!homeNode) {

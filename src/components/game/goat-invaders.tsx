@@ -5,12 +5,14 @@ import {
   FIELD_HEIGHT,
   FIELD_WIDTH,
   NO_INPUT,
+  START_LIVES,
   newGame,
   renderCells,
   step,
   type CellKind,
   type GameState,
 } from "@/lib/game/invaders";
+import { getSession, saveGame } from "@/lib/game/session";
 
 /** 20 ticks a second: smooth enough for blocks, cheap enough to run beside a provision. */
 const TICK_MS = 50;
@@ -22,10 +24,12 @@ function readColors(element: HTMLElement): Record<CellKind | "empty", string> {
   const token = (name: string) => style.getPropertyValue(name).trim();
   return {
     empty: token("--panel-2"),
-    invader: token("--stone"),
-    "invader-front": token("--ember"),
+    goat: token("--stone"),
+    "goat-front": token("--bone"),
+    "goat-pawing": token("--ember"),
+    "goat-charging": token("--alert"),
     shot: token("--lime"),
-    bomb: token("--alert"),
+    spit: token("--bone"),
     player: token("--lime"),
   };
 }
@@ -33,31 +37,45 @@ function readColors(element: HTMLElement): Record<CellKind | "empty", string> {
 type Hud = { score: number; lives: number; status: GameState["status"] };
 
 /**
- * The game shown while a server builds. Optional, local, and disposable.
+ * The game shown while a server builds and its tunnel comes up. Optional, local, and disposable.
  *
- * Plays only while it has keyboard focus, and pauses when the window loses focus or is hidden, so
- * it never eats keystrokes meant for anything else. It is rendered inside its own error boundary by
- * the build panel, so a fault here cannot hide the build's progress.
+ * Plays only while it has keyboard focus, and pauses when the window loses focus or is hidden — the
+ * UAC prompt does both — so it never eats keystrokes meant for anything else. Its state lives in the
+ * session store, so the same game carries on from the build into HOLD ON and survives a trip to
+ * another view. The waiting screen renders it inside its own error boundary, so a fault here cannot
+ * hide the build or the handshake.
  */
 export function GoatInvaders({
   highScore,
   onGameOver,
+  onStatusChange,
   onHide,
 }: {
   highScore: number;
   /** Called once per finished game with its score, so the caller can keep the best. */
   onGameOver: (score: number) => void;
+  /** Called when the game ends or restarts, so the screen around it knows. */
+  onStatusChange?: (status: GameState["status"]) => void;
   onHide: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
-  // Seeded once, lazily: a render must not read the clock.
-  const [firstGame] = useState(() => newGame(Date.now() | 0));
+  // The session's game if one is running, else a new one. Seeded lazily: a render must not read
+  // the clock.
+  const [firstGame] = useState(() => getSession().game ?? newGame(Date.now() | 0));
   const gameRef = useRef<GameState>(firstGame);
   const keysRef = useRef({ left: false, right: false, fire: false });
-  const reportedRef = useRef(false);
+  const reportedRef = useRef(firstGame.status === "over");
   const [focused, setFocused] = useState(false);
-  const [hud, setHud] = useState<Hud>({ score: 0, lives: 3, status: "playing" });
+  const [hud, setHud] = useState<Hud>({ score: firstGame.score, lives: firstGame.lives, status: firstGame.status });
+
+  useEffect(() => {
+    saveGame(gameRef.current);
+  }, []);
+
+  useEffect(() => {
+    onStatusChange?.(hud.status);
+  }, [hud.status, onStatusChange]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -86,6 +104,16 @@ export function GoatInvaders({
       }
     }
     context.globalAlpha = 1;
+
+    // "+100" over a goat stopped mid-charge, drifting up as it fades.
+    const font = getComputedStyle(canvas).getPropertyValue("--font-display").trim() || "monospace";
+    for (const pop of gameRef.current.pops) {
+      context.globalAlpha = Math.min(1, pop.ticksLeft / 6);
+      context.fillStyle = colors.shot;
+      context.font = `${pitch * 2}px ${font}`;
+      context.fillText(`+${pop.points}`, pop.x * pitch, (pop.y - (12 - pop.ticksLeft) / 3) * pitch);
+    }
+    context.globalAlpha = 1;
   }, []);
 
   // The loop runs only while focused; everything else is a paused frame.
@@ -98,6 +126,7 @@ export function GoatInvaders({
       const next = step(gameRef.current, { ...NO_INPUT, left: keys.left, right: keys.right, fire: keys.fire });
       keys.fire = false;
       gameRef.current = next;
+      saveGame(next);
       draw();
       setHud((current) =>
         current.score === next.score && current.lives === next.lives && current.status === next.status
@@ -142,8 +171,9 @@ export function GoatInvaders({
         if (down && !event.repeat) {
           if (gameRef.current.status === "over") {
             gameRef.current = newGame(Date.now() | 0);
+            saveGame(gameRef.current);
             reportedRef.current = false;
-            setHud({ score: 0, lives: 3, status: "playing" });
+            setHud({ score: 0, lives: START_LIVES, status: "playing" });
           } else {
             keys.fire = true;
           }
@@ -171,7 +201,7 @@ export function GoatInvaders({
         <span className="flex items-center gap-2 font-mono text-[14px] text-stone">
           LIVES
           <span aria-label={`${hud.lives} lives`} className="flex gap-1">
-            {Array.from({ length: 3 }, (_, index) => (
+            {Array.from({ length: START_LIVES }, (_, index) => (
               <span key={index} className={`h-2.5 w-2.5 ${index < hud.lives ? "bg-lime" : "bg-line-3"}`} />
             ))}
           </span>

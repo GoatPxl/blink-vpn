@@ -156,15 +156,27 @@ colour from `deriveShellTone` (`src/lib/shell-tone.ts`): lime secure, ember work
 alert failed. Old routes (`/dashboard/nodes`, `/dashboard/health`, `/dashboard/activity`) are stubs
 that redirect, since a static export has no server to answer a redirect.
 
-While a server builds, Home shows the Build panel (status strip, clock against ~2:00, block bar)
-and an optional game, Goat Invaders (`src/lib/game/invaders.ts`, a pure reducer; the component
-draws to a canvas and touches nothing outside itself). The strip sits outside the game's error
-boundary, so the game cannot hide the build. Cancel build cannot stop a create part-way — it is one
-blocking provider call — so it marks the build, and the server is deleted the moment it exists
-instead of being connected to. While a tunnel comes up, Home shows HOLD ON, driven by the same
-`TunnelPhase` poll as before and ended only by inbound traffic. On any other view both appear as a
-one-line strip linking to Home, so a connect started from the server list stays there. Fonts are bundled under
-`public/fonts/` and never fetched, because the kill switch can hold the default route with no DNS
+From "Build" to "Secure", Home shows one waiting screen (`wait-screen.tsx`) that stays mounted: a
+status strip — BUILDING (clock against ~2:00, block bar, Cancel build), then HOLD ON (countdown,
+block bar, Roll back, why the internet is paused), then SECURE with Done — above an optional game,
+Goat Invaders. The game is a pure, seeded reducer (`src/lib/game/invaders.ts`) drawn on a canvas;
+goats march as a herd, and one at a time paws (a visible warning) then charges at the player. Its
+state lives in a session store (`src/lib/game/session.ts`), so the same game carries on from the
+build through the handshake and survives a trip to another view; once secure it continues until
+Done, Esc, or the last life. The strips render outside the game's error boundary, so the game can
+never hide the build or the handshake, and HOLD ON still ends only on inbound traffic. Cancel build
+cannot stop a create part-way — it is one blocking provider call — so it marks the build, and the
+server is deleted the moment it exists instead of being connected to. On any other view a build or
+connect appears as a one-line strip linking to Home, so a connect started from the server list
+stays there.
+
+Every icon — installer, taskbar, window, tray, page — is the pixel goat. The grid is drawn once, in
+`src/components/ui/pixel-icon.tsx`; `npm run icons` renders `design/app-icon.png` and
+`src/app/icon.png` from it and regenerates `src-tauri/icons/`; `build.rs` makes Cargo re-embed the
+icon when `icon.ico` changes, and `tauri.conf.json` sets it as the installer icon too. The tray draws the goat at runtime
+in its state colour, and a test keeps its copy of the grid identical.
+
+Fonts are bundled under `public/fonts/` and never fetched, because the kill switch can hold the default route with no DNS
 while a tunnel comes up.
 
 `tauri-plugin-single-instance` is registered first on the builder. A second launch, for example from

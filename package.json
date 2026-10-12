@@ -16,6 +16,7 @@
     "tauri:dev": "tauri dev",
     "tauri:dev:e2e": "tauri dev --no-watch",
     "tauri:build": "tauri build",
+    "icons": "node scripts/generate-icons.mjs && tauri icon design/app-icon.png && node -e \"for (const p of ['src-tauri/icons/android','src-tauri/icons/ios','src-tauri/icons/64x64.png']) require('fs').rmSync(p,{recursive:true,force:true})\"",
     "tauri:e2e:provisioning": "playwright test --config=playwright.tauri.config.ts --project=tauri-real tests/e2e/dashboard-provisioning-tauri.spec.ts",
     "tauri:e2e:connect": "node scripts/e2e-preflight.mjs --connect && playwright test --config=playwright.tauri.config.ts --project=tauri-real tests/e2e/dashboard-connect-tauri.spec.ts",
     "e2e:preflight": "node scripts/e2e-preflight.mjs",
