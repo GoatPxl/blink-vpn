@@ -210,7 +210,9 @@ to create billable resources. A leaked one costs the user money and outlives any
 - `access_key_id` is deliberately **not** redacted. It identifies which key is in use, which is a
   real diagnostic, and it is not a secret.
 - **A live DigitalOcean API token was previously committed** to `tests/e2e/fixtures/tauri-mocks.ts`,
-  disguised as a fake `token_ref`. It was removed from the tree but remains in git history. Fake
+  disguised as a fake `token_ref`, and shipped in a committed `playwright-report/`. History was
+  rewritten before the repository went public, replacing it with `REDACTED_LEAKED_DO_TOKEN`; treat
+  the original as compromised regardless, since it was readable for months. Fake
   credentials in fixtures must be *obviously* fake (`dop_v1_EXAMPLE_NOT_A_REAL_TOKEN`), never a
   real value with the label changed.
 
