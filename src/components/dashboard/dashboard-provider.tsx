@@ -3,6 +3,7 @@
 import {
   checkDockerReadiness,
   checkWireGuardReadiness,
+  cancelConnect as cancelConnectCommand,
   connectTunnel as connectTunnelCommand,
   createAndActivateClientTunnel,
   deleteProvider as deleteProviderCommand,
@@ -67,6 +68,7 @@ import {
   type ReactNode,
 } from "react";
 import { describeTurnOn } from "@/lib/saved-location-display";
+import { awaitingWindowsPermission, serviceHasStarted } from "@/lib/connect-progress-display";
 import {
   categorizeError,
   DEFAULT_PROVIDER_ID,
@@ -163,11 +165,19 @@ function snapshotIsConnected(snapshot: HealthPanelData): boolean {
  * understand or undo it.
  */
 export type ConnectAttempt = {
+  /** Identifies this attempt, so a result that lands after a cancel can tell it is stale. */
+  id: number;
   nodeId: string;
   tunnelId: string | null;
   tunnelName: string;
-  /** `Date.now()` at the click, so the clock runs before the first poll lands. */
+  /** `Date.now()` at the click. */
   startedAt: number;
+  /**
+   * When the tunnel service was first seen running — the moment Windows granted permission and the
+   * outage window opened. `null` while the UAC prompt is still unanswered; the HOLD ON clock, stall
+   * copy and Roll back countdown all count from here, never from the click.
+   */
+  serviceStartedAt: number | null;
   /** True while the tunnel record is being created, before there is a service to poll. */
   creatingTunnel: boolean;
   /** Latest backend verdict; null until the first phase poll returns. */
@@ -351,15 +361,25 @@ const DESTROY_TOAST_TITLE: Record<DestroyReason | "default", string> = {
 };
 
 export function DashboardProvider({ children }: { children: ReactNode }) {
-  const dockerDevEnabled = process.env.NEXT_PUBLIC_DEV_DOCKER === "1";
+  // Compiled in from `.env` at `next build`, so on its own it says nothing about this binary: a
+  // release built on a dev machine shipped with it on. Gated below on the backend actually listing
+  // Docker, which a release backend never does.
+  const dockerBuildEnabled = process.env.NEXT_PUBLIC_DEV_DOCKER === "1";
   const [busyAction, setBusyAction] = useState<DashboardBusyAction>(null);
   const [connectAttempt, setConnectAttempt] = useState<ConnectAttempt | null>(null);
+  // The attempt the user is still waiting on; cleared by a cancel so late results drop themselves.
+  const connectAttemptSeqRef = useRef(0);
+  const liveConnectAttemptRef = useRef<number | null>(null);
+  // An attempt cancelled before the backend had claimed it. Its connect may still succeed, and then
+  // nothing on the backend knows to undo it.
+  const unclaimedCancelRef = useRef<number | null>(null);
   const [operationAttempt, setOperationAttempt] = useState<OperationAttempt | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [nodes, setNodes] = useState<VpnNodeRecord[]>([]);
   const [savedLocations, setSavedLocations] = useState<SavedLocationRecord[]>([]);
   const [providers, setProviders] = useState<ProviderRecord[]>([]);
+  const dockerDevEnabled = dockerBuildEnabled && providers.some((provider) => provider.slug === "docker");
   const [tunnels, setTunnels] = useState<TunnelRecord[]>([]);
   const [nodePeers, setNodePeers] = useState<NodePeerRecord[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState("");
@@ -386,10 +406,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [providerFeedback, setProviderFeedback] = useState("No provider action yet.");
   const [validatingProviderId, setValidatingProviderId] = useState<string | null>(null);
   const [dockerReadinessState, setDockerReadinessState] = useState<ProviderAccessState>(
-    dockerDevEnabled ? "checking" : "unknown",
+    dockerBuildEnabled ? "checking" : "unknown",
   );
   const [dockerReadinessMessage, setDockerReadinessMessage] = useState(
-    dockerDevEnabled
+    dockerBuildEnabled
       ? "Docker readiness has not been checked yet."
       : "Docker development mode is disabled.",
   );
@@ -1283,6 +1303,53 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError, loadDashboard, providerNameFor, pushToast]);
 
+  /** Starts a new connect attempt, superseding any earlier one, and returns its id. */
+  const beginConnectAttempt = useCallback(() => {
+    connectAttemptSeqRef.current += 1;
+    liveConnectAttemptRef.current = connectAttemptSeqRef.current;
+    return connectAttemptSeqRef.current;
+  }, []);
+
+  /** Updates the attempt only if it is still the one shown — a superseded one must not write. */
+  const updateConnectAttempt = useCallback(
+    (attemptId: number, update: (current: ConnectAttempt) => ConnectAttempt) => {
+      setConnectAttempt((current) => (current?.id === attemptId ? update(current) : current));
+    },
+    [],
+  );
+
+  const endConnectAttempt = useCallback((attemptId: number) => {
+    if (liveConnectAttemptRef.current === attemptId) liveConnectAttemptRef.current = null;
+    setConnectAttempt((current) => (current?.id === attemptId ? null : current));
+  }, []);
+
+  /** Windows granted permission: the outage window, and its clock, starts now. */
+  const markServiceStarted = useCallback((attemptId: number) => {
+    updateConnectAttempt(attemptId, (current) =>
+      current.serviceStartedAt === null ? { ...current, serviceStartedAt: Date.now() } : current,
+    );
+  }, [updateConnectAttempt]);
+
+  /**
+   * After a connect command resolves: true if the user had already cancelled it, so the caller
+   * should stop.
+   *
+   * One case needs undoing here. A cancel that reached the backend before the connect did had
+   * nothing to mark, so the backend ran the connect to completion — and if the prompt was approved,
+   * the tunnel the user cancelled now holds their default route.
+   */
+  const settleCancelledConnect = useCallback(
+    (attemptId: number, nodeId: string, tunnelId: string) => {
+      if (liveConnectAttemptRef.current === attemptId) return false;
+      if (unclaimedCancelRef.current === attemptId) {
+        unclaimedCancelRef.current = null;
+        void disconnectTunnelCommand(nodeId, tunnelId).catch(handleError);
+      }
+      return true;
+    },
+    [handleError],
+  );
+
   const connectNode = useCallback(async (node: VpnNodeRecord) => {
     if (!node) {
       pushToast("warning", "No node selected", "Select a node before connecting.");
@@ -1302,11 +1369,15 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
     // Not `busyAction`: that slot disables every control in the app, and a connect runs for tens of
     // seconds while the user has no internet — the worst moment to also freeze the window.
+    const attemptId = beginConnectAttempt();
+    const stillLive = () => liveConnectAttemptRef.current === attemptId;
     setConnectAttempt({
+      id: attemptId,
       nodeId: node.id,
       tunnelId: null,
       tunnelName: canonicalTunnelName,
       startedAt: Date.now(),
+      serviceStartedAt: null,
       creatingTunnel: false,
       snapshot: null,
     });
@@ -1316,9 +1387,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       const canonicalTunnelId = `tunnel-${node.id}`;
 
       if (!tunnelForNode) {
-        setConnectAttempt((current) =>
-          current === null ? current : { ...current, creatingTunnel: true },
-        );
+        updateConnectAttempt(attemptId, (current) => ({ ...current, creatingTunnel: true }));
         await createAndActivateClientTunnel({
           tunnelId: canonicalTunnelId,
           nodeId: node.id,
@@ -1330,6 +1399,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         const refreshedTunnels = await listTunnelsForNode(node.id);
         tunnelForNode = refreshedTunnels[0] ?? null;
       }
+      // Cancelled while the record was being written: stop before raising any Windows prompt.
+      if (!stillLive()) return;
 
       if (!tunnelForNode) {
         throw new Error("Primary tunnel could not be resolved after creation.");
@@ -1339,15 +1410,17 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       // service is being registered — that window includes the UAC prompt and is where the app
       // previously looked frozen with nothing on screen to explain it.
       const resolvedTunnel = tunnelForNode;
-      setConnectAttempt((current) =>
-        current === null
-          ? current
-          : { ...current, tunnelId: resolvedTunnel.id, creatingTunnel: false },
-      );
+      updateConnectAttempt(attemptId, (current) => ({
+        ...current,
+        tunnelId: resolvedTunnel.id,
+        creatingTunnel: false,
+      }));
 
       if (tunnelForNode.status.toLowerCase() !== "connected") {
         await connectTunnelCommand(node.id, tunnelForNode.id);
       }
+      if (settleCancelledConnect(attemptId, node.id, resolvedTunnel.id)) return;
+      markServiceStarted(attemptId);
 
       // No success toast here. The command resolving means the *service* started, which is roughly
       // fifteen seconds before the tunnel carries traffic. The toast now fires from the phase poll
@@ -1355,6 +1428,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setRecovery(null);
       await loadDashboard(node.id);
     } catch (error) {
+      // The user already walked away from this attempt. A failure now — including the backend's own
+      // "cancelled" — is not news, and the re-import below would raise another prompt.
+      if (!stillLive()) return;
       // A stale or missing tunnel service is recoverable by re-importing the tunnel. The backend
       // reports it as a WireGuard failure; this used to be inferred by matching five different
       // message fragments, including raw Win32 text like "OpenService FAILED 1060".
@@ -1365,11 +1441,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         const recoverableTunnel = tunnels.find((tunnel) => tunnel.node_id === node.id) ?? null;
         if (recoverableTunnel) {
           try {
-            setConnectAttempt((current) =>
-              current === null
-                ? current
-                : { ...current, tunnelId: recoverableTunnel.id, creatingTunnel: true },
-            );
+            updateConnectAttempt(attemptId, (current) => ({
+              ...current,
+              tunnelId: recoverableTunnel.id,
+              creatingTunnel: true,
+            }));
             await createAndActivateClientTunnel({
               tunnelId: recoverableTunnel.id,
               nodeId: recoverableTunnel.node_id,
@@ -1377,11 +1453,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
               dnsServer: "1.1.1.1",
               allowedIps: ["0.0.0.0/0", "::/0"],
             });
+            if (!stillLive()) return;
 
-            setConnectAttempt((current) =>
-              current === null ? current : { ...current, creatingTunnel: false },
-            );
+            updateConnectAttempt(attemptId, (current) => ({ ...current, creatingTunnel: false }));
             await connectTunnelCommand(node.id, recoverableTunnel.id);
+            if (settleCancelledConnect(attemptId, node.id, recoverableTunnel.id)) return;
+            markServiceStarted(attemptId);
 
             // Same reasoning as the happy path: the service starting is not the tunnel working, so
             // the phase poll announces success and this only reports the repair.
@@ -1389,7 +1466,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
             await loadDashboard(node.id);
             return;
           } catch (recoveryError) {
-            setConnectAttempt(null);
+            if (!stillLive()) return;
+            endConnectAttempt(attemptId);
             handleError(recoveryError);
             void settleMoveRef.current(node.id, false);
             return;
@@ -1397,13 +1475,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      setConnectAttempt(null);
+      endConnectAttempt(attemptId);
       handleError(error);
       void settleMoveRef.current(node.id, false);
     }
     // No `finally` clearing the attempt: on success it stays live so the phase poll can watch the
     // handshake land. The poll owns clearing it.
-  }, [ensureUacExplained, handleError, loadDashboard, pushToast, tunnels]);
+  }, [beginConnectAttempt, endConnectAttempt, ensureUacExplained, handleError, loadDashboard, markServiceStarted, pushToast, settleCancelledConnect, tunnels, updateConnectAttempt]);
 
   useEffect(() => {
     connectNodeRef.current = connectNode;
@@ -1421,28 +1499,33 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const connectTunnel = useCallback(async (tunnel: TunnelRecord) => {
     const tunnelNode = nodes.find((node) => node.id === tunnel.node_id);
     if (!(await ensureUacExplained(tunnelNode?.region_geo?.city ?? tunnelNode?.name ?? tunnel.name))) return;
+    const attemptId = beginConnectAttempt();
+    const stillLive = () => liveConnectAttemptRef.current === attemptId;
     setConnectAttempt({
+      id: attemptId,
       nodeId: tunnel.node_id,
       tunnelId: tunnel.id,
       tunnelName: tunnel.name,
       startedAt: Date.now(),
+      serviceStartedAt: null,
       creatingTunnel: false,
       snapshot: null,
     });
 
     try {
       await connectTunnelCommand(tunnel.node_id, tunnel.id);
+      if (settleCancelledConnect(attemptId, tunnel.node_id, tunnel.id)) return;
+      markServiceStarted(attemptId);
       // Success is announced by the phase poll, once traffic provably crosses the tunnel.
       setRecovery(null);
       await loadDashboard(tunnel.node_id);
     } catch (error) {
+      if (!stillLive()) return;
       const missingService = toCommandError(error).kind === "wire-guard";
 
       if (missingService) {
         try {
-          setConnectAttempt((current) =>
-            current === null ? current : { ...current, creatingTunnel: true },
-          );
+          updateConnectAttempt(attemptId, (current) => ({ ...current, creatingTunnel: true }));
           await createAndActivateClientTunnel({
             tunnelId: tunnel.id,
             nodeId: tunnel.node_id,
@@ -1456,31 +1539,37 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
             allowedIps: ["0.0.0.0/0", "::/0"],
           });
 
-          setConnectAttempt((current) =>
-            current === null ? current : { ...current, creatingTunnel: false },
-          );
+          if (!stillLive()) return;
+          updateConnectAttempt(attemptId, (current) => ({ ...current, creatingTunnel: false }));
           await connectTunnelCommand(tunnel.node_id, tunnel.id);
+          if (settleCancelledConnect(attemptId, tunnel.node_id, tunnel.id)) return;
+          markServiceStarted(attemptId);
 
           setRecovery(null);
           await loadDashboard(tunnel.node_id);
           return;
         } catch (recoveryError) {
-          setConnectAttempt(null);
+          if (!stillLive()) return;
+          endConnectAttempt(attemptId);
           handleError(recoveryError);
           return;
         }
       }
 
-      setConnectAttempt(null);
+      endConnectAttempt(attemptId);
       handleError(error);
     }
-  }, [ensureUacExplained, handleError, loadDashboard, nodes]);
+  }, [beginConnectAttempt, endConnectAttempt, ensureUacExplained, handleError, loadDashboard, markServiceStarted, nodes, settleCancelledConnect, updateConnectAttempt]);
 
   const disconnectTunnel = useCallback(async (tunnel: TunnelRecord) => {
     setBusyAction("disconnect-tunnel");
     // Ends any attempt for this tunnel first, so the progress card cannot outlive the tunnel it is
     // reporting on — and so its poll stops competing with the teardown.
-    setConnectAttempt((current) => (current?.tunnelId === tunnel.id ? null : current));
+    setConnectAttempt((current) => {
+      if (current?.tunnelId !== tunnel.id) return current;
+      if (liveConnectAttemptRef.current === current.id) liveConnectAttemptRef.current = null;
+      return null;
+    });
     try {
       await disconnectTunnelCommand(tunnel.node_id, tunnel.id);
       setRecovery(null);
@@ -1504,6 +1593,28 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const cancelConnect = useCallback(async () => {
     const attempt = connectAttempt;
     if (!attempt) return;
+    // From here on, whatever the original connect returns is stale.
+    liveConnectAttemptRef.current = null;
+
+    if (awaitingWindowsPermission(attempt)) {
+      // Nothing is routed through a tunnel yet, so there is nothing to tear down — and a disconnect
+      // here would raise a second UAC prompt on top of the one still open. Closing the connect's
+      // log entry is all that is left; a late approval is undone by whoever sees it first.
+      setConnectAttempt(null);
+      void settleMoveRef.current(attempt.nodeId, false);
+      try {
+        const claimed = attempt.tunnelId ? await cancelConnectCommand(attempt.tunnelId) : true;
+        if (!claimed) unclaimedCancelRef.current = attempt.id;
+      } catch (error) {
+        handleError(error);
+      }
+      pushToast(
+        "info",
+        "Connection cancelled",
+        "Nothing was changed. If the Windows prompt is still open, you can dismiss it.",
+      );
+      return;
+    }
 
     setBusyAction("disconnect-tunnel");
     try {
@@ -1934,7 +2045,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         setConnectAttempt((current) => {
           // A different attempt started, or the user cancelled, while this read was in flight.
           if (current === null || current.tunnelId !== tunnelId) return current;
-          return { ...current, snapshot };
+          const serviceStartedAt =
+            current.serviceStartedAt ?? (serviceHasStarted(snapshot) ? Date.now() : null);
+          return { ...current, snapshot, serviceStartedAt };
         });
 
         if (snapshot.phase !== "disconnected") {

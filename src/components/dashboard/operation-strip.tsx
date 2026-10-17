@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 
-import { formatElapsedMs } from "@/lib/connect-progress-display";
+import { awaitingWindowsPermission, formatElapsedMs } from "@/lib/connect-progress-display";
 import { describeRemovalProgress } from "@/lib/progress-estimate";
 import { PixelIcon } from "@/components/ui/pixel-icon";
 import { useDashboard } from "./dashboard-provider";
@@ -21,6 +21,7 @@ export function OperationStrip({ onHome }: { onHome: boolean }) {
 
   if (connectAttempt && !onHome) {
     const node = nodes.find((candidate) => candidate.id === connectAttempt.nodeId);
+    const waitingForWindows = awaitingWindowsPermission(connectAttempt);
     return (
       <Link
         href={VIEW_ROUTE.home}
@@ -28,11 +29,15 @@ export function OperationStrip({ onHome }: { onHome: boolean }) {
         data-phase={connectAttempt.snapshot?.phase ?? "starting"}
         className="flex items-center gap-5 border-2 border-ember bg-ember-ink px-6 py-3"
       >
-        <Tag state="busy">Hold on · connecting to {node?.region_geo?.city ?? node?.name ?? connectAttempt.tunnelName}</Tag>
-        <span className="flex-1 text-[14px] text-stone">Internet pauses until the handshake lands.</span>
-        <span data-testid="connect-progress-elapsed" className="font-mono text-[16px] text-ember tabular-nums">
-          {formatElapsedMs(connectAttempt.startedAt, now)}
+        <Tag state="busy">{waitingForWindows ? "Waiting for Windows permission" : "Hold on"} · connecting to {node?.region_geo?.city ?? node?.name ?? connectAttempt.tunnelName}</Tag>
+        <span className="flex-1 text-[14px] text-stone">
+          {waitingForWindows ? "Approve the Windows prompt. Your internet works normally until then." : "Internet pauses until the handshake lands."}
         </span>
+        {connectAttempt.serviceStartedAt !== null ? (
+          <span data-testid="connect-progress-elapsed" className="font-mono text-[16px] text-ember tabular-nums">
+            {formatElapsedMs(connectAttempt.serviceStartedAt, now)}
+          </span>
+        ) : null}
         <PixelIcon name="arrow-right" className="h-4 w-4 text-ember" />
       </Link>
     );

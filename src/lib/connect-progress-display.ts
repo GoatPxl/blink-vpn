@@ -139,6 +139,51 @@ export function describeConnectProgress(input: {
 }
 
 /**
+ * Whether a reading proves the tunnel service is up — which means Windows has granted permission.
+ *
+ * Before the UAC prompt is approved the service does not exist, and that reads as `disconnected`.
+ */
+export function serviceHasStarted(snapshot: TunnelPhaseSnapshot): boolean {
+  return (
+    snapshot.phase !== "disconnected" ||
+    snapshot.service_state === "starting" ||
+    snapshot.service_state === "running"
+  );
+}
+
+/**
+ * Whether a connect is still waiting on the Windows permission prompt.
+ *
+ * Until it is answered nothing is routed through the tunnel and the user's internet is fine, so the
+ * outage copy and its clock must not run yet. They did: the clock started at the click, and an
+ * unanswered prompt read "Internet pauses for ~15 s" while counting past seven minutes.
+ */
+export function awaitingWindowsPermission(attempt: { serviceStartedAt: number | null }): boolean {
+  return attempt.serviceStartedAt === null;
+}
+
+export const WINDOWS_PERMISSION_COPY = {
+  headline: "Waiting for Windows permission",
+  detail:
+    "Approve the Windows prompt to continue. Your internet works normally until then. " +
+    "If you don't see the prompt, check the taskbar.",
+} as const;
+
+/**
+ * Whole seconds a connect has been in its outage window, or 0 while still waiting for permission.
+ *
+ * Measured from the service starting, not from the click — that window is what the timer, the
+ * stall copy and the Roll back countdown are all about.
+ */
+export function outageElapsedSeconds(
+  attempt: { serviceStartedAt: number | null },
+  now: number,
+): number {
+  if (attempt.serviceStartedAt === null) return 0;
+  return Math.max(0, Math.floor((now - attempt.serviceStartedAt) / 1000));
+}
+
+/**
  * Elapsed time as `M:SS`, from an epoch-milliseconds start.
  *
  * Separate from `formatElapsed` in `connection-display.ts`, which parses an ISO timestamp from the

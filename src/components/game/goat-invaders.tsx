@@ -39,8 +39,10 @@ type Hud = { score: number; lives: number; status: GameState["status"] };
 /**
  * The game shown while a server builds and its tunnel comes up. Optional, local, and disposable.
  *
- * Plays only while it has keyboard focus, and pauses when the window loses focus or is hidden — the
- * UAC prompt does both — so it never eats keystrokes meant for anything else. Its state lives in the
+ * Plays only while it has keyboard focus, and pauses when the window loses focus or is hidden, so it
+ * never eats keystrokes meant for anything else. The UAC prompt is held by the `paused` prop rather
+ * than left to those events: the switch to the secure desktop did not reliably blur the window, and
+ * the game played on — and lost lives — while the user was answering Windows. Its state lives in the
  * session store, so the same game carries on from the build into HOLD ON and survives a trip to
  * another view. The waiting screen renders it inside its own error boundary, so a fault here cannot
  * hide the build or the handshake.
@@ -50,6 +52,7 @@ export function GoatInvaders({
   onGameOver,
   onStatusChange,
   onHide,
+  paused = false,
 }: {
   highScore: number;
   /** Called once per finished game with its score, so the caller can keep the best. */
@@ -57,6 +60,8 @@ export function GoatInvaders({
   /** Called when the game ends or restarts, so the screen around it knows. */
   onStatusChange?: (status: GameState["status"]) => void;
   onHide: () => void;
+  /** Held while Windows is asking for permission. Lifting it does not resume: that takes a click. */
+  paused?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
@@ -116,10 +121,19 @@ export function GoatInvaders({
     context.globalAlpha = 1;
   }, []);
 
+  const running = focused && !paused;
+
+  // Either edge of a hold drops focus: going in, so held keys are released; coming out, so focus
+  // returning from the secure desktop cannot restart the game under a user who is not looking.
+  useEffect(() => {
+    frameRef.current?.blur();
+    keysRef.current = { left: false, right: false, fire: false };
+  }, [paused]);
+
   // The loop runs only while focused; everything else is a paused frame.
   useEffect(() => {
     draw();
-    if (!focused) return;
+    if (!running) return;
 
     const timer = window.setInterval(() => {
       const keys = keysRef.current;
@@ -140,7 +154,7 @@ export function GoatInvaders({
     }, TICK_MS);
 
     return () => window.clearInterval(timer);
-  }, [draw, focused, onGameOver]);
+  }, [draw, running, onGameOver]);
 
   // A hidden window or a lost focus pauses: the user is not looking.
   useEffect(() => {
@@ -228,10 +242,14 @@ export function GoatInvaders({
         className="relative cursor-pointer px-7 py-5 outline-none focus-visible:outline-none"
       >
         <canvas ref={canvasRef} className="pixelated mx-auto block w-full max-w-[720px]" />
-        {!focused || hud.status === "over" ? (
+        {!running || hud.status === "over" ? (
           <div className="absolute inset-0 flex items-center justify-center">
             <span className="border-2 border-bone bg-ink px-5 py-3 font-display text-[14px] uppercase text-bone">
-              {hud.status === "over" ? "Game over · space to play again" : "Paused · click to play"}
+              {hud.status === "over"
+                ? "Game over · space to play again"
+                : paused
+                  ? "Paused · Windows is asking for permission"
+                  : "Paused · click to play"}
             </span>
           </div>
         ) : null}

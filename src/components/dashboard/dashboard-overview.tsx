@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { PixelIcon } from "@/components/ui/pixel-icon";
 import { cityLine, costSoFarUsd, formatClock, formatHourly, formatUsd } from "@/lib/home-display";
+import { awaitingWindowsPermission } from "@/lib/connect-progress-display";
 import type { ConnectivityCheck } from "@/lib/health-display";
 import type { ConnectAttempt } from "./dashboard-provider";
 import { HeroStat, HomeHero, type HeroTone } from "./home-hero";
@@ -66,7 +67,9 @@ export function DashboardOverview({
   const since = formatClock(sessionStartedAt);
 
   const tag = connecting
-    ? "Connecting · internet pauses until the handshake"
+    ? awaitingWindowsPermission(connectAttempt)
+      ? "Connecting · waiting for Windows permission"
+      : "Connecting · internet pauses until the handshake"
     : tunnelConnected
       ? since ? `Secure since ${since}` : "Secure"
       : "Server on · not connected · billing";

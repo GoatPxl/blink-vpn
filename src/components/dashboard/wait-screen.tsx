@@ -4,11 +4,14 @@ import { Component, useCallback, useEffect, useState, type ReactNode } from "rea
 
 import { GoatInvaders } from "@/components/game/goat-invaders";
 import {
+  awaitingWindowsPermission,
   CONNECT_STEPS,
   CONNECT_STEP_LABEL,
   deriveConnectStep,
   describeConnectProgress,
   formatElapsedMs,
+  outageElapsedSeconds,
+  WINDOWS_PERMISSION_COPY,
 } from "@/lib/connect-progress-display";
 import { closeSession, openSession, setGameOver } from "@/lib/game/session";
 import { describeProvisionProgress, estimateConnectProgress, PROVISION_STAGES } from "@/lib/progress-estimate";
@@ -90,6 +93,9 @@ function BuildStrip({ attempt }: { attempt: ProvisionAttempt }) {
  * HOLD ON, condensed to sit above the game: the user has no internet right now, so this says so,
  * counts, shows the bar, and keeps Roll back in reach. It ends only when inbound traffic proves the
  * tunnel works (AGENTS.md §4).
+ *
+ * Before that, while the UAC prompt is unanswered, the internet is fine and nothing is counting —
+ * so the strip says it is waiting on Windows, shows no clock, and offers Cancel straight away.
  */
 function HoldOnStrip({ attempt, place }: { attempt: ConnectAttempt; place: string }) {
   const { appPreferences, busyAction, cancelConnect } = useDashboard();
@@ -97,10 +103,11 @@ function HoldOnStrip({ attempt, place }: { attempt: ConnectAttempt; place: strin
   const now = useNow();
 
   const phase = attempt.snapshot?.phase ?? null;
-  const elapsedSeconds = Math.max(0, Math.floor((now - attempt.startedAt) / 1000));
+  const waitingForWindows = awaitingWindowsPermission(attempt);
+  const elapsedSeconds = outageElapsedSeconds(attempt, now);
   const copy = describeConnectProgress({ phase, elapsedSeconds });
   const step = deriveConnectStep({ creatingTunnel: attempt.creatingTunnel, snapshot: attempt.snapshot });
-  const percent = estimateConnectProgress({ step, elapsedMs: now - attempt.startedAt, done: phase === "connected" || phase === "degraded" });
+  const percent = estimateConnectProgress({ step, elapsedMs: elapsedSeconds * 1000, done: phase === "connected" || phase === "degraded" });
   const firstTime = appPreferences !== null && !appPreferences.first_connect_done;
   const stalled = phase === "stalled";
   const rollBackReady = copy.showDisconnectEscape || elapsedSeconds >= ROLL_BACK_AFTER_SECONDS;
@@ -114,26 +121,35 @@ function HoldOnStrip({ attempt, place }: { attempt: ConnectAttempt; place: strin
           <div className="min-w-0">
             <Tag state={stalled ? "failed" : "busy"}>Connecting to {place}</Tag>
             <h1 className={`mt-1 font-display text-[clamp(32px,4vw,52px)] uppercase leading-none ${stalled ? "text-alert" : "text-ember"}`}>
-              {stalled ? "Still waiting" : "Hold on"}
+              {waitingForWindows ? WINDOWS_PERMISSION_COPY.headline : stalled ? "Still waiting" : "Hold on"}
             </h1>
           </div>
-          <span
-            data-testid="connect-progress-elapsed"
-            className={`font-mono text-[44px] font-bold leading-none tabular-nums ${stalled ? "text-alert" : "text-ember"}`}
-          >
-            {formatElapsedMs(attempt.startedAt, now)}
-          </span>
+          {attempt.serviceStartedAt !== null ? (
+            <span
+              data-testid="connect-progress-elapsed"
+              className={`font-mono text-[44px] font-bold leading-none tabular-nums ${stalled ? "text-alert" : "text-ember"}`}
+            >
+              {formatElapsedMs(attempt.serviceStartedAt, now)}
+            </span>
+          ) : null}
           <span className="flex-1" />
-          {firstTime || rollBackReady ? (
+          {waitingForWindows ? (
+            // Nothing to roll back yet, so no countdown: leaving costs nothing.
+            <Button tone="destructive" size="sm" onClick={() => void cancelConnect()} disabled={cancelling}>
+              Cancel
+            </Button>
+          ) : firstTime || rollBackReady ? (
             <Button tone="destructive" size="sm" onClick={() => void cancelConnect()} disabled={!rollBackReady || cancelling}>
               {cancelling ? "Rolling back" : rollBackReady ? "Roll back" : `Roll back · ${ROLL_BACK_AFTER_SECONDS - elapsedSeconds}`}
             </Button>
           ) : null}
         </div>
         <p className="mt-3 text-[16px] font-semibold text-bone">
-          {stalled
-            ? `Your server has not answered after ${elapsedSeconds} s. Your internet stays paused until it does.`
-            : "Internet pauses for ~15 s while the tunnel shakes hands. Don't disconnect."}
+          {waitingForWindows
+            ? WINDOWS_PERMISSION_COPY.detail
+            : stalled
+              ? `Your server has not answered after ${elapsedSeconds} s. Your internet stays paused until it does.`
+              : "Internet pauses for ~15 s while the tunnel shakes hands. Don't disconnect."}
         </p>
         <div className="mt-4">
           <BlockProgress percent={percent} blocks={30} tone={stalled ? "alert" : "ember"} height={18} line={`${CONNECT_STEP_LABEL[step]}…`} />
@@ -151,15 +167,17 @@ function HoldOnStrip({ attempt, place }: { attempt: ConnectAttempt; place: strin
             ))}
           </ol>
         ) : null}
-        <button
-          type="button"
-          aria-expanded={explained}
-          onClick={() => setExplained((value) => !value)}
-          className="mt-3 border-b-2 border-stone text-[14px] text-stone hover:text-bone"
-        >
-          Why does this happen? →
-        </button>
-        {explained ? (
+        {waitingForWindows ? null : (
+          <button
+            type="button"
+            aria-expanded={explained}
+            onClick={() => setExplained((value) => !value)}
+            className="mt-3 border-b-2 border-stone text-[14px] text-stone hover:text-bone"
+          >
+            Why does this happen? →
+          </button>
+        )}
+        {explained && !waitingForWindows ? (
           <p className="mt-2 max-w-[760px] text-[14px] text-stone">
             The moment the tunnel starts, Windows sends all your traffic into it — that is the kill switch
             working. Until your server answers the first handshake there is nowhere for that traffic to go.
@@ -214,10 +232,16 @@ function AfterStrip({ onDone }: { onDone: () => void }) {
  * Once secure the game keeps going until the user says Done, presses Esc, or runs out of lives.
  */
 export function WaitScreen({ place }: { place: string }) {
-  const { appPreferences, connectAttempt, operationAttempt, updateAppPreferences } = useDashboard();
+  const { appPreferences, busyAction, connectAttempt, operationAttempt, uacPrompt, updateAppPreferences } = useDashboard();
   const [gameVisible, setGameVisible] = useState(true);
   const highScore = appPreferences?.game_high_score ?? 0;
   const waiting = connectAttempt !== null || operationAttempt?.kind === "provision";
+  // Every moment Windows may be asking for permission, plus the explainer that leads into it. The
+  // user's attention is on the prompt, not the game, so the game must not be losing lives meanwhile.
+  const gamePaused =
+    uacPrompt !== null ||
+    (connectAttempt !== null && awaitingWindowsPermission(connectAttempt)) ||
+    busyAction === "disconnect-tunnel";
 
   useEffect(() => {
     if (gameVisible) openSession();
@@ -248,7 +272,7 @@ export function WaitScreen({ place }: { place: string }) {
         {gameVisible ? (
           <div className="flex-1">
             <GameBoundary>
-              <GoatInvaders highScore={highScore} onGameOver={onGameOver} onStatusChange={onStatusChange} onHide={leave} />
+              <GoatInvaders highScore={highScore} onGameOver={onGameOver} onStatusChange={onStatusChange} onHide={leave} paused={gamePaused} />
             </GameBoundary>
           </div>
         ) : (

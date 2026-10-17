@@ -172,6 +172,15 @@ nowhere.
 Bounded to the newest 1000 rows by `prune_activity_events`, called once from `reconcile_startup`.
 Its predecessor was never pruned, which was survivable only because a single flow wrote to it.
 
+A run with nothing but `info` rows reads as "in progress", so every run must get a closing row. A
+connect left blocked on an unanswered UAC prompt used to read that way forever, through Roll back,
+Disconnect and Destroy. There are now two other ways a run gets closed besides the flow finishing:
+
+- `connect.cancelled` (`info`): written when the user cancels, disconnects, rolls back or destroys
+  while a connect is still in flight. The connect's later result is then not recorded.
+- `<category>.interrupted` (`error`): written by `reconcile_startup` for any run the previous
+  process left open. That is safe because nothing can be in flight at startup.
+
 Replaces `init_run_logs` (migration 0009, dropped by 0017), which was written **only** by
 `create_vpn_node_to_ready`. Its `node_id TEXT NOT NULL` could not hold an app-level event, and its
 `init_kind` column held `cloud-init` / `docker-init`, selected by comparing the provider slug inside

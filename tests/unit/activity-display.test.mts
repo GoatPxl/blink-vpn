@@ -258,4 +258,30 @@ describe("describeRunHeadline", () => {
     ]);
     assert.match(describeRunHeadline(run, now), /Connect.*completed/);
   });
+
+  // The stuck entry: Roll back used to leave a connect reading "in progress" for good.
+  it("says cancelled for a connect the user walked away from", () => {
+    const [run] = groupActivity([
+      event({ correlation_id: "c", category: "connect", outcome: "info", stage: "connect.start", created_at: "2026-08-16T10:00:00.000Z" }),
+      event({ correlation_id: "c", category: "connect", outcome: "info", stage: "connect.cancelled", created_at: "2026-08-16T10:01:00.000Z" }),
+    ]);
+    const headline = describeRunHeadline(run, now);
+    assert.match(headline, /Connect.*cancelled/);
+    assert.doesNotMatch(headline, /in progress/);
+  });
+
+  it("says interrupted for a run the app closed in the middle of", () => {
+    const [run] = groupActivity([
+      event({ correlation_id: "c", category: "connect", outcome: "info", stage: "connect.start", created_at: "2026-08-16T10:00:00.000Z" }),
+      event({ correlation_id: "c", category: "connect", outcome: "error", stage: "connect.interrupted", created_at: "2026-08-16T10:01:00.000Z" }),
+    ]);
+    assert.match(describeRunHeadline(run, now), /Connect.*interrupted/);
+  });
+
+  it("still says in progress for a run with nothing but its start", () => {
+    const [run] = groupActivity([
+      event({ correlation_id: "c", category: "connect", outcome: "info", stage: "connect.start" }),
+    ]);
+    assert.match(describeRunHeadline(run, now), /in progress/);
+  });
 });

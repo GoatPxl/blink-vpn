@@ -6,7 +6,10 @@ pub struct FeatureFlags {
 impl FeatureFlags {
   pub fn from_env() -> Self {
     Self {
-      docker_dev: read_bool_flag("BLINK_DEV_DOCKER"),
+      // Never in a release build, whatever the environment says. The `.env` files below are read
+      // relative to the working directory, so a release exe launched from inside the repo picked up
+      // the developer's flag and offered Docker to whoever was looking at the screen.
+      docker_dev: cfg!(debug_assertions) && read_bool_flag("BLINK_DEV_DOCKER"),
     }
   }
 }

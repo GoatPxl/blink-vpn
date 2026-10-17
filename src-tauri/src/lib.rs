@@ -151,6 +151,7 @@ pub fn run() {
       commands::system::connect_tunnel,
       commands::system::disconnect_tunnel,
       commands::system::force_disconnect_node_service,
+      commands::system::cancel_connect,
       commands::system::get_health_panel_data,
       commands::system::get_tunnel_phase,
       commands::system::list_node_peers,

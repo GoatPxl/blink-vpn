@@ -795,6 +795,15 @@ export async function forceDisconnectNodeService(nodeId: string): Promise<void> 
 }
 
 /**
+ * Walks away from a connect still waiting on its Windows prompt: closes its activity entry and
+ * nothing else, so it never raises a second prompt. Resolves `false` when no connect was running
+ * for the tunnel — including one whose request has not reached the backend yet.
+ */
+export async function cancelConnect(tunnelId: string): Promise<boolean> {
+  return invokeCommand<boolean>("cancel_connect", { tunnelId });
+}
+
+/**
  * @param forceIpProbe bypasses the backend's egress-IP cache. Set it for a user-initiated
  * refresh; leave it off for the ambient poll, which would otherwise hammer a third-party service.
  */

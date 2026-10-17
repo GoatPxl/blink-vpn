@@ -44,8 +44,9 @@ provisioned, so no SSH or remote shell is required or supported.
 
 The Docker provider supports local development and repeatable integration testing.
 
-- Enabled by backend flag: `BLINK_DEV_DOCKER=1`.
-- Exposed in frontend development UX when `NEXT_PUBLIC_DEV_DOCKER=1`.
+- Enabled by backend flag: `BLINK_DEV_DOCKER=1`, honoured in debug builds only.
+- Exposed in frontend development UX when `NEXT_PUBLIC_DEV_DOCKER=1` and the backend lists Docker.
+- Never offered by a release build (`npm run tauri:build`), whatever either flag says.
 - Uses local Docker containers to emulate provider node provisioning behavior.
 - Returns deterministic synthetic provider plan and account data for local workflows.
 

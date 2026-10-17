@@ -258,6 +258,18 @@ fn ensure_builtin_providers(db: &Database, docker_dev_enabled: bool) -> Result<(
   Ok(())
 }
 
+/// Drops the Docker row unless the dev provider is enabled.
+///
+/// Migration 0007 seeds that row unconditionally, and dev and release builds share one database, so
+/// the row is present in a release install too. Filtering here makes the backend flag — which is
+/// always off in release — the single authority on whether Docker is offered.
+fn without_disabled_providers(providers: Vec<ProviderRecord>, docker_dev_enabled: bool) -> Vec<ProviderRecord> {
+  providers
+    .into_iter()
+    .filter(|provider| docker_dev_enabled || provider.slug != BUILTIN_DOCKER_PROVIDER_SLUG)
+    .collect()
+}
+
 fn clear_provider_credential(
   db: &Database,
   secure_storage: &SecureStorage,
@@ -643,7 +655,8 @@ pub async fn list_providers(backend: State<'_, Backend>) -> Result<Vec<ProviderR
   let backend = backend.inner().clone();
   run_blocking(move || {
   ensure_builtin_providers(&backend.db, backend.feature_flags.docker_dev)?;
-  backend.db.list_providers().map_err(CommandError::from)
+  let providers = backend.db.list_providers().map_err(CommandError::from)?;
+  Ok(without_disabled_providers(providers, backend.feature_flags.docker_dev))
   })
   .await
 }
@@ -1077,7 +1090,7 @@ pub async fn connect_tunnel(
 
     Ok(DiagnosticsBundleResponse {
       generated_at: bundle.generated_at,
-      providers: bundle.providers,
+      providers: without_disabled_providers(bundle.providers, backend.feature_flags.docker_dev),
       nodes: bundle.nodes,
       tunnels: bundle.tunnels,
       activity: bundle.activity,
@@ -1320,6 +1333,27 @@ pub async fn force_disconnect_node_service(
     .orchestrator
     .force_disconnect_node_service(&backend.wireguard, &backend.db, &node_id)
     .map_err(CommandError::from)
+  })
+  .await
+}
+
+/// Walks away from a connect that is still waiting on its Windows prompt.
+///
+/// Closes the connect's activity entry and nothing else — no subprocess and no elevation, because
+/// a disconnect here would stack a second UAC prompt on the one still open. If the user approves
+/// the first prompt anyway, the connect tears itself back down on the way out. Resolves `false`
+/// when no connect was running for the tunnel.
+#[tauri::command]
+pub async fn cancel_connect(tunnel_id: String, backend: State<'_, Backend>) -> Result<bool, CommandError> {
+  // Cloned out of the managed state so the body can move onto a blocking thread.
+  // Every field is an Arc or a PathBuf, so this is cheap.
+  let backend = backend.inner().clone();
+  run_blocking(move || {
+  Ok(
+    backend
+      .orchestrator
+      .cancel_pending_connect(&backend.db, &tunnel_id, "cancelled at the Windows prompt"),
+  )
   })
   .await
 }
@@ -1770,7 +1804,7 @@ mod tests {
   }
 
   use super::{
-    clear_provider_credential, ensure_builtin_providers, resolve_app_location, CommandErrorKind,
+    clear_provider_credential, ensure_builtin_providers, resolve_app_location, without_disabled_providers, CommandErrorKind,
     APP_LOCATION_KEYS,
   };
   use crate::backend::db::{Database, ProviderStatus};
@@ -1836,6 +1870,26 @@ mod tests {
     let providers = db.list_providers().expect("provider listing should succeed");
     assert!(providers.iter().any(|provider| provider.id == "provider-1"));
     assert!(providers.iter().any(|provider| provider.id == "provider-docker"));
+
+    let _ = fs::remove_file(path);
+  }
+
+  #[test]
+  fn docker_is_hidden_from_listings_unless_the_dev_flag_is_on() {
+    let (db, path) = create_test_db("hide-docker");
+    ensure_builtin_providers(&db, false).expect("builtin providers should be ensured");
+    let providers = db.list_providers().expect("provider listing should succeed");
+    assert!(
+      providers.iter().any(|provider| provider.slug == "docker"),
+      "migration 0007 seeds the Docker row regardless of the flag; this test relies on it"
+    );
+
+    let hidden = without_disabled_providers(providers.clone(), false);
+    assert!(hidden.iter().all(|provider| provider.slug != "docker"));
+    assert!(hidden.iter().any(|provider| provider.slug == "digitalocean"));
+
+    let shown = without_disabled_providers(providers, true);
+    assert!(shown.iter().any(|provider| provider.slug == "docker"));
 
     let _ = fs::remove_file(path);
   }

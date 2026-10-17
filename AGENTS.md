@@ -351,11 +351,19 @@ paragraph kept naming them after the fact, which made *this* file the stale one.
 
 | Flag | Side | Effect |
 |---|---|---|
-| `BLINK_DEV_DOCKER` | backend | Enables the Docker dev provider |
-| `NEXT_PUBLIC_DEV_DOCKER` | frontend | Exposes Docker dev surface in the UI |
+| `BLINK_DEV_DOCKER` | backend | Enables the Docker dev provider — **debug builds only** |
+| `NEXT_PUBLIC_DEV_DOCKER` | frontend | Exposes Docker dev surface in the UI, if the backend lists Docker |
 
 The backend flag also auto-reads `.env.local`, `.env`, and `src-tauri/.env`, so it may be on without
 being set in your shell. Docker is **never** a production security boundary.
+
+**A release build never offers Docker**, whatever either flag says. Both used to leak into one:
+`next build` reads `.env` and compiled `NEXT_PUBLIC_DEV_DOCKER=1` into the shipped bundle, and the
+backend's `.env` lookup is relative to the working directory, so a release exe launched from the repo
+turned its flag on too. Migration 0007 seeds the Docker row regardless, and dev and release share one
+database. So the backend flag is `cfg!(debug_assertions) &&` the env value, `list_providers` drops the
+Docker row while it is off, and the frontend flag only takes effect when the backend actually lists
+Docker. The backend is the authority; the frontend flag cannot turn it on alone.
 
 ---
 

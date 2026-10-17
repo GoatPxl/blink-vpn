@@ -210,10 +210,23 @@ export function formatRelativeTime(timestamp: string, now: number): string | nul
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+/**
+ * How a run ended, in words.
+ *
+ * A cancel is recorded as `info`, because walking away is not a failure, so without its own case an
+ * all-`info` cancelled run would read "in progress" — the stuck entry this exists to close.
+ */
+function describeRunEnding(run: ActivityRun): string {
+  if (run.outcome === "success") return "completed";
+  if (run.steps.some((step) => step.stage.endsWith(".interrupted"))) return "interrupted";
+  if (run.outcome === "error") return "failed";
+  if (run.steps.some((step) => step.stage.endsWith(".cancelled"))) return "cancelled";
+  return "in progress";
+}
+
 /** Run header line: what it was, how it ended, when. */
 export function describeRunHeadline(run: ActivityRun, now: number): string {
-  const outcome =
-    run.outcome === "error" ? "failed" : run.outcome === "success" ? "completed" : "in progress";
+  const outcome = describeRunEnding(run);
   const when = formatRelativeTime(run.latestAt, now);
   const target = run.nodeId ? ` · ${run.nodeId}` : "";
   return `${describeCategory(run.category)}${target} · ${outcome}${when ? ` · ${when}` : ""}`;

@@ -81,7 +81,7 @@ use crate::backend::crypto::keypair::{
 use crate::backend::app_preferences;
 use crate::backend::db::{Database, SavedLocationRecord, SavedLocationUpsert};
 use crate::backend::db::{
-  DbError, NewActivityEvent, NewNodePeer, NodeLifecycleStatus, NodePeerRecord, TunnelRecord,
+  ActivityEvent, DbError, NewActivityEvent, NewNodePeer, NodeLifecycleStatus, NodePeerRecord, TunnelRecord,
   TunnelStatus,
 };
 use crate::backend::logging;
@@ -134,7 +134,20 @@ struct TunnelWatch {
   ///
   /// Needed because moving commands off the UI thread removed Tauri's accidental serialization:
   /// two connects for the same tunnel can now genuinely overlap.
-  connect_in_flight: HashSet<String>,
+  connect_in_flight: HashMap<String, InFlightConnect>,
+}
+
+/// A connect that has started and not yet returned.
+///
+/// The run's correlation id lives here so something other than the connect itself can close its
+/// activity entry. A connect blocked on an unanswered UAC prompt never returns on its own, and its
+/// "in progress" entry used to outlive Roll back, Disconnect and Destroy alike.
+#[derive(Debug, Clone)]
+struct InFlightConnect {
+  correlation_id: String,
+  node_id: String,
+  /// Set once the user has walked away from this connect. Its eventual result is then stale.
+  cancelled: bool,
 }
 
 /// Whether a cached egress reading may still be served.
@@ -632,17 +645,81 @@ impl Orchestrator {
   }
 
   /// Claims the connect slot for a tunnel, or reports that one is already running.
-  fn try_claim_connect(&self, tunnel_id: &str) -> bool {
+  fn try_claim_connect(&self, tunnel_id: &str, node_id: &str, correlation_id: &str) -> bool {
     match self.tunnel_watch.lock() {
-      Ok(mut watch) => watch.connect_in_flight.insert(tunnel_id.to_string()),
+      Ok(mut watch) => {
+        if watch.connect_in_flight.contains_key(tunnel_id) {
+          return false;
+        }
+        watch.connect_in_flight.insert(
+          tunnel_id.to_string(),
+          InFlightConnect {
+            correlation_id: correlation_id.to_string(),
+            node_id: node_id.to_string(),
+            cancelled: false,
+          },
+        );
+        true
+      }
       // A poisoned lock must not wedge connect permanently; let the attempt through.
       Err(_) => true,
     }
   }
 
-  fn release_connect(&self, tunnel_id: &str) {
-    if let Ok(mut watch) = self.tunnel_watch.lock() {
-      watch.connect_in_flight.remove(tunnel_id);
+  /// Frees the slot, reporting whether the connect was cancelled while it ran.
+  fn release_connect(&self, tunnel_id: &str) -> bool {
+    self
+      .tunnel_watch
+      .lock()
+      .ok()
+      .and_then(|mut watch| watch.connect_in_flight.remove(tunnel_id))
+      .is_some_and(|entry| entry.cancelled)
+  }
+
+  /// Closes the activity entry of a connect the user has walked away from.
+  ///
+  /// Touches nothing but the log and the in-flight marker: no subprocess, no elevation. That is what
+  /// makes it safe while the connect is still parked on a UAC prompt — tearing anything down there
+  /// would only stack a second prompt on the first. If the user approves that prompt anyway, the
+  /// connect sees the mark on its way out and undoes itself (see `connect_tunnel`).
+  ///
+  /// Returns whether there was a connect to close.
+  pub fn cancel_pending_connect(&self, db: &Database, tunnel_id: &str, reason: &str) -> bool {
+    let entry = {
+      let Ok(mut watch) = self.tunnel_watch.lock() else {
+        return false;
+      };
+      match watch.connect_in_flight.get_mut(tunnel_id) {
+        Some(entry) if !entry.cancelled => {
+          entry.cancelled = true;
+          entry.clone()
+        }
+        _ => return false,
+      }
+    };
+
+    ActivityRecorder::new(db, "connect", Some(&entry.correlation_id))
+      .for_node(&entry.node_id)
+      .info(
+        "connect.cancelled",
+        &format!("tunnel_id={tunnel_id} was cancelled before it came up ({reason})"),
+      );
+    true
+  }
+
+  /// `cancel_pending_connect` for every tunnel on a node, for the node-wide teardowns.
+  fn cancel_pending_connects_for_node(&self, db: &Database, node_id: &str, reason: &str) {
+    let tunnel_ids: Vec<String> = match self.tunnel_watch.lock() {
+      Ok(watch) => watch
+        .connect_in_flight
+        .iter()
+        .filter(|(_, entry)| entry.node_id == node_id)
+        .map(|(tunnel_id, _)| tunnel_id.clone())
+        .collect(),
+      Err(_) => return,
+    };
+    for tunnel_id in tunnel_ids {
+      self.cancel_pending_connect(db, &tunnel_id, reason);
     }
   }
 
@@ -1400,6 +1477,7 @@ impl Orchestrator {
     let correlation_id = Uuid::new_v4().to_string();
     let activity = ActivityRecorder::new(db, category, Some(&correlation_id)).for_node(node_id);
     activity.info("cleanup.start", "teardown requested");
+    self.cancel_pending_connects_for_node(db, node_id, category);
     log::warn!(
       "event=vpn_node.force_cleanup.start correlation_id={} node_id={}",
       correlation_id,
@@ -2340,7 +2418,8 @@ impl Orchestrator {
     // Commands no longer run serialized on the UI thread, so two connects for one tunnel can now
     // overlap — each spawning its own UAC prompt and racing the same service. Claimed before the
     // activity row so a rejected duplicate does not pollute the log with a phantom attempt.
-    if !self.try_claim_connect(&request.tunnel_id) {
+    let correlation_id = Uuid::new_v4().to_string();
+    if !self.try_claim_connect(&request.tunnel_id, &request.node_id, &correlation_id) {
       return Err(OrchestratorError::InvalidState {
         node_id: request.node_id.clone(),
         detail: "A connect is already running for this tunnel. Wait for it to finish before starting another.".to_string(),
@@ -2349,7 +2428,6 @@ impl Orchestrator {
 
     // Recorded here rather than inside `connect_tunnel_inner`, which returns early from a dozen
     // places; wrapping it means every one of those exits is accounted for.
-    let correlation_id = Uuid::new_v4().to_string();
     let activity = ActivityRecorder::new(db, "connect", Some(&correlation_id))
       .for_node(&request.node_id);
     activity.info(
@@ -2357,8 +2435,43 @@ impl Orchestrator {
       &format!("tunnel_id={}", request.tunnel_id),
     );
 
+    // Read up front: a Destroy that cancels this connect deletes the row before the connect returns,
+    // and the name is the only handle on the service left to tear down.
+    let tunnel_name = db
+      .get_tunnel(&request.tunnel_id)
+      .ok()
+      .flatten()
+      .map(|tunnel| tunnel.name);
+
     let outcome = self.connect_tunnel_inner(wireguard, db, secure_storage, request);
-    self.release_connect(&request.tunnel_id);
+    let cancelled = self.release_connect(&request.tunnel_id);
+
+    if cancelled {
+      // The run was already closed as cancelled; writing `ready` or `error` under it now would
+      // overturn a decision the user has made. A success here means the UAC prompt was approved
+      // after they walked away, so the tunnel they cancelled is now holding their default route.
+      if outcome.is_ok() {
+        let disconnected = self.disconnect_tunnel(
+          wireguard,
+          db,
+          secure_storage,
+          &DisconnectTunnelRequest {
+            node_id: request.node_id.clone(),
+            tunnel_id: request.tunnel_id.clone(),
+          },
+        );
+        if disconnected.is_err() {
+          if let Some(name) = tunnel_name.as_deref() {
+            self.expect_tunnel_stop(&request.tunnel_id);
+            let _ = wireguard.unregister_tunnel(name);
+          }
+        }
+      }
+      return Err(OrchestratorError::InvalidState {
+        node_id: request.node_id.clone(),
+        detail: "This connect was cancelled before it finished.".to_string(),
+      });
+    }
 
     match &outcome {
       Ok(()) => activity.success(
@@ -2622,6 +2735,8 @@ impl Orchestrator {
     secure_storage: &SecureStorage,
     request: &DisconnectTunnelRequest,
   ) -> Result<(), OrchestratorError> {
+    self.cancel_pending_connect(db, &request.tunnel_id, "disconnected");
+
     let correlation_id = Uuid::new_v4().to_string();
     let activity = ActivityRecorder::new(db, "disconnect", Some(&correlation_id))
       .for_node(&request.node_id);
@@ -2722,6 +2837,8 @@ impl Orchestrator {
     db: &Database,
     node_id: &str,
   ) -> Result<(), OrchestratorError> {
+    self.cancel_pending_connects_for_node(db, node_id, "rolled back");
+
     let node = db
       .get_vpn_node(node_id)
       .map_err(|source| OrchestratorError::Database {
@@ -3163,6 +3280,7 @@ impl Orchestrator {
     // Startup is the natural moment to trim: it happens often enough to keep the table bounded and
     // never competes with a connect the user is waiting on.
     let _ = db.prune_activity_events(ACTIVITY_HISTORY_LIMIT);
+    close_interrupted_runs(db);
 
     let mut report = ReconcileReport::default();
     let nodes = db
@@ -3348,6 +3466,47 @@ impl Orchestrator {
     }
 
     Ok(report)
+  }
+}
+
+/// Closes runs the previous session left open.
+///
+/// A run is open while it has written nothing but `info` rows, and the UI shows it "in progress"
+/// for as long as that lasts. Only safe at startup, when nothing can still be in flight: a run with
+/// no closing row by then belongs to a process that exited mid-flow, and will never get one.
+fn close_interrupted_runs(db: &Database) {
+  let Ok(events) = db.list_activity_events(ACTIVITY_HISTORY_LIMIT) else {
+    return;
+  };
+
+  // Newest first, so the first row seen for a run carries its node and category.
+  let mut runs: Vec<(String, &ActivityEvent)> = Vec::new();
+  let mut closed: HashSet<&str> = HashSet::new();
+  for event in &events {
+    let Some(correlation_id) = event.correlation_id.as_deref() else {
+      continue;
+    };
+    if event.outcome != "info" || event.stage.ends_with(".cancelled") {
+      closed.insert(correlation_id);
+    }
+    if !runs.iter().any(|(id, _)| id == correlation_id) {
+      runs.push((correlation_id.to_string(), event));
+    }
+  }
+
+  for (correlation_id, event) in runs {
+    if closed.contains(correlation_id.as_str()) {
+      continue;
+    }
+    let _ = db.append_activity_event(&NewActivityEvent {
+      node_id: event.node_id.as_deref(),
+      provider_slug: event.provider_slug.as_deref(),
+      category: &event.category,
+      stage: &format!("{}.interrupted", event.category),
+      outcome: "error",
+      correlation_id: Some(&correlation_id),
+      detail: "The app closed before this finished.",
+    });
   }
 }
 
@@ -5933,7 +6092,7 @@ mod tests {
     let orchestrator = Orchestrator::with_ip_probe(StaticIpProbe::none());
 
     // Claim the slot the way an in-flight connect would, then attempt a second.
-    assert!(orchestrator.try_claim_connect("tunnel-h"));
+    assert!(orchestrator.try_claim_connect("tunnel-h", "node-h", "run-first"));
 
     let result = orchestrator.connect_tunnel(
       &wireguard,
@@ -5952,7 +6111,174 @@ mod tests {
 
     // Releasing the slot lets a later connect proceed, so the guard cannot wedge connect for good.
     orchestrator.release_connect("tunnel-h");
-    assert!(orchestrator.try_claim_connect("tunnel-h"));
+    assert!(orchestrator.try_claim_connect("tunnel-h", "node-h", "run-second"));
+  }
+
+  /// Stands in for the user clicking Cancel while the connect is parked on its UAC prompt, then
+  /// approving the prompt anyway: the cancel lands mid-import, and the import then succeeds.
+  struct CancelDuringImportRunner {
+    inner: MockWireGuardRunner,
+    orchestrator: Orchestrator,
+    db: Database,
+    tunnel_id: &'static str,
+  }
+
+  impl CommandRunner for CancelDuringImportRunner {
+    fn run(
+      &self,
+      program: &str,
+      args: &[&str],
+      stdin: Option<&str>,
+    ) -> Result<CommandOutput, CommandExecError> {
+      if args.contains(&"/installtunnelservice") {
+        self
+          .orchestrator
+          .cancel_pending_connect(&self.db, self.tunnel_id, "cancelled at the Windows prompt");
+      }
+      self.inner.run(program, args, stdin)
+    }
+  }
+
+  fn run_stages(db: &Database, correlation_id: &str) -> Vec<String> {
+    db.list_activity_events(50)
+      .expect("query should succeed")
+      .into_iter()
+      .filter(|event| event.correlation_id.as_deref() == Some(correlation_id))
+      .map(|event| event.stage)
+      .collect()
+  }
+
+  /// The stuck entry this fixes: a connect parked on an unanswered UAC prompt never returned, so its
+  /// run stayed "in progress" after Roll back, Disconnect and Destroy. Cancel closes it on the spot,
+  /// and a late approval must neither reopen the run nor leave the cancelled tunnel holding the
+  /// default route.
+  #[test]
+  fn a_connect_cancelled_at_the_prompt_is_closed_and_a_late_approval_is_torn_down() {
+    let db = Database::new(test_db_path("connect_cancelled_mid_import"));
+    db.run_migrations().expect("migrations should succeed");
+    let secure_storage = SecureStorage::dev_mock();
+    setup_ready_node_and_tunnel(&db, &secure_storage);
+
+    let orchestrator = Orchestrator::new();
+    let inner = MockWireGuardRunner::missing_service();
+    let runner = Arc::new(CancelDuringImportRunner {
+      inner: inner.clone(),
+      orchestrator: orchestrator.clone(),
+      db: db.clone(),
+      tunnel_id: "tunnel-ready",
+    });
+    let wireguard = WireGuardManager::with_runner(runner);
+
+    let result = orchestrator.connect_tunnel(
+      &wireguard,
+      &db,
+      &secure_storage,
+      &ConnectTunnelRequest {
+        node_id: "node-ready".to_string(),
+        tunnel_id: "tunnel-ready".to_string(),
+      },
+    );
+
+    let events = db.list_activity_events(50).expect("query should succeed");
+    let connect_run = events
+      .iter()
+      .find(|event| event.stage == "connect.start")
+      .and_then(|event| event.correlation_id.clone())
+      .expect("the connect should have started a run");
+    let stages = run_stages(&db, &connect_run);
+    let unregister_calls = inner.state.lock().expect("lock should work").unregister_calls;
+    let tunnel = db
+      .get_tunnel("tunnel-ready")
+      .expect("query should succeed")
+      .expect("tunnel should exist");
+
+    assert!(
+      matches!(result, Err(OrchestratorError::InvalidState { .. })),
+      "a cancelled connect must not report success, got {result:?}"
+    );
+    assert!(stages.contains(&"connect.cancelled".to_string()), "stages: {stages:?}");
+    assert!(!stages.contains(&"connect.ready".to_string()), "stages: {stages:?}");
+    assert!(!stages.contains(&"connect.error".to_string()), "stages: {stages:?}");
+    assert!(
+      events.iter().any(|event| event.stage == "disconnect.completed"),
+      "the late-approved tunnel should be torn down through disconnect"
+    );
+    assert_eq!(unregister_calls, 1, "the late-approved service must be unregistered");
+    assert_eq!(tunnel.status, TunnelStatus::Disconnected);
+  }
+
+  #[test]
+  fn a_disconnect_closes_the_run_of_a_connect_still_in_flight() {
+    let (db, secure_storage) = health_fixture("disconnect_closes_pending_connect");
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    let orchestrator = Orchestrator::with_ip_probe(StaticIpProbe::none());
+    assert!(orchestrator.try_claim_connect("tunnel-h", "node-h", "run-pending"));
+
+    orchestrator
+      .disconnect_tunnel(
+        &wireguard,
+        &db,
+        &secure_storage,
+        &DisconnectTunnelRequest {
+          node_id: "node-h".to_string(),
+          tunnel_id: "tunnel-h".to_string(),
+        },
+      )
+      .expect("disconnect should succeed");
+
+    assert_eq!(run_stages(&db, "run-pending"), vec!["connect.cancelled".to_string()]);
+    // Marked, not freed: the blocked connect still owns the slot and frees it on its way out.
+    assert!(orchestrator.release_connect("tunnel-h"), "the pending connect should read as cancelled");
+  }
+
+  /// Roll back before a tunnel id is known, and Destroy, both go node-wide.
+  #[test]
+  fn a_node_wide_teardown_closes_every_pending_connect_on_that_node_only() {
+    let (db, _secure_storage) = health_fixture("force_disconnect_closes_pending_connect");
+    let wireguard = WireGuardManager::with_runner(Arc::new(MockWireGuardRunner::running()));
+    let orchestrator = Orchestrator::with_ip_probe(StaticIpProbe::none());
+    assert!(orchestrator.try_claim_connect("tunnel-h", "node-h", "run-this-node"));
+    assert!(orchestrator.try_claim_connect("tunnel-other", "node-other", "run-other-node"));
+
+    orchestrator
+      .force_disconnect_node_service(&wireguard, &db, "node-h")
+      .expect("force disconnect should succeed");
+
+    assert_eq!(run_stages(&db, "run-this-node"), vec!["connect.cancelled".to_string()]);
+    assert!(run_stages(&db, "run-other-node").is_empty(), "another node's connect must be left alone");
+  }
+
+  #[test]
+  fn startup_closes_runs_the_previous_session_left_open() {
+    let db = watch_test_db("startup_closes_open_runs");
+    let record = |correlation_id: &'static str, stage: &str, outcome: &str| {
+      ActivityRecorder::new(&db, "connect", Some(correlation_id))
+        .for_node("node-a")
+        .record(stage, outcome, "detail");
+    };
+    record("run-open", "connect.start", "info");
+    record("run-done", "connect.start", "info");
+    record("run-done", "connect.ready", "success");
+    record("run-cancelled", "connect.start", "info");
+    record("run-cancelled", "connect.cancelled", "info");
+
+    close_interrupted_runs(&db);
+    // A second startup must not stack another closing row on the one just written.
+    close_interrupted_runs(&db);
+
+    let open = run_stages(&db, "run-open");
+    assert_eq!(open.iter().filter(|stage| *stage == "connect.interrupted").count(), 1, "stages: {open:?}");
+    assert!(!run_stages(&db, "run-done").iter().any(|stage| stage.ends_with(".interrupted")));
+    assert!(!run_stages(&db, "run-cancelled").iter().any(|stage| stage.ends_with(".interrupted")));
+
+    let closing = db
+      .list_activity_events(50)
+      .expect("query should succeed")
+      .into_iter()
+      .find(|event| event.stage == "connect.interrupted")
+      .expect("the open run should be closed");
+    assert_eq!(closing.outcome, "error");
+    assert_eq!(closing.node_id.as_deref(), Some("node-a"));
   }
 
   #[test]

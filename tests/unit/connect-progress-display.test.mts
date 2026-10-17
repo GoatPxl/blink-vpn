@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  awaitingWindowsPermission,
   deriveConnectStep,
   describeConnectProgress,
   formatElapsedMs,
+  outageElapsedSeconds,
+  serviceHasStarted,
 } from "../../src/lib/connect-progress-display.ts";
 import type { TunnelPhaseSnapshot } from "../../src/lib/tauri.ts";
 
@@ -130,5 +133,33 @@ describe("formatElapsedMs", () => {
   it("clamps a clock that moved backwards rather than rendering a negative timer", () => {
     const start = 1_000_000;
     assert.equal(formatElapsedMs(start, start - 5_000), "0:00");
+  });
+});
+
+describe("waiting for Windows permission", () => {
+  it("holds until the service is seen to start", () => {
+    assert.equal(awaitingWindowsPermission({ serviceStartedAt: null }), true);
+    assert.equal(awaitingWindowsPermission({ serviceStartedAt: 1_000 }), false);
+  });
+
+  // Before the prompt is approved there is no service, which reads as stopped and disconnected.
+  it("does not treat a missing service as started", () => {
+    assert.equal(serviceHasStarted(snapshot({ phase: "disconnected", service_state: "stopped" })), false);
+    assert.equal(serviceHasStarted(snapshot({ phase: "disconnected", service_state: "unknown" })), false);
+  });
+
+  it("treats a starting or running service as started", () => {
+    assert.equal(serviceHasStarted(snapshot({ phase: "disconnected", service_state: "starting" })), true);
+    assert.equal(serviceHasStarted(snapshot({ phase: "connecting", service_state: "running" })), true);
+    assert.equal(serviceHasStarted(snapshot({ phase: "stalled", service_state: "running" })), true);
+  });
+
+  // The reported bug: an unanswered prompt counted past seven minutes of "Internet pauses for ~15 s".
+  it("counts the outage from the service starting, not from the click", () => {
+    const clickedAt = 0;
+    const approvedAt = 7 * 60 * 1000;
+    assert.equal(outageElapsedSeconds({ serviceStartedAt: null }, approvedAt), 0);
+    assert.equal(outageElapsedSeconds({ serviceStartedAt: approvedAt }, approvedAt + 12_400), 12);
+    assert.notEqual(outageElapsedSeconds({ serviceStartedAt: approvedAt }, approvedAt + 12_400), Math.floor((approvedAt + 12_400 - clickedAt) / 1000));
   });
 });

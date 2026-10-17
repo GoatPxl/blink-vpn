@@ -104,7 +104,7 @@ code, so none needs a migration:
   pauses for about 15 seconds. Its "don't explain this again" box is ticked by default, so it is
   shown once unless the user chooses otherwise.
 - `first_connect_done` (off): set when a connect first reaches `connected`. Until then the HOLD ON
-  screen lists the connect steps and offers Roll back at 45 s.
+  screen lists the connect steps and offers Roll back 45 s after the tunnel service starts.
 - `favourites` (empty, `provider_id:region` keys) and `game_high_score` (0): interface state that
   must survive a restart.
 
@@ -159,7 +159,15 @@ that redirect, since a static export has no server to answer a redirect.
 From "Build" to "Secure", Home shows one waiting screen (`wait-screen.tsx`) that stays mounted: a
 status strip — BUILDING (clock against ~2:00, block bar, Cancel build), then HOLD ON (countdown,
 block bar, Roll back, why the internet is paused), then SECURE with Done — above an optional game,
-Goat Invaders. The game is a pure, seeded reducer (`src/lib/game/invaders.ts`) drawn on a canvas;
+Goat Invaders. HOLD ON opens as "Waiting for Windows permission", with no clock and an immediate
+Cancel, until the tunnel service is seen running: before the UAC prompt is answered nothing is
+routed and the internet is fine, so the outage clock, stall copy and Roll back countdown count from
+the service starting (`ConnectAttempt.serviceStartedAt`), not from the click. Cancel there calls
+`cancel_connect`, which only closes the connect's activity entry — a disconnect would stack a second
+UAC prompt on the open one — and a prompt approved after that is undone by the connect on its way
+out. The game is held by a `paused` prop for as long as Windows may be asking (the explainer, the
+permission wait, a roll back), because the secure desktop does not reliably blur the window, and it
+waits for a click before resuming. The game is a pure, seeded reducer (`src/lib/game/invaders.ts`) drawn on a canvas;
 goats march as a herd, and one at a time paws (a visible warning) then charges at the player. Its
 state lives in a session store (`src/lib/game/session.ts`), so the same game carries on from the
 build through the handshake and survives a trip to another view; once secure it continues until
