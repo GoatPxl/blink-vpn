@@ -14,10 +14,12 @@ export default function DashboardSettingsPage() {
     connectTunnel,
     deleteProvider,
     dockerDevEnabled,
+    launchAtLogin,
     nodes,
     providers,
     resumeProvider,
     saveAppPreferences,
+    saveLaunchAtLogin,
     saveToken,
     saveTunnelSettings,
     suspendProvider,
@@ -66,6 +68,8 @@ export default function DashboardSettingsPage() {
       reconnecting={connectAttempt !== null}
       appPreferences={appPreferences}
       onSaveAppPreferences={saveAppPreferences}
+      launchAtLogin={launchAtLogin}
+      onSaveLaunchAtLogin={saveLaunchAtLogin}
     />
   );
 }

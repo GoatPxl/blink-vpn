@@ -57,6 +57,8 @@ export function SettingsView({
   reconnecting,
   appPreferences,
   onSaveAppPreferences,
+  launchAtLogin,
+  onSaveLaunchAtLogin,
 }: {
   dockerDevEnabled: boolean;
   providers: ProviderRecord[];
@@ -77,6 +79,9 @@ export function SettingsView({
   reconnecting: boolean;
   appPreferences: AppPreferences | null;
   onSaveAppPreferences: (preferences: AppPreferences) => Promise<boolean>;
+  /** Null until read from the registry, or when it could not be. */
+  launchAtLogin: boolean | null;
+  onSaveLaunchAtLogin: (enabled: boolean) => Promise<boolean>;
 }) {
   const [keyModalProviderId, setKeyModalProviderId] = useState<string | null>(null);
   const [openMenuProviderId, setOpenMenuProviderId] = useState<string | null>(null);
@@ -227,7 +232,7 @@ export function SettingsView({
         </div>
       </Panel>
 
-      <Panel title="Window" description="How Blink behaves when you close its window.">
+      <Panel title="Window" description="How Blink starts, and what closing its window does.">
         <div className="flex items-start justify-between gap-6">
           <div>
             <div className="text-sm font-medium text-bone">Close to system tray</div>
@@ -244,6 +249,23 @@ export function SettingsView({
               if (appPreferences) {
                 void onSaveAppPreferences({ ...appPreferences, close_to_tray: checked });
               }
+            }}
+          />
+        </div>
+        <div className="mt-5 flex items-start justify-between gap-6 border-t-2 border-line pt-5">
+          <div>
+            <div className="text-sm font-medium text-bone">Launch at sign-in</div>
+            <p className="mt-1 text-sm text-stone">
+              Start Blink in the tray when you sign in to Windows. A tunnel left connected comes back
+              at boot on its own; this brings back the tray icon and its status with it.
+            </p>
+          </div>
+          <Toggle
+            label="Launch at sign-in"
+            checked={launchAtLogin ?? false}
+            disabled={launchAtLogin === null || busyAction !== null}
+            onChange={(checked) => {
+              void onSaveLaunchAtLogin(checked);
             }}
           />
         </div>

@@ -41,6 +41,10 @@ windows-sys = { version = "0.59", features = [
   # administrator; these are ordinary interface statistics any user can read.
   "Win32_NetworkManagement_IpHelper",
   "Win32_NetworkManagement_Ndis",
+  # Launch at sign-in: one value under HKCU's Run key (see backend/autostart.rs). Chosen over
+  # `tauri-plugin-autostart`, which pulls in `auto-launch` and `winreg` for the same three registry
+  # calls and cannot see Task Manager's StartupApproved flag.
+  "Win32_System_Registry",
 ] }
 # Key generation only. The interface runtime from this crate, and the `wireguard-nt` driver
 # bindings that went with it, were removed — see backend/wireguard/mod.rs for why. Tunnels are

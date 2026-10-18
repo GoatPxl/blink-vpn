@@ -12,6 +12,7 @@
 use serde::Serialize;
 
 use crate::backend::app_preferences::PreferencesError;
+use crate::backend::autostart::AutostartError;
 use crate::backend::db::DbError;
 use crate::backend::logging;
 use crate::backend::orchestrator::{OrchestratorError, UserFacingErrorKind};
@@ -181,6 +182,16 @@ impl From<tauri::Error> for CommandError {
       CommandErrorKind::Dependency,
       format!("The desktop shell rejected the request: {error}"),
       "Restart Blink and retry.",
+    )
+  }
+}
+
+impl From<AutostartError> for CommandError {
+  fn from(error: AutostartError) -> Self {
+    Self::new(
+      CommandErrorKind::Dependency,
+      error.to_string(),
+      "Retry, or turn Blink on or off under Task Manager > Startup apps instead.",
     )
   }
 }

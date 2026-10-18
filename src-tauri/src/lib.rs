@@ -20,8 +20,11 @@ pub fn run() {
   tauri::Builder::default()
     // Must be the first plugin registered: it decides, before anything else starts, whether this
     // process is a relaunch that should hand off to the window already running in the tray.
-    .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-      tray::show_main_window(app);
+    .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+      // A sign-in launch never means "show me": only a launch the user made does.
+      if !is_autostart_launch(&argv) {
+        tray::show_main_window(app);
+      }
     }))
     // Native toasts while the window is hidden in the tray. Sent from the frontend, which knows
     // what happened; see `notification-bridge.tsx`.
@@ -70,6 +73,14 @@ pub fn run() {
         .close_to_tray;
       app.manage(CloseToTray::new(close_to_tray));
       tray::init(app.handle())?;
+
+      // The window is created hidden (tauri.conf.json) so a sign-in launch stays in the tray
+      // without flashing on screen first. Any other launch shows it straight away.
+      let args: Vec<String> = std::env::args().collect();
+      if !is_autostart_launch(&args) {
+        tray::show_main_window(app.handle());
+      }
+      backend::autostart::refresh_path();
 
       match backend.orchestrator.reconcile_startup(
         &backend.provider,
@@ -137,6 +148,8 @@ pub fn run() {
       commands::system::set_tunnel_settings,
       commands::system::get_app_preferences,
       commands::system::set_app_preferences,
+      commands::system::get_launch_at_login,
+      commands::system::set_launch_at_login,
       commands::system::list_tunnels_for_node,
       commands::system::destroy_vpn_node,
       commands::system::force_cleanup_vpn_node,
@@ -200,4 +213,26 @@ fn summarize_path_for_log(path_value: Option<&str>) -> String {
     entries.len(),
     wireguard_entries.join("|")
   )
+}
+
+/// Windows passes `--autostart` only to the launch it makes at sign-in (backend/autostart.rs).
+fn is_autostart_launch(args: &[String]) -> bool {
+  args.iter().skip(1).any(|arg| arg == backend::autostart::AUTOSTART_ARG)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn args(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| value.to_string()).collect()
+  }
+
+  #[test]
+  fn only_the_sign_in_flag_marks_an_autostart_launch() {
+    assert!(is_autostart_launch(&args(&["blink.exe", "--autostart"])));
+    assert!(!is_autostart_launch(&args(&["blink.exe"])));
+    assert!(!is_autostart_launch(&args(&["--autostart"])), "argv[0] is the program, not a flag");
+    assert!(!is_autostart_launch(&args(&["blink.exe", "--autostart=no"])));
+  }
 }

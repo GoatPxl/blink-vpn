@@ -570,6 +570,19 @@ export async function setAppPreferences(preferences: AppPreferences): Promise<Ap
   return invokeCommand<AppPreferences>("set_app_preferences", { preferences });
 }
 
+/**
+ * Whether Windows will start Blink, hidden in the tray, at the next sign-in. Read from the registry
+ * each time, since Task Manager can turn it off without the app knowing. Off unless turned on.
+ */
+export async function getLaunchAtLogin(): Promise<boolean> {
+  return invokeCommand<boolean>("get_launch_at_login");
+}
+
+/** Resolves with the state read back after the change, which is what Windows will act on. */
+export async function setLaunchAtLogin(enabled: boolean): Promise<boolean> {
+  return invokeCommand<boolean>("set_launch_at_login", { enabled });
+}
+
 export async function createVpnNode(params: {
   nodeId: string;
   providerId: string;

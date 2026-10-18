@@ -16,6 +16,7 @@ export type DashboardBusyAction =
   // removed in migration 0014 and referenced by nothing since.
   | "save-tunnel-settings"
   | "save-app-preferences"
+  | "save-launch-at-login"
   | "save-token"
   | "save-docker-token"
   | "validate-token"

@@ -143,6 +143,25 @@ handler runs on the event-loop thread, so it reads a cached `CloseToTray` flag r
 Exiting never touches a connected tunnel: it is a Windows service and outlives the app, the same as
 before the tray existed.
 
+**Launch at sign-in** (off by default, Settings → Window) is a `Blink` value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` running `"<exe>" --autostart`
+(`backend/autostart.rs`, `get_launch_at_login` / `set_launch_at_login`). HKCU needs no elevation.
+The registry is the source of truth, not `app_settings`: Task Manager's Startup apps page disables
+an entry by writing a flag under `Explorer\StartupApproved\Run` without touching `Run`, so a stored
+copy would drift. Reads honour that flag; turning the switch on clears it.
+
+The main window is created hidden (`"visible": false` in `tauri.conf.json`) and `setup` shows it
+unless the process was started with `--autostart`, so a sign-in launch sits in the tray without
+flashing a window first. A later launch from the Start menu reaches the single-instance callback,
+which shows the window; one carrying `--autostart` does not. On every launch, an existing entry is
+re-pointed at the running executable (`autostart::refresh_path`) so it survives an update or a
+reinstall elsewhere; a missing or Task-Manager-disabled entry is left as it is. The NSIS uninstaller
+removes both values (`src-tauri/windows/hooks.nsh`), so an uninstalled app leaves no dead entry.
+
+A sign-in launch connects nothing. A tunnel left connected is an auto-start service that returns with
+Windows by itself and `reconcile_startup` adopts it; connecting from the app would mean a UAC prompt
+the user did not ask for.
+
 The window is undecorated (`decorations: false`). The frontend draws its own 36px titlebar
 (`src/components/shell/titlebar.tsx`) with a drag region and minimize, maximize and close buttons;
 `capabilities/default.json` grants exactly the window permissions those need. Close calls the

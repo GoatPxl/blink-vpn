@@ -251,6 +251,10 @@ Keys:
   (trimmed, non-blank, at most 40 characters, no case-insensitive duplicates); a stored value that
   fails is treated as empty.
 
+Launch at sign-in is deliberately **not** a key here. It lives in the registry (`Run` plus Task
+Manager's `StartupApproved` flag), which Windows and Task Manager can change without the app; see
+`backend/autostart.rs`.
+
 The table is seeded empty. It previously held `wireguard_connection_mode`, deleted by migration 0014
 along with the connection-mode toggle.
 

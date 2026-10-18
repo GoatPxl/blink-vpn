@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::backend::Backend;
 use crate::backend::app_preferences::{self, AppPreferences, CloseToTray};
+use crate::backend::autostart;
 use crate::backend::process::no_window_command;
 use crate::commands::error::{CommandError, CommandErrorKind};
 use crate::backend::db::{Database, ProviderRecord, ProviderStatus};
@@ -613,6 +614,25 @@ pub async fn set_app_preferences(
     // restart would load.
     app.state::<CloseToTray>().set(stored.close_to_tray);
     Ok(stored)
+  })
+  .await
+}
+
+/// Whether Windows will start Blink, hidden in the tray, at the next sign-in.
+///
+/// Read from the registry on every call rather than stored with the other preferences: Task
+/// Manager can turn the entry off behind the app's back.
+#[tauri::command]
+pub async fn get_launch_at_login() -> Result<bool, CommandError> {
+  run_blocking(|| autostart::is_enabled().map_err(CommandError::from)).await
+}
+
+/// Adds or removes the startup entry and returns the state read back from the registry.
+#[tauri::command]
+pub async fn set_launch_at_login(enabled: bool) -> Result<bool, CommandError> {
+  run_blocking(move || {
+    autostart::set_enabled(enabled)?;
+    autostart::is_enabled().map_err(CommandError::from)
   })
   .await
 }

@@ -26,6 +26,8 @@ import {
   setTunnelSettings as setTunnelSettingsCommand,
   getAppPreferences,
   setAppPreferences as setAppPreferencesCommand,
+  getLaunchAtLogin,
+  setLaunchAtLogin as setLaunchAtLoginCommand,
   getDiagnosticsBundle,
   getHealthPanelData,
   getTunnelPhase,
@@ -302,6 +304,10 @@ type DashboardContextValue = {
    * of interface state (favourites, the game's best score) that must not freeze the window.
    */
   updateAppPreferences: (patch: Partial<AppPreferences>) => Promise<void>;
+  /** Whether Windows starts Blink at sign-in; null until read, or if the registry could not be read. */
+  launchAtLogin: boolean | null;
+  /** Resolves true when the change was applied. */
+  saveLaunchAtLogin: (enabled: boolean) => Promise<boolean>;
   /** Marks the running build to be deleted as soon as the provider finishes creating it. */
   requestCancelBuild: () => void;
   /** The pre-connect explainer, while it waits for an answer. */
@@ -391,6 +397,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [healthUpdatedAt, setHealthUpdatedAt] = useState<number | null>(null);
   const [tunnelSettings, setTunnelSettings] = useState<TunnelSettings | null>(null);
   const [appPreferences, setAppPreferencesState] = useState<AppPreferences | null>(null);
+  const [launchAtLogin, setLaunchAtLoginState] = useState<boolean | null>(null);
   const [uacPrompt, setUacPrompt] = useState<UacPrompt | null>(null);
   const [pendingRemoval, setPendingRemoval] = useState<PendingRemoval | null>(null);
   const [throughputSamples, setThroughputSamples] = useState<ThroughputSample[]>([]);
@@ -683,6 +690,30 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   }, [handleError]);
 
+  // Read outside the main dashboard load: a registry that cannot be read should cost one switch on
+  // the settings page, not the whole dashboard.
+  const refreshLaunchAtLogin = useCallback(async () => {
+    try {
+      setLaunchAtLoginState(await getLaunchAtLogin());
+    } catch (error) {
+      setLaunchAtLoginState(null);
+      handleError(error);
+    }
+  }, [handleError]);
+
+  const saveLaunchAtLogin = useCallback(async (enabled: boolean) => {
+    setBusyAction("save-launch-at-login");
+    try {
+      setLaunchAtLoginState(await setLaunchAtLoginCommand(enabled));
+      return true;
+    } catch (error) {
+      handleError(error);
+      return false;
+    } finally {
+      setBusyAction(null);
+    }
+  }, [handleError]);
+
   const updateAppPreferences = useCallback((patch: Partial<AppPreferences>) => {
     const write = preferencesWriteRef.current.then(async () => {
       try {
@@ -844,6 +875,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       // Rides along with the dashboard refresh rather than running its own timer; the install
       // state only changes when the user installs or repairs WireGuard.
       void refreshWireGuardReadiness();
+      void refreshLaunchAtLogin();
       setRecovery(null);
 
       const preferredExists = preferredSelectedNodeId
@@ -875,7 +907,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     } finally {
       setBusyAction(null);
     }
-  }, [handleError, loadNodeDetails, refreshProviderAccessStatus, refreshWireGuardReadiness]);
+  }, [handleError, loadNodeDetails, refreshLaunchAtLogin, refreshProviderAccessStatus, refreshWireGuardReadiness]);
 
   /// Name an unclaimed slot so it becomes a device.
   const claimDevice = useCallback(
@@ -2287,6 +2319,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     appPreferences,
     saveAppPreferences,
     updateAppPreferences,
+    launchAtLogin,
+    saveLaunchAtLogin,
     requestCancelBuild,
     moveTo,
     uacPrompt,

@@ -68,8 +68,10 @@ Provider adapters currently included:
 | `set_current_node_id` | `node_id` (nullable) | `void` | Sets or clears the default node; rejects an unknown id |
 | `get_tunnel_settings` | none | `TunnelSettings` | DNS server and keepalive used when a tunnel next starts |
 | `set_tunnel_settings` | `dns_server` (nullable), `keepalive_seconds` | `void` | Validates before storing; a non-IP DNS value is rejected with `invalid-input` |
-| `get_app_preferences` | none | `AppPreferences` | `close_to_tray` (default `true`) and `mobile_devices` (default empty) |
+| `get_app_preferences` | none | `AppPreferences` | `close_to_tray` (default `true`), `mobile_devices` (default empty), `auto_connect_after_provision` (default `true`), `first_connect_done` (default `false`), `explain_uac` (default `true`), `favourites` (default empty), `game_high_score` (default `0`) |
 | `set_app_preferences` | `preferences: AppPreferences` | `AppPreferences` | Validates and stores the whole struct, returning it as stored (device names trimmed, favourites trimmed and deduplicated). One struct argument, so adding a preference does not change the signature. `close_to_tray` applies to the running window immediately; `mobile_devices` to servers created afterwards. An unusable device list or a favourite that is not `provider_id:region` is rejected with `invalid-input`, and nothing is stored |
+| `get_launch_at_login` | none | `boolean` | Whether Windows will start Blink, hidden in the tray, at the next sign-in. Read from the registry on every call — the `Run` value must exist and Task Manager's `StartupApproved` flag must not mark it disabled. Not stored in SQLite |
+| `set_launch_at_login` | `enabled` | `boolean` | Writes or removes the HKCU `Run` value (`"<exe>" --autostart`) and clears Task Manager's flag, then returns the state read back. No elevation. A registry failure is `dependency` |
 | `list_providers` | none | `ProviderRecord[]` | Local provider records, including `last_validation_status` / `last_validated_at` from the last key check |
 | `list_tunnels_for_node` | `node_id` | `TunnelRecord[]` | Local tunnels for node |
 | `get_tunnel_phase` | `node_id`, `tunnel_id` | `TunnelPhaseSnapshot` | How far along a connect is. Cheap enough to poll at 1 Hz — see below |
