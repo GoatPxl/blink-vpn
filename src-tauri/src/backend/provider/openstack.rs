@@ -203,7 +203,7 @@ impl OpenStackApiClient {
     }
   }
 
-  pub fn authenticate(
+  fn authenticate(
     &self,
     credentials: &OpenStackCredentials,
   ) -> Result<CachedSession, OpenStackError> {
