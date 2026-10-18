@@ -1,0 +1,25 @@
+# Rebuilds goatpxl.com when a release is published, so /blink/ picks up the
+# new download link and notes. CF_DEPLOY_HOOK is a Cloudflare Pages deploy
+# hook URL for the goatpxl site (production branch).
+name: notify-site
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger goatpxl.com rebuild
+        env:
+          HOOK: ${{ secrets.CF_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::CF_DEPLOY_HOOK secret is not set"
+            exit 1
+          fi
+          curl -fsS -X POST "$HOOK"
